@@ -1,3 +1,8 @@
+# Rust & Cargo
+target/
+engine/core-rs/target/
+Cargo.lock
+
 # Gradle & JVM
 .gradle/
 build/
