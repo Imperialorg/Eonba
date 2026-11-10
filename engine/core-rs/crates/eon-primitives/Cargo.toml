@@ -1,0 +1,9 @@
+[package]
+name = "eon-primitives"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"], optional = true }

@@ -1,0 +1,11 @@
+[package]
+name = "eon-uniffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+eon-primitives = { path = "../eon-primitives" }
+eon-kernel = { path = "../eon-kernel" }
+eon-voice = { path = "../eon-voice" }

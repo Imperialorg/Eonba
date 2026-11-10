@@ -29,3 +29,4 @@ Standard AI coding assistants operate as shallow text generators. They guess cod
 - EON transcends conventional chatbot coding; it functions as a world-class systems engineer, security auditor, and cyber operator.
 - Security vulnerabilities are remediated autonomously before code commits.
 - System integrity is defended at both the source and binary levels.
+

@@ -1,0 +1,10 @@
+[package]
+name = "eon-cognition"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+eon-primitives = { path = "../eon-primitives" }
+eon-kernel = { path = "../eon-kernel" }
