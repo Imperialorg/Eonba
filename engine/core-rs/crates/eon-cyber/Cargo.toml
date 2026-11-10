@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 eon-primitives = { path = "../eon-primitives" }
 eon-capability = { path = "../eon-capability" }
+

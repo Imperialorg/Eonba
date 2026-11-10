@@ -159,3 +159,4 @@ The Android application acts as EON's mobile eyes, ears, and hands:
 For desktop workstations and servers:
 - **Interactive Terminal**: Authored in Rust using `ratatui` + `crossterm`. Displays live audio wave visualizers, active DAG task graphs, and interactive slash commands (`/menu`, `/capabilities`, `/cyber`, `/mesh`).
 - **Headless Daemon**: Background service using local Named Pipes on Windows (`\\.\pipe\eon`) and Unix Domain Sockets on Linux (`/tmp/eon.sock`).
+

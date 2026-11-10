@@ -69,3 +69,4 @@ mod tests {
         assert!(t2 - t1 >= Duration::from_millis(4));
     }
 }
+

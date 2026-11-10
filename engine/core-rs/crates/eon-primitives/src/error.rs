@@ -65,3 +65,4 @@ impl fmt::Display for EonError {
 }
 
 impl std::error::Error for EonError {}
+

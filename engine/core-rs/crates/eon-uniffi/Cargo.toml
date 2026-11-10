@@ -9,3 +9,4 @@ license.workspace = true
 eon-primitives = { path = "../eon-primitives" }
 eon-kernel = { path = "../eon-kernel" }
 eon-voice = { path = "../eon-voice" }
+

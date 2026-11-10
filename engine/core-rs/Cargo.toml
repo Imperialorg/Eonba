@@ -30,3 +30,4 @@ overflow-checks = false
 opt-level = 3
 debug = true
 lto = "thin"
+
