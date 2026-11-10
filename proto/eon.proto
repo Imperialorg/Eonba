@@ -95,3 +95,4 @@ message SplitInferencePayload {
   string target_model = 3;
   bytes audio_stream_ref = 4;
 }
+

@@ -114,3 +114,4 @@ stateDiagram-v2
    - Headset plugged in / Bluetooth earphone connected $\to$ Prompts or automatically enters `Full-Duplex Voice`.
    - Android battery level drops below 15% $\to$ Automatically degrades to `Low-Power Dormant` with an unobtrusive notice card.
    - Laptop connects to untrusted Wi-Fi $\to$ Engages `Cyber Sentinel` in the background.
+
