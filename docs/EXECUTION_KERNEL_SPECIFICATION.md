@@ -2,7 +2,7 @@
 
 > **Subsystem:** EON Deterministic Execution Engine  
 > **Module:** `engine/execution-engine`  
-> **Derived from:** Vector Generation 2 Deterministic Architecture
+> **Derived from:** Vector Generation 2 Deterministic Architecture + Ciel Autonomous Execution Engine
 
 ---
 
@@ -12,7 +12,7 @@ In EON, **cognition and execution are strictly decoupled**:
 - **Cognition (Ciel)** answers: *What needs to be done?* It synthesizes human intent into a structured **Objective** and a validated **Workflow DAG**.
 - **The Execution Kernel (Vector Engine)** answers: *How can this be executed with maximum efficiency, deterministic safety, resource accounting, and crash resilience?*
 
-The Execution Kernel owns scheduling, task dispatch, atomic resource leases, event journaling, state persistence, error isolation, and crash recovery.
+The Execution Kernel owns scheduling, task dispatch, atomic resource leases, event journaling, state persistence, error isolation, saga rollbacks, and crash recovery.
 
 ---
 
@@ -185,10 +185,45 @@ graph LR
     Task4 --> Task5
 ```
 
-1. **Task 1** executes with network lease. Verifies HTTP 200 and file digest.
-2. **Task 2** reads local PDF, extracts text into structured JSON.
-3. **Task 3** runs local SLM comparison against existing policies, producing an atomic patch.
-4. **Task 4** acquires exclusive file lock on `security.json`, takes a journal snapshot, applies edit, verifies SHA-256 hash.
-5. **Task 5** runs `./gradlew testSecurityPolicy`. Verifies exit code 0.
-6. Ciel delivers the final verbal report:  
-   *"Report: Security policy updated to version 2.4 based on internal spec. All 12 validation rules verified."*
+---
+
+## 7. Epoch-Based Leases & Preemptive Saga Compensation
+
+In real human-AI pairing, **the human operator is an asynchronous, unleased entity**. The user may issue a new command or countermand an active task while a 10-step background DAG is running.
+
+### 7.1 Cognitive Epochs ($e_0, e_1, e_2$)
+- Every new user voice or text input increments the **Cognitive Epoch ID**.
+- Every submitted task carries the epoch ID under which it was authorized.
+- If a new user utterance semantically conflicts with an active background DAG:
+  1. The Cognitive Router dispatches an `EPOCH_INVALIDATED` event.
+  2. The Task Dispatcher sends a `SIGINT` / cancellation coroutine signal to running capability workers.
+  3. **Saga Compensation**: The engine executes compensating rollback actions in reverse order (e.g. restoring pre-task file snapshots, dropping temporary git branches).
+  4. All held resource leases are released before the new request is scheduled.
+
+---
+
+## 8. Speculative Shadow Sandboxes (Copy-on-Write)
+
+To satisfy the **Zero-Question Autonomous Mandate** when intent is underspecified, the kernel provides **Copy-on-Write (CoW) Shadow Sandboxes**:
+- Ambiguous multi-step mutations do not run directly on the live working directory.
+- The engine creates an instantaneous ephemeral Git worktree or overlayfs sandbox.
+- The task DAG executes entirely within the shadow sandbox.
+- Compilers, linters, and unit test suites validate the result in isolation.
+- Once verified, the changes are presented with a **Negative Acknowledgment (NACK)** window: committed to live workspace after 5 seconds unless explicitly cancelled.
+
+---
+
+## 9. Temporal State Delta Oracles (Eventual Truth Verification)
+
+Verification in dynamic environments (such as Android Accessibility or remote network services) cannot rely on static instantaneous assertions:
+- A UI button click may take 300ms to trigger a screen transition.
+- A network daemon may take 800ms to open a socket.
+
+### 9.1 Temporal Predicate Verification
+Verification is defined as a time-windowed predicate:
+$$\mathcal{P}_{\text{success}}(S) = \exists t \in [t_{\text{start}}, t_{\text{start}} + \Delta t_{\text{max}}] \text{ such that } \text{Assert}(S_t) == \text{True}$$
+
+### 9.2 Verification Tiers:
+1. **Deterministic Oracles**: Cryptographic SHA-256 hashes, AST compiler exit codes, database ACID transactions (immediate check).
+2. **Event-Driven Delta Oracles**: Android `TYPE_WINDOW_STATE_CHANGED` events, kernel socket state changes, file watcher events (checked across a bounded time window $\le 2000\text{ms}$).
+3. **Multi-Modal Visual Oracles**: When interacting with arbitrary 3rd party web apps, a visual screenshot embedding delta verifies that the screen transitioned into the expected layout regime.

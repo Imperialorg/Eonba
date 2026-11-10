@@ -25,3 +25,4 @@ Vector (Generation 2) developed a battle-tested deterministic execution architec
 - EON can execute complex 20+ step workflows reliably across reboots without corrupting user state.
 - Zero race conditions or deadlocks during parallel processing.
 - Clean separation between cognition (which formulates the DAG) and the kernel (which deterministically executes it).
+

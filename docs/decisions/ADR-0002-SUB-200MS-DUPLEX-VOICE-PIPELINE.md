@@ -24,3 +24,4 @@ Total latency: 2,500ms - 6,000ms. This latency destroys the illusion of an omnis
 - Time-to-First-Audio (TTFA) drops to **< 200ms** (P99 < 300ms), exceeding human conversational response times.
 - Natural, full-duplex conversations with instantaneous interruption capability.
 - 100% offline local voice processing protects user privacy and eliminates cloud API latency.
+

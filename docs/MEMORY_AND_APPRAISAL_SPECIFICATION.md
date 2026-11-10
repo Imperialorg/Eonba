@@ -106,3 +106,4 @@ For semantic similarity lookups across local files, documents, and past conversa
 3. **User-Controlled Forgetting & Correction**:
    - The user can say *"Forget my calendar preferences"* or *"Correct that: our staging port is 8080, not 8000"*.
    - EON updates or deletes the corresponding graph node immediately and verifies the change in the journal.
+

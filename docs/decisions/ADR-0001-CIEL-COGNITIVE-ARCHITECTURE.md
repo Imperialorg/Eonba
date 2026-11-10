@@ -30,3 +30,4 @@ We require a cognitive architecture that operationalizes this archetype for the 
 - The assistant feels immediate, hyper-competent, and calm.
 - Coding agents implementing EON have unambiguous rules for handling user requests without pausing for approval.
 - High-risk operations remain securely gated while low-risk workflows run with maximum speed and autonomy.
+

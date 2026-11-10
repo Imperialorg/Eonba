@@ -130,3 +130,4 @@ Before considering an implementation step complete, the agent must verify:
 - [ ] No regression in latency benchmarks or contracts.
 - [ ] Documentation / README status is updated.
 - [ ] Proceed immediately to the next task in `docs/ROADMAP_AND_IMPLEMENTATION_PLAN.md`.
+

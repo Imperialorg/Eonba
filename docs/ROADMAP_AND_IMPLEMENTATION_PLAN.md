@@ -17,9 +17,11 @@
     - `:eon-resource-management`
     - `:eon-execution-engine`
     - `:eon-capability-fabric`
+    - `:eon-cyber-core`
+    - `:eon-mesh-network`
     - `:eon-ciel-cognition`
     - `:eon-local-capability-providers`
-  - **Acceptance Criteria**: `./gradlew projects` succeeds with all 8 modules recognized.
+  - **Acceptance Criteria**: `./gradlew projects` succeeds with all 10 modules recognized.
 
 - [ ] **Task 0.2: Strongly Typed Identifiers (ULID)**
   - **Module**: `:eon-kernel-primitives`
@@ -52,7 +54,7 @@
 - [ ] **Task 1.3: Identity & Authorization Model**
   - **Module**: `:eon-foundation-services`
   - **Files**: `eon/foundation/identity/IdentityService.kt`, `PermissionPolicy.kt`
-  - **Requirements**: Ownership identities (System, User, EphemeralAgent). Permission sets (`READ_WORKSPACE`, `MUTATE_WORKSPACE`, `EXECUTE_PROCESS`, `NETWORK_ACCESS`, `DEVICE_CONTROL`).
+  - **Requirements**: Ownership identities (System, User, EphemeralAgent). Permission sets (`READ_WORKSPACE`, `MUTATE_WORKSPACE`, `EXECUTE_PROCESS`, `CYBER_AUDIT`, `NETWORK_ACCESS`, `DEVICE_CONTROL`).
   - **Unit Tests**: `IdentityServiceTest.kt`.
 
 ---
@@ -81,17 +83,17 @@
   - **Requirements**: Immutable data models. Topological acyclic DAG validation in `Workflow` constructor.
   - **Unit Tests**: `WorkflowDagValidationTest.kt` verifying cycle detection, orphan task detection, and topological ordering.
 
-- [ ] **Task 3.2: Resource-Aware Task Scheduler**
+- [ ] **Task 3.2: Resource-Aware Task Scheduler with Epoch Leases**
   - **Module**: `:eon-execution-engine`
-  - **Files**: `eon/execution/scheduling/TaskScheduler.kt`, `ResourceAwareTaskScheduler.kt`
-  - **Requirements**: Analyzes DAG task dependencies; dispatches tasks whose dependencies are `COMPLETED` and whose required resource leases are available.
+  - **Files**: `eon/execution/scheduling/TaskScheduler.kt`, `ResourceAwareTaskScheduler.kt`, `CognitiveEpochManager.kt`
+  - **Requirements**: Analyzes DAG task dependencies; dispatches tasks with verified epoch tokens and resource leases.
   - **Unit Tests**: `TaskSchedulerTest.kt` testing parallel multi-branch execution and dependency gating.
 
-- [ ] **Task 3.3: Deterministic Task Dispatcher & Execution Engine**
+- [ ] **Task 3.3: Deterministic Task Dispatcher & Saga Reconciler**
   - **Module**: `:eon-execution-engine`
-  - **Files**: `eon/execution/engine/DeterministicExecutionEngine.kt`, `TaskDispatcher.kt`
-  - **Requirements**: Coordinates task dispatch to capability workers. Journals every state transition (`SCHEDULED`, `RUNNING`, `VERIFYING`, `COMPLETED`).
-  - **Unit Tests**: `DeterministicExecutionEngineTest.kt`.
+  - **Files**: `eon/execution/engine/DeterministicExecutionEngine.kt`, `TaskDispatcher.kt`, `SagaCompensationWorker.kt`
+  - **Requirements**: Coordinates task dispatch. Emits `EPOCH_INVALIDATED` interrupts on user countermands, executing reverse-order compensating rollbacks.
+  - **Unit Tests**: `DeterministicExecutionEngineTest.kt`, `SagaCompensationTest.kt`.
 
 - [ ] **Task 3.4: Crash Recovery Reconciler (`LocalExecutionRecoveryWorker`)**
   - **Module**: `:eon-execution-engine`
@@ -101,7 +103,7 @@
 
 ---
 
-## Phase 4: Capability Fabric & Tool Runtime (Level 4)
+## Phase 4: Capability Fabric & Sandboxed Tool Runtime (Level 4)
 
 - [ ] **Task 4.1: Capability Registry & Sandboxing**
   - **Module**: `:eon-capability-fabric`
@@ -131,17 +133,17 @@
   - **Requirements**: 30ms window ONNX evaluation, confidence scoring, 250ms dynamic end-of-utterance detection.
   - **Unit Tests**: `SileroVadTest.kt` verifying speech detection latency < 1ms per frame.
 
-- [ ] **Task 5.2: Streaming Zipformer int8 ASR Engine**
+- [ ] **Task 5.2: Streaming Zipformer int8 ASR with Predictive Pre-Cognition**
   - **Directory**: `perception/voice-engine/`
-  - **Files**: `eon/voice/asr/StreamingAsrEngine.kt`, `SherpaOnnxAsrProvider.kt`
-  - **Requirements**: Streams 16kHz audio chunks to `sherpa-onnx`, emits partial tokens incrementally, finalizes transcript in < 40ms post-VAD.
-  - **Unit Tests**: `StreamingAsrEngineTest.kt`.
+  - **Files**: `eon/voice/asr/StreamingAsrEngine.kt`, `PredictiveEarlyExitDecoder.kt`
+  - **Requirements**: Streams 16kHz audio chunks to `sherpa-onnx`, emits partial tokens incrementally, runs early-exit intent classifier during user speech.
+  - **Unit Tests**: `StreamingAsrEngineTest.kt`, `PredictiveEarlyExitTest.kt`.
 
-- [ ] **Task 5.3: Kokoro-82M Streaming Neural TTS Engine**
+- [ ] **Task 5.3: Kokoro-82M Streaming Neural TTS & Acoustic Commitment Gate**
   - **Directory**: `perception/voice-engine/`
-  - **Files**: `eon/voice/tts/StreamingTtsEngine.kt`, `KokoroTtsProvider.kt`, `ClauseChunker.kt`
-  - **Requirements**: Clause chunking on punctuation, streaming token-to-audio synthesis, TTFA < 200ms, RTF < 0.15.
-  - **Unit Tests**: `ClauseChunkerTest.kt`, `StreamingTtsBenchmarkTest.kt`.
+  - **Files**: `eon/voice/tts/StreamingTtsEngine.kt`, `KokoroTtsProvider.kt`, `AcousticCommitmentGate.kt`, `ClauseChunker.kt`
+  - **Requirements**: Emits acoustic bridges immediately; gates definitive semantic claims until lease acquisition. TTFA < 200ms, RTF < 0.15.
+  - **Unit Tests**: `ClauseChunkerTest.kt`, `AcousticCommitmentGateTest.kt`, `StreamingTtsBenchmarkTest.kt`.
 
 - [ ] **Task 5.4: Acoustic Reflex & Full Duplex Barge-In**
   - **Directory**: `perception/voice-engine/`
@@ -165,11 +167,11 @@
   - **Requirements**: Working Context Ledger (bounded to 4k tokens), SQLite entity/relation graph store, local vector embedding search (`all-MiniLM-L6-v2` ONNX).
   - **Unit Tests**: `AppraisalEngineTest.kt`, `SqliteGraphMemoryTest.kt`.
 
-- [ ] **Task 6.3: Objective Workflow Compiler (DAG Synthesizer)**
+- [ ] **Task 6.3: Objective Workflow Compiler & Speculative Shadow Sandbox**
   - **Module**: `:eon-ciel-cognition`
-  - **Files**: `eon/ciel/compiler/ObjectiveWorkflowCompiler.kt`, `WorkflowSynthesizer.kt`, `WorkflowOptimizer.kt`
-  - **Requirements**: Translates natural language intent into verified `Workflow` DAGs referencing registered capability contracts.
-  - **Unit Tests**: `ObjectiveWorkflowCompilerTest.kt`.
+  - **Files**: `eon/ciel/compiler/ObjectiveWorkflowCompiler.kt`, `ShadowSandboxManager.kt`, `WorkflowSynthesizer.kt`
+  - **Requirements**: Translates natural language intent into verified `Workflow` DAGs. Spawns CoW shadow worktrees for ambiguous goals with NACK confirmation.
+  - **Unit Tests**: `ObjectiveWorkflowCompilerTest.kt`, `ShadowSandboxManagerTest.kt`.
 
 - [ ] **Task 6.4: Ciel Persona & Verbal Output Formatter**
   - **Module**: `:eon-ciel-cognition`
@@ -179,15 +181,59 @@
 
 ---
 
-## Phase 7: Android System & Accessibility Automation (CHRONOS Bridge)
+## Phase 7: Information Particle Manipulation & Cyber Warfare Core
 
-- [ ] **Task 7.1: Android Accessibility Tree Inspector & Gestures**
+- [ ] **Task 7.1: Polyglot AST Analysis & Extreme Code Synthesizer**
+  - **Module**: `:eon-cyber-core`
+  - **Files**: `eon/cyber/ast/PolyglotAstParser.kt`, `CodeSynthesizer.kt`, `SelfHealingCompilerLoop.kt`
+  - **Requirements**: AST parsing and manipulation across Rust, Kotlin, C/C++, Python, TypeScript. Automated compiler diagnostic capture and repair.
+  - **Unit Tests**: `PolyglotAstParserTest.kt`, `SelfHealingCompilerTest.kt`.
+
+- [ ] **Task 7.2: Aegis Cyber Defense & Live Vulnerability Hotpatcher**
+  - **Module**: `:eon-cyber-core`
+  - **Files**: `eon/cyber/defense/StaticTaintAuditor.kt`, `AutoPatchEngine.kt`, `EbpfAnomalyMonitor.kt`
+  - **Requirements**: Detection of CWE-119, CWE-89, CWE-362, timing attacks. Automated constant-time and bounds-checking patch synthesis.
+  - **Unit Tests**: `StaticTaintAuditorTest.kt`, `AutoPatchEngineTest.kt`.
+
+- [ ] **Task 7.3: Offensive Cyber & Binary Reverse Engineering**
+  - **Module**: `:eon-cyber-core`
+  - **Files**: `eon/cyber/offense/BinaryDisassembler.kt`, `DexDecompiler.kt`, `SymbolicExecutionEngine.kt`, `PacketCrafter.kt`
+  - **Requirements**: Disassembly of ELF, PE, DEX binaries with CFG recovery. Z3 symbolic constraint solver integration. Raw TCP/UDP packet crafting in isolated sandboxes.
+  - **Unit Tests**: `BinaryDisassemblerTest.kt`, `DexDecompilerTest.kt`, `SymbolicExecutionTest.kt`.
+
+---
+
+## Phase 8: Distributed Networking Mesh (Engine Optimized for Networking)
+
+- [ ] **Task 8.1: Multiplexed P2P QUIC Transport**
+  - **Module**: `:eon-mesh-network`
+  - **Files**: `eon/mesh/transport/QuicMeshTransport.kt`, `PeerDiscoveryService.kt`, `TlsIdentityKeyStore.kt`
+  - **Requirements**: Zero-config mDNS peer discovery, mutual TLS 1.3 encryption, sub-10ms RPC latency across local LAN.
+  - **Unit Tests**: `QuicMeshTransportTest.kt` testing peer pairing, latency, and packet migration.
+
+- [ ] **Task 8.2: Split-Inference Coordinator**
+  - **Module**: `:eon-mesh-network`
+  - **Files**: `eon/mesh/inference/SplitInferenceCoordinator.kt`, `InferenceOffloadRouter.kt`
+  - **Requirements**: Dynamically streams speech tokens from mobile edge to workstation compute node, streaming verified results back to edge audio driver. Seamless offline fallback.
+  - **Unit Tests**: `SplitInferenceTest.kt`.
+
+- [ ] **Task 8.3: CRDT State Synchronizer**
+  - **Module**: `:eon-mesh-network`
+  - **Files**: `eon/mesh/crdt/CrdtStateSynchronizer.kt`, `LwwContextLedger.kt`, `GraphCrdt.kt`
+  - **Requirements**: Conflict-free replication of working context and knowledge graph across paired devices without central database locks.
+  - **Unit Tests**: `CrdtStateSynchronizerTest.kt` verifying concurrent multi-node edits and deterministic convergence.
+
+---
+
+## Phase 9: Android System & Accessibility Automation (CHRONOS Bridge)
+
+- [ ] **Task 9.1: Android Accessibility Tree Inspector & Gestures**
   - **Directory**: `clients/android/`
   - **Files**: `com/eon/android/accessibility/EonAccessibilityService.kt`, `ScreenInspector.kt`, `GestureController.kt`
   - **Requirements**: Traverses active `AccessibilityNodeInfo` hierarchy, finds target buttons/inputs, executes clicks/scrolls, provides coordinate fallback.
   - **Unit Tests**: Simulated UI hierarchy traversal and node resolution tests.
 
-- [ ] **Task 7.2: Persistent Overlay HUD & Visualizer**
+- [ ] **Task 9.2: Persistent Overlay HUD & Visualizer**
   - **Directory**: `clients/android/`
   - **Files**: `com/eon/android/ui/EonOverlayManager.kt`, `AudioVisualizerView.kt`, `NotificationCard.kt`
   - **Requirements**: Persistent unobtrusive floating presence. Visualizes thought state, active listening wave, and task completion notices.
@@ -195,14 +241,20 @@
 
 ---
 
-## Phase 8: System Verification & Latency Benchmarks
+## Phase 10: System Verification & Latency Benchmarks
 
-- [ ] **Task 8.1: Sub-200ms Time-To-First-Audio (TTFA) Benchmark**
+- [ ] **Task 10.1: Sub-200ms Time-To-First-Audio (TTFA) Benchmark**
   - **Directory**: `tests/latency-benchmarks/`
-  - **Requirements**: Automated end-to-end benchmark measuring audio input to speaker output. Asserts P50 < 180ms, P99 < 300ms.
-- [ ] **Task 8.2: Multi-Step Autonomous Workflow Integration Test**
+  - **Requirements**: Automated end-to-end benchmark measuring audio input to speaker output. Asserts P50 < 170ms, P99 < 280ms.
+- [ ] **Task 10.2: Autonomous Cyber Defense & Patch Verification Test**
+  - **Directory**: `tests/cyber-security-tests/`
+  - **Requirements**: Injects an insecure code pattern; asserts EON detects taint, synthesizes constant-time patch, and passes unit test suite with zero user intervention.
+- [ ] **Task 10.3: Multi-Step Autonomous Workflow Integration Test**
   - **Directory**: `tests/end-to-end-workflows/`
   - **Requirements**: Executes a 10-step autonomous workflow (Read file -> Parse AST -> Edit file -> Run build -> Verify test -> Voice report). Zero user questions.
-- [ ] **Task 8.3: Full Process Crash Recovery & Reconciliation Test**
+- [ ] **Task 10.4: Distributed Mesh Split-Inference & Partition Test**
+  - **Directory**: `tests/mesh-network-tests/`
+  - **Requirements**: Verifies peer-to-peer offloading between simulated edge phone and workstation; asserts graceful offline fallback upon simulated network partition.
+- [ ] **Task 10.5: Full Process Crash Recovery & Reconciliation Test**
   - **Directory**: `tests/crash-recovery-tests/`
   - **Requirements**: Force-kills engine at Task 4 of 8. Reboots engine. Verifies state reconciliation, lease cleanup, and safe continuation.

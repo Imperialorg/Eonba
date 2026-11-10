@@ -128,3 +128,4 @@ To prevent memory leaks or audio jitter:
 - **Hardware Integration**:
   - Android: `AAudio` stream in `AAUDIO_PERFORMANCE_MODE_LOW_LATENCY` and `AAUDIO_SHARING_MODE_EXCLUSIVE`.
   - Windows: `WASAPI` in Exclusive Mode with 10ms event-driven buffer periods.
+
