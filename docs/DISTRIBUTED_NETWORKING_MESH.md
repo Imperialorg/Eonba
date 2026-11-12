@@ -2,8 +2,8 @@
 ### Engine Optimized for Networking (EON Core)
 
 > **Subsystem:** EON Networking & Distributed Mesh Engine  
-> **Module:** `engine/mesh-network` & `clients/daemon/mesh`  
-> **Protocol:** P2P QUIC / Noise Protocol / CRDT State Synchronization
+> **Module:** `engine/core-rs/crates/eon-mesh` & `clients/daemon/mesh`  
+> **Wire Protocol:** Protocol Buffers (`proto/eon.proto`) over `iroh` P2P QUIC / Loro CRDT
 
 ---
 
@@ -17,15 +17,15 @@ graph TD
         direction TB
 
         subgraph Edge_Phone["Edge Sensory Node (Android Phone / Wearable)"]
-            PhoneAudio["Mic Input / Silero VAD / Zipformer ASR"]
-            PhoneUI["Accessibility Tree & HUD Overlay"]
+            PhoneAudio["Mic Input / Silero VAD / Zipformer ASR / AEC"]
+            PhoneUI["Accessibility Tree / OmniParser-v2 Grounding"]
             PhoneSpeaker["Audio Playback Buffer"]
         end
 
         subgraph Compute_Desktop["High-Compute Node (Workstation / Studio)"]
-            DesktopLLM["Large Coding SLMs (Qwen-2.5-32B / DeepSeek)"]
+            DesktopLLM["Frontier Coding SLMs (Qwen-2.5-32B / DeepSeek-32B)"]
             DesktopCompiler["Polyglot Compilers & Test Harnesses"]
-            DesktopCyber["Binary Disassembler & Fuzzing Sandboxes"]
+            DesktopCyber["Ghidra P-Code Lifter & LibAFL Fuzzing"]
         end
 
         subgraph Cloud_Server["Persistent Node (Home Server / VPS)"]
@@ -33,23 +33,55 @@ graph TD
             ServerCrawler["24/7 Background Automations & Web Monitors"]
         end
 
-        Edge_Phone <== "Low-Latency QUIC RPC (< 10ms)" ==> Compute_Desktop
+        Edge_Phone <== "iroh P2P QUIC (4-Class QoS) < 10ms" ==> Compute_Desktop
         Compute_Desktop <== "Durable State Replication" ==> Cloud_Server
-        Edge_Phone <== "CRDT Context Sync" ==> Cloud_Server
+        Edge_Phone <== "Loro CRDT Delta Sync" ==> Cloud_Server
     end
 ```
 
 ---
 
-## 2. Ultra-Low Latency Transport & Peer-to-Peer Protocol
+## 2. Zero-Config WAN Roaming & Transport Layer (`iroh`)
 
-### 2.1 Transport Layer: Multiplexed P2P QUIC
-- **Underlying Protocol**: QUIC (RFC 9000) over UDP.
-- **Benefits**: Zero Head-of-Line blocking, connection migration (survives switching from Wi-Fi to 5G without dropping active audio streams), and sub-millisecond connection resumption (0-RTT).
-- **Security & Encryption**: Authenticated via Mutual TLS 1.3 (mTLS) with ed25519 cryptographic identity keys generated at initial setup.
-- **Zero-Config Discovery**: Local nodes automatically discover peers using mDNS (Multicast DNS) and Bluetooth Low Energy (BLE) beacons. Remote peers connect via NAT-traversal STUN/TURN relays or wireguard mesh.
+Traditional mDNS discovery fails as soon as a user steps outside their home Wi-Fi and connects via 5G cellular. To provide seamless, uninterrupted roaming across the globe, EON adopts **`iroh`** (built on top of `quinn` in Rust):
 
-### 2.2 Split-Inference & Offloading Engine
+### 2.1 Transport Primitives & Addressing
+- **Cryptographic Node IDs**: Every EON instance generates a permanent Ed25519 keypair. The public key serves as the immutable Node ID across all networks.
+- **Zero-Config NAT Traversal & Hole-Punching**: `iroh` automatically performs STUN resolution, UDP hole-punching, and NAT mapping.
+- **Encrypted Relay Fallback (DERP)**: If direct UDP hole-punching is blocked by symmetric carrier-grade NAT (CGNAT), traffic seamlessly routes through encrypted relays with zero configuration.
+- **Connection Migration**: Switching between home Wi-Fi, 5G mobile data, and public Wi-Fi retains active QUIC streams without dropping voice sessions or restarting file transfers.
+- **Content-Addressed Blob Streaming**: Build artifacts, model weights, and video keyframes stream using BLAKE3-verified resumable chunks.
+
+---
+
+## 3. 4-Class QUIC QoS & Transport Priority Lanes
+
+To prevent large file transfers (e.g. 500 MB build artifacts or model weights) from causing jitter on live voice frames, EON enforces **Four Strict QUIC Priority Lanes** serialized via `proto/eon.proto`:
+
+| Priority Lane | Protocol Mechanism | Target Latency | Payload Types & Invariants |
+|---|---|---|---|
+| **Class 0: Real-Time Datagram** | QUIC Datagrams (RFC 9221) | **< 5ms** | 16kHz/24kHz raw PCM audio chunks, barge-in signals (`BargeInSignal`). Unreliable, unbuffered, zero head-of-line delay. Drops older frames if delayed. |
+| **Class 1: Control Stream** | High-Priority Reliable Stream | **< 15ms** | Cognitive Epoch invalidations (`EPOCH_INVALIDATED`), streaming LLM tokens, lease heartbeats. Preempts all lower classes. |
+| **Class 2: Interactive State** | Medium-Priority Stream | **< 50ms** | Loro CRDT delta-syncs (`CrdtDeltaSync`), compressed video keyframes (`VideoKeyframeChunk`), UI bounding boxes. |
+| **Class 3: Bulk Background** | Throttled Background Stream | Bandwidth-limited | Model weight synchronization, compiler logs, git blobs, build artifacts. Automatically yielded when Class 0/1/2 are active. |
+
+---
+
+## 4. The Wire Serialization Contract (`proto/eon.proto`)
+
+All inter-node and inter-process messages are strictly typed and binary-serialized using Protocol Buffers defined in [proto/eon.proto](../proto/eon.proto):
+- `TaskExecutionRequest` & `TaskExecutionOutcome`: Governs remote capability execution.
+- `EpochInvalidationEvent`: Dispatches immediate saga cancellations across the mesh.
+- `AudioPcmChunk`: Streams Class 0 audio frames.
+- `CrdtDeltaSync`: Replicates Loro CRDT document deltas.
+- `SplitInferencePayload`: Streams speech tokens and inference states between phone and workstation.
+
+*(Note: In-process Kotlin/Rust FFI on Android is governed separately by Mozilla UniFFI in `eon_core.udl`).*
+
+---
+
+## 5. Split-Inference & Offloading Engine
+
 To maintain sub-200ms latency while running multi-billion parameter models, EON dynamically offloads work across the mesh:
 
 ```mermaid
@@ -61,7 +93,7 @@ sequenceDiagram
 
     User->>Phone: "EON, build the current repository and run all tests."
     Phone->>Phone: Silero VAD + Zipformer ASR (T+60ms)
-    Phone->>Desktop: Stream Tokens via QUIC Stream (T+70ms)
+    Phone->>Desktop: Stream Class 1 Tokens via P2P QUIC (T+70ms)
     Phone->>User: Audio Reflex: "Affirmative. Initiating build." (T+150ms)
     
     activate Desktop
@@ -73,32 +105,97 @@ sequenceDiagram
     Phone->>User: Audio Report: "Report: Build succeeded. 48 tests passed in 1.4 seconds." (T+1.55s)
 ```
 
-- **Graceful Offline Fallback**: If the desktop workstation is powered off or network connection is severed, the phone automatically degrades to local on-device quantized models (Gemma-2B / Kokoro-82M) without crashing.
+### Graceful Offline Fallback:
+If the desktop workstation is powered off or network connection is severed:
+1. The mesh client detects connection loss within 500ms via QUIC heartbeats.
+2. The phone seamlessly degrades to local on-device quantized models (`gemma-2-2b-it` or `Qwen2.5-Coder-3B` + `Kokoro-82M`) without throwing user-facing exceptions.
+3. Pending background tasks are queued locally until mesh connectivity is re-established.
 
 ---
 
-## 3. CRDT-Synchronized Cognitive State
+## 6. CRDT-Synchronized Cognitive State & Dual-Storage Projection
 
-EON maintains a unified memory and task state across all devices using **Conflict-free Replicated Data Types (CRDTs)**. No central database lock is required.
+EON maintains a unified memory and task state across all devices using **Conflict-free Replicated Data Types (CRDTs)** powered by **Loro**:
 
-### 3.1 Cognitive State CRDT Primitives
+### 6.1 Cognitive State CRDT Primitives
 1. **Working Context Ledger (LWW-Element-Set CRDT)**:
-   - Stores the active conversational state, focused window, and recent observations.
-   - Updates use Last-Write-Wins (LWW) based on Lamport logical timestamps.
-2. **Semantic Knowledge Graph (Obsidian-Style Graph CRDT)**:
+   - Stores active conversational context, clipboard items, and focused application state.
+   - Updates use Lamport logical timestamps for deterministic merge resolution.
+2. **Semantic Knowledge Graph (Loro Tree & Map CRDT)**:
    - Additions of entity nodes and relationship edges are commutative and associative.
    - Simultaneous fact additions on the phone and desktop merge deterministically without merge conflicts.
 3. **Task & Execution Journal (PNCounter & ORSet CRDT)**:
    - Distributed task tracking. If a background download finishes on the server while the user is using the phone, the task completion event propagates immediately.
 
+### 6.2 Projection into SQLite
+CRDTs serve as the append-only replication log. On each local node, a background projection worker materializes the CRDT state into relational **SQLite (FTS5 + `sqlite-vec`)** tables, enabling sub-5ms hybrid BM25 and vector similarity queries.
+
 ---
 
-## 4. Distributed Capability Execution & Remote Leases
+## 7. Distributed Capability Execution & Remote Leases
 
 Capabilities registered on any node in the mesh are callable across the network:
 - A phone can dispatch a `dev.build` task that executes directly on the desktop's NVMe drive.
-- A desktop script can dispatch an `android.notification` or `android.accessibility` action on the phone.
+- A desktop script can dispatch an `android.node_click` or `android.overlay` action on the phone.
 
 ### Distributed Lease Protocol
-- **Lease Coordination**: Managed via lightweight Raft consensus or lease tokens with bounded physical wall-clock expiration.
-- **Network Partition Resilience**: If a network partition occurs, leases held on disconnected remote nodes expire after 5 seconds, allowing local execution to resume safely.
+- **Lease Coordination**: Managed via lightweight lease tokens with bounded physical wall-clock expiration (default: 5,000ms).
+- **Network Partition Resilience**: If a network partition occurs, leases held on disconnected remote nodes expire after 5 seconds, allowing local execution to resume safely without deadlocking.
+
+---
+
+## 8. The 15ms Spatial Arbitration Protocol ("Single Mind, Multiple Bodies")
+
+When a user works at their workstation with their Android phone resting on the desk, both devices' microphones capture the user's voice simultaneously. Without spatial coordination, both devices would appraise the intent, generate separate responses, and speak over each other in an echo disaster.
+
+EON solves this with the **15ms Spatial Arbitration Protocol**, enforcing the illusion of a single, omnipresent cognitive entity:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as User (Speaks: "EON, run the test suite")
+    participant Phone as Android Phone (Edge Node)
+    participant Desktop as Workstation (Compute Node)
+
+    par Audio Arrival
+        User->>Phone: Sound Wave (VAD Triggers @ T+0ms)
+        User->>Desktop: Sound Wave (VAD Triggers @ T+2ms)
+    end
+
+    par Class 0 Datagram Broadcast
+        Phone->>Desktop: SensoryClaim(SNR: 18dB, Screen: Locked, HID: 120000ms)
+        Desktop->>Phone: SensoryClaim(SNR: 24dB, Screen: Unlocked, HID: 150ms)
+    end
+
+    Note over Phone,Desktop: 15ms Evaluation Window Completes
+    Desktop->>Desktop: Score: 94.2 -> Elected I/O LEADER
+    Phone->>Phone: Score: 31.0 -> Demoted to SILENT SENSOR / FOLLOWER
+
+    Note over Phone: Suppresses local TTS speaker output
+    Desktop->>User: Spoken Response via Desktop Monitors: "Running 48 unit tests now."
+```
+
+### 8.1 The `SensoryClaim` Wire Datagram
+As soon as `Silero VAD v5` detects voice activity on any local node, a lightweight `SensoryClaim` message (defined in `proto/eon.proto`) is broadcast across Class 0 QUIC datagrams (< 3ms network hop):
+
+```rust
+pub struct SensoryClaim {
+    pub claim_id: String,           // claim_<ULID>
+    pub device_id: String,          // Node public key
+    pub vad_start_ns: u64,          // Monotonic capture start
+    pub audio_snr_db: f32,          // Signal-to-Noise Ratio (dB)
+    pub is_screen_unlocked: bool,   // Screen power & unlock state
+    pub last_hid_activity_ms: u64,  // Milliseconds since last keyboard/mouse/touch
+    pub speaker_confidence: f32,    // WeSpeaker biometric identity score
+}
+```
+
+### 8.2 Deterministic Arbitration Scoring
+All mesh nodes collect incoming claims over a strict **15ms window**. Each node computes a deterministic spatial score:
+
+$$\mathcal{S}_i = 0.40 \cdot \overline{\text{SNR}}_i + 0.30 \cdot \mathbb{I}(\text{HID}_i < 2000\text{ms}) + 0.15 \cdot \mathbb{I}(\text{ScreenActive}_i) + 0.15 \cdot \text{SpeakerConf}_i$$
+
+1. **Tie-Breaking**: If scores match within a 0.5% margin, the node with lexicographically smaller Node ID wins deterministically.
+2. **I/O Leader**: The highest-scoring node assumes conversational focus. It alone drives Kokoro TTS audio playback and renders visual HUD notifications.
+3. **Silent Followers**: Lower-scoring nodes immediately suppress local speaker output (`mute_speaker = true`). They keep their ASR stream active only if needed as a secondary acoustic diversity stream for noisy environments.
+4. **Seamless Task Continuation**: If the user subsequently turns their head and touches the phone, the next turn's claim immediately shifts the I/O Leader role to the phone without interrupting background compilation on the workstation.

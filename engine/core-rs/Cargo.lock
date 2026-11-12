@@ -64,6 +64,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "eon-vision"
+version = "0.1.0"
+dependencies = [
+ "eon-primitives",
+]
+
+[[package]]
 name = "eon-voice"
 version = "0.1.0"
 dependencies = [

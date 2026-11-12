@@ -115,3 +115,36 @@ stateDiagram-v2
    - Android battery level drops below 15% $\to$ Automatically degrades to `Low-Power Dormant` with an unobtrusive notice card.
    - Laptop connects to untrusted Wi-Fi $\to$ Engages `Cyber Sentinel` in the background.
 
+---
+
+## 5. Multi-Device Co-Located Presence & Spatial Transition Rules
+
+When multiple EON devices (e.g. an Android phone and a Linux/Windows workstation) are co-located in the same acoustic space, they coordinate their operating modes to maintain a seamless single-mind presence:
+
+```mermaid
+stateDiagram-v2
+    [*] --> STANDALONE: Single Device Active
+
+    STANDALONE --> ELECTED_LEADER: Spatial Arbitration Won (15ms Window)
+    STANDALONE --> ELECTED_FOLLOWER: Spatial Arbitration Lost (Higher Peer Score)
+
+    ELECTED_LEADER --> ELECTED_FOLLOWER: Focus Shifted (User Touched Alternate Device)
+    ELECTED_FOLLOWER --> ELECTED_LEADER: Focus Shifted (User Spoke Directly to Device)
+
+    ELECTED_FOLLOWER --> STANDALONE: Peer Disconnected / Mesh Severed
+    ELECTED_LEADER --> STANDALONE: Peer Disconnected / Mesh Severed
+```
+
+### 5.1 Operating Mode Constraints for Co-Located Devices
+
+| Node Status | Audio In (Mic) | Audio Out (Speaker) | Visual Display | Computational Role |
+|---|---|---|---|---|
+| **Elected I/O Leader** | Active (16kHz stream) | Active (Kokoro Neural TTS) | Primary HUD & Floating Overlay | Handles conversational turn; drives dialogue loop |
+| **Co-Located Follower** | Diversity Ear (Active VAD) | **Strictly Muted (0dB)** | Secondary Notification Toast | Background worker; shares screen/clipboard context |
+| **Disconnected Node** | Standalone Mic | Standalone Audio | Local Default | Executes local fallback SLM |
+
+### 5.2 Dynamic Handover Rules
+1. **Focus Handoff**: If the user is speaking to their desktop while coding (`PAIR_PROGRAMMING` Leader) and subsequently lifts their phone and taps the screen, the phone's next `SensoryClaim` carries `is_screen_unlocked = true` and `last_hid_activity_ms = 0`. The arbitration protocol shifts the I/O Leader role to the phone within 15ms.
+2. **Audio Collision Prevention**: Follower nodes do not initialize or stream Kokoro TTS audio buffers to the hardware audio sink. If an in-flight synthesis coroutine was preemptively started, it is immediately cancelled via task abortion.
+3. **Power Conservation in Follower State**: Mobile devices acting as followers in the presence of a workstation offload heavy LLM reasoning to the desktop node, keeping phone power consumption under 1.5 Watts.
+

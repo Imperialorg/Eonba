@@ -87,27 +87,30 @@ EON is structured as a dual-engine platform combining native high-performance Ru
 - **Build System**: Cargo Workspace (`Cargo.toml`).
 - **Core Crates**:
   - `eon-primitives`: Monotonic time, ULIDs, strongly typed IDs, `EonResult`, `EonError`.
-  - `eon-foundation`: Identity, authorization, append-only SQLite/redb journal, durable state store.
-  - `eon-kernel`: DAG scheduler, resource-aware task dispatcher, epoch leases, saga reconciler, crash recovery worker.
-  - `eon-capability`: Extensible tool and capability runtime, security sandboxing, permission policies.
-  - `eon-cyber`: Tree-sitter polyglot AST, Capstone disassembler, Z3 symbolic execution, raw network packet crafting, eBPF telemetry.
-  - `eon-mesh`: P2P QUIC transport (`s2n-quic`), Loro / Automerge CRDT synchronizer.
-  - `eon-voice`: Low-latency audio loop (CPAL/AAudio), Silero VAD, Sherpa-onnx Zipformer ASR, Kokoro-82M TTS, acoustic commitment gate, barge-in.
-  - `eon-cognition`: Thought Acceleration router, Ciel persona, prompt compiler, working context ledger.
+  - `eon-foundation`: Identity, authorization bitflags, append-only binary journal (`0x454F4E4A`), zero-knowledge credential broker (`secret://<vault_key>`), `JournalScrubber` (entropy $\mathcal{H} > 4.5$).
+  - `eon-kernel`: Dynamic DAG scheduler, resource-aware task dispatcher, epoch leases, saga reconciler, `sccache` shared build cache across shadow sandboxes, Tree-sitter 3-way structural AST merging, crash recovery worker.
+  - `eon-capability`: Extensible tool and capability runtime, embedded LSP multiplexer, AST patcher, persistent PTY multiplexer (`process.pty_*`), DAP bridge (`dev.dap`), Set-of-Mark visual grounding, security sandboxing with Cognitive Taint (Invariant 8) enforcement.
+  - `eon-cyber`: Tree-sitter polyglot AST, Ghidra P-Code lifter, LibAFL concolic fuzzer, Z3 symbolic execution, user-space TCP/IP stack (`smoltcp`), eBPF TLS SSL_read/write uprobes, tiered telemetry (Tier A/B/C).
+  - `eon-mesh`: Zero-config P2P QUIC (`iroh`), 4-Class QoS transport, Loro CRDT synchronizer, 15ms Spatial Arbitration Protocol (`SensoryClaim`).
+  - `eon-voice`: Low-latency audio loop (CPAL/AAudio), AEC loopback, Silero VAD, Zipformer ASR, `misaki` G2P phonemizer + `kokoro_vocab.json`, Kokoro-82M TTS, Dual-Channel Verbalizer, WeSpeaker verification.
+  - `eon-vision`: OmniParser-v2 UI element detector, Set-of-Mark (SoM) visual tagger ([1], [2], [3]) for 100% precision clicks, 3-Tier Video Ingestion engine (Stream pixel-diff, SigLIP sqlite-vec Index, High-Res Crop), adaptive 1-5 FPS keyframe sampler, 30s rolling visual memory.
+  - `eon-cognition`: Thought Acceleration router, dual-stream `<think>` split, `llguidance` / GBNF grammar-constrained decoding (100% valid JSON DAGs), Z3 SMT solver bridge (`reasoning.smt_solve`), Best-of-$N$ shadow rollouts, Ciel persona, procedural memory hygiene (Wilson score decay).
   - `eon-uniffi`: Mozilla UniFFI auto-generated bindings for Kotlin and Swift.
 
 ### Tier 2: Mobile Platform Presence (Kotlin 2.0 / Android SDK 35+)
 - **Location**: `clients/android/`
 - **Build System**: Gradle (`build.gradle.kts`) with `cargo-ndk`.
 - **Core Modules**:
+  - `service`: `EonVoiceInteractionService` as Android's native Digital Assistant (`ROLE_ASSISTANT`), `AlwaysOnHotwordDetector` hardware DSP wake-word, legal background audio capture, and `onHandleAssist` screen context/screenshot capture.
   - `accessibility`: `EonAccessibilityService` for inspecting active UI trees, clicks, text entry, and window state transitions.
   - `overlay`: `EonOverlayService` for the persistent floating visualizer HUD and thought bubbles.
   - `system`: Quick Settings tile, MediaSession hooks, and WorkManager background reconciliation.
 
-### Tier 3: Desktop & Interactive Terminal (Rust)
-- **Location**: `clients/cli/` & `clients/daemon/`
-- **Interface**: Interactive terminal interface (`ratatui` + `crossterm`) with live audio visualizer, DAG task graphs, and slash commands.
-- **Daemon**: Native system background service communicating via Named Pipes (`\\.\pipe\eon`) or Unix Domain Sockets (`/tmp/eon.sock`).
+### Tier 3: Desktop & Interactive Visual Workbenches (Rust)
+- **Location**: `clients/cli/`, `clients/canvas/` & `clients/daemon/`
+- **Terminal Client**: Interactive terminal interface (`ratatui` + `crossterm` + `ratatui-image`) with live audio visualizer, DAG task graphs, Kitty/Sixel graphics, and slash commands.
+- **Interactive Canvas**: Cross-platform workbench (`wgpu` / Compose Desktop) for side-by-side AST diffs, reverse engineering CFGs, and video scrubbing.
+- **Daemon**: Native system background service communicating via Named Pipes (`\\.\pipe\eon`) or Unix Domain Sockets (`/tmp/eon.sock`) using `proto/eon.proto`.
 
 ---
 

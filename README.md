@@ -35,7 +35,10 @@ EON unifies the cutting-edge foundations discovered in **CHRONOS** (persistent m
 │                          PERCEPTION & VOICE ENGINE                          │
 │  - Streaming ASR (Zipformer int8) + Predictive Pre-Cognition [< 70ms]       │
 │  - Silero VAD & Acoustic Reflex (Full Duplex Barge-in < 5ms)                │
-│  - Streaming Neural TTS (Kokoro / Piper) with Commitment Gate [TTFA: < 170ms]│
+│  - G2P IPA Phonemizer (misaki) + Dual-Channel Technical Verbalizer          │
+│  - Streaming Neural TTS (Kokoro-82M) with Acoustic Commitment [TTFA: < 170ms]│
+│  - Multimodal Vision: OmniParser-v2 + Set-of-Mark (SoM) Visual Grounding    │
+│  - 3-Tier Video Ingestion: Stream Pixel-Diff, SigLIP Index, High-Res Crop   │
 └──────────────────────────────────────┬──────────────────────────────────────┘
                                        │ Streaming Tokens / Early-Exit Intents
                                        ▼
@@ -48,8 +51,12 @@ EON unifies the cutting-edge foundations discovered in **CHRONOS** (persistent m
 │  │   Latency: < 20ms     │ │   Latency: < 120ms    │ │  Gemini / GPT)    │  │
 │  └───────────────────────┘ └───────────────────────┘ └───────────────────┘  │
 │                                      │                                      │
+│  - Grammar-Constrained Decoding (llguidance / GBNF) for 100% Valid JSON DAGs│
+│  - Neuro-Symbolic SMT Bridge (Z3 Theorem Prover) & Best-of-N Rollouts       │
+│                                      │                                      │
 │  ┌───────────────────────────────────┴───────────────────────────────────┐  │
 │  │  APPRAISAL & HYBRID MEMORY: CRDT Ledger + Graph Memory + Vector Store │  │
+│  │  Procedural Memory Hygiene: Wilson Score Confidence & Temporal Decay  │  │
 │  └───────────────────────────────────┬───────────────────────────────────┘  │
 └──────────────────────────────────────┼──────────────────────────────────────┘
                                        │ Synthesized Workflow DAG
@@ -59,24 +66,31 @@ EON unifies the cutting-edge foundations discovered in **CHRONOS** (persistent m
 │  - Extreme Polyglot Programming: Rust, C/C++, Kotlin, Go, TypeScript, ASM    │
 │  - Self-Healing Compiler Loop: AST Parsing, Diagnostic Taint & Auto-Patch   │
 │  - Aegis Cyber Defense: Static/Dynamic Taint, eBPF Anomaly Monitor, Auto-Fix│
+│  - eBPF SSL/TLS Uprobes (Cleartext Payload Audit on SSL_read/SSL_write)     │
+│  - Unprivileged Virtual Network Stack (smoltcp in User Space / Android TUN) │
 │  - Cyber Offense & Research: ELF/DEX Decompilation, Symbolic Exec, Fuzzing  │
 └──────────────────────────────────────┬──────────────────────────────────────┘
                                        │ Governed Tasks & Epoch Leases
                                        ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │              VECTOR EXECUTION KERNEL (PARALLEL PROCESSING)                  │
-│  - Objective Manager & DAG Compiler with Speculative Shadow Sandboxes       │
+│  - Objective Manager & Dynamic DAG Compiler with CoW Shadow Sandboxes       │
+│  - Parallel Worktree Build Cache (sccache shared cache at ~/.eon/build-cache)│
+│  - AST-Aware 3-Way Structural Merging (Tree-sitter CST / mergiraf)          │
 │  - Resource-Aware Scheduler with Cognitive Epoch Leases                     │
+│  - Zero-Knowledge Credential Broker (secret://) & Journal Scrubber          │
+│  - Cognitive Taint Tracking (Invariant 8 Privilege Escalation Gate)         │
 │  - Ephemeral Task Dispatcher & Preemptive Saga Compensation Reconciler      │
-│  - Append-Only Event Journal & Durable State Store                          │
+│  - Append-Only Event Journal (0x454F4E4A) & Durable State Store             │
 └──────────────────────────────────────┬──────────────────────────────────────┘
                                        │ Governed Tasks
                                        ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                CAPABILITY FABRIC & DISTRIBUTED MESH ENGINE                  │
 │  ┌────────────────────┐ ┌──────────────────────┐ ┌───────────────────────┐  │
-│  │ OS & System Shell  │ │ Android Accessibility│ │ Distributed P2P QUIC  │  │
-│  │ Files, Processes   │ │ UI Tree, Taps, Input │ │ Split-Inference Mesh  │  │
+│  │ OS & System Shell  │ │ Android Role Service │ │ Distributed P2P QUIC  │  │
+│  │ Persistent PTY     │ │ ROLE_ASSISTANT       │ │ 15ms Spatial Election │  │
+│  │ DAP Bridge (debug) │ │ Accessibility + SoM  │ │ Split-Inference Mesh  │  │
 │  └────────────────────┘ └──────────────────────┘ └───────────────────────┘  │
 └──────────────────────────────────────┬──────────────────────────────────────┘
                                        │ Physical Outcomes
@@ -116,30 +130,32 @@ In Tensura, Ciel never wastes time asking Rimuru trivial questions like *"Should
 
 To understand and build EON, explore the detailed specifications:
 
-- [AGENT_EXECUTION_GUIDE.md](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/AGENT_EXECUTION_GUIDE.md) — **MANDATORY PROTOCOL** for autonomous AI coding agents implementing EON.
-- [docs/ARCHITECTURE.md](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/ARCHITECTURE.md) — Comprehensive technical architecture, subsystem boundaries, data models, and protocols.
-- [docs/TECH_STACK_AND_TOOLCHAINS.md](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/TECH_STACK_AND_TOOLCHAINS.md) — Dual-engine architecture (Rust Native Core + Kotlin Android), compiler flags, and UniFFI bridge.
-- [docs/OPERATING_MODES_AND_PRESENCE.md](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/OPERATING_MODES_AND_PRESENCE.md) — The 5 canonical interaction regimes (Full-Duplex Voice, Silent Copilot, Cyber Sentinel, Pair-Programming, Low-Power Dormant).
-- [docs/MODELS_AND_WEIGHTS_SETUP.md](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/MODELS_AND_WEIGHTS_SETUP.md) — Model manifest (Silero VAD, Zipformer ASR, Kokoro TTS, Qwen-Coder SLM), disk paths, and setup script.
-- [docs/ANDROID_INTEGRATION_SPECIFICATION.md](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/ANDROID_INTEGRATION_SPECIFICATION.md) — Android manifest, accessibility service, overlay HUD, and UniFFI integration.
-- [proto/eon.proto](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/proto/eon.proto) — Canonical Protobuf wire contracts for IPC, speech streams, and P2P mesh sync.
-- [docs/CIEL_CORE_SPECIFICATION.md](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/CIEL_CORE_SPECIFICATION.md) — The cognitive soul: Thought Acceleration, Appraisal, Parallel Synthesis, Information Particle Manipulation, and Persona.
-- [docs/CYBER_AND_PROGRAMMING_MASTERY.md](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/CYBER_AND_PROGRAMMING_MASTERY.md) — Extreme programming, polyglot synthesis, Aegis defensive cyber hardening, and offensive vulnerability research.
-- [docs/DISTRIBUTED_NETWORKING_MESH.md](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/DISTRIBUTED_NETWORKING_MESH.md) — P2P QUIC transport, split-inference across Phone and Workstation, and CRDT cognitive state synchronization.
-- [docs/VOICE_PIPELINE_SPECIFICATION.md](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/VOICE_PIPELINE_SPECIFICATION.md) — Streaming STT/TTS, Silero VAD, predictive pre-cognition, acoustic commitment gates, and barge-in audio pipeline.
-- [docs/EXECUTION_KERNEL_SPECIFICATION.md](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/EXECUTION_KERNEL_SPECIFICATION.md) — Deterministic DAG execution engine, epoch leases, saga compensations, shadow sandboxes, and recovery.
-- [docs/CAPABILITY_FABRIC_SPECIFICATION.md](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/CAPABILITY_FABRIC_SPECIFICATION.md) — Tool registry, OS primitives, Android accessibility, cyber capabilities, and mesh commands.
-- [docs/MEMORY_AND_APPRAISAL_SPECIFICATION.md](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/MEMORY_AND_APPRAISAL_SPECIFICATION.md) — Hybrid context ledger, graph memory, episodic store, and embeddings.
-- [docs/STATE_MACHINE_AND_INVARIANTS.md](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/STATE_MACHINE_AND_INVARIANTS.md) — Canonical state lifecycle, safety boundaries, and non-negotiables.
-- [docs/ROADMAP_AND_IMPLEMENTATION_PLAN.md](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/ROADMAP_AND_IMPLEMENTATION_PLAN.md) — Phased execution backlog for coding agents across all 10 phases.
-- [docs/SYSTEM_PROMPTS_AND_PERSONA.md](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/SYSTEM_PROMPTS_AND_PERSONA.md) — Master LLM prompts, few-shot examples, and Ciel verbal output formatting.
+- [AGENT_EXECUTION_GUIDE.md](./AGENT_EXECUTION_GUIDE.md) — **MANDATORY PROTOCOL** for autonomous AI coding agents implementing EON.
+- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — Comprehensive technical architecture, subsystem boundaries, data models, and protocols.
+- [docs/TECH_STACK_AND_TOOLCHAINS.md](./docs/TECH_STACK_AND_TOOLCHAINS.md) — Dual-engine architecture (Rust Native Core + Kotlin Android), compiler flags, and UniFFI bridge.
+- [docs/OPERATING_MODES_AND_PRESENCE.md](./docs/OPERATING_MODES_AND_PRESENCE.md) — The 5 canonical interaction regimes (Full-Duplex Voice, Silent Copilot, Cyber Sentinel, Pair-Programming, Low-Power Dormant).
+- [docs/MODELS_AND_WEIGHTS_SETUP.md](./docs/MODELS_AND_WEIGHTS_SETUP.md) — Model manifest (Silero VAD, Zipformer ASR, Kokoro TTS, OmniParser, Qwen-Coder SLM), disk paths, and setup script.
+- [docs/ANDROID_INTEGRATION_SPECIFICATION.md](./docs/ANDROID_INTEGRATION_SPECIFICATION.md) — Android manifest, accessibility service, overlay HUD, and native AAudio integration.
+- [proto/eon.proto](./proto/eon.proto) — Canonical Protobuf wire contracts for P2P QUIC mesh RPC, speech datagrams, and desktop daemon IPC.
+- [docs/MULTIMODAL_VISION_AND_RENDERING.md](./docs/MULTIMODAL_VISION_AND_RENDERING.md) — Vision grounding (OmniParser-v2), adaptive 1-5 FPS video keyframe sampler, and GPU-accelerated Artifact Canvas.
+- [docs/FOUNDATION_AND_PRIMITIVES_SPECIFICATION.md](./docs/FOUNDATION_AND_PRIMITIVES_SPECIFICATION.md) — Level 0 & 1 primitives, typed ULID prefixes, EonError taxonomy, and binary event journal layout.
+- [docs/CIEL_CORE_SPECIFICATION.md](./docs/CIEL_CORE_SPECIFICATION.md) — The cognitive soul: Thought Acceleration, Appraisal, Parallel Synthesis, Information Particle Manipulation, and Persona.
+- [docs/CYBER_AND_PROGRAMMING_MASTERY.md](./docs/CYBER_AND_PROGRAMMING_MASTERY.md) — Extreme programming, polyglot synthesis, Aegis defensive cyber hardening, Ghidra P-Code lifting, and LibAFL concolic fuzzing.
+- [docs/DISTRIBUTED_NETWORKING_MESH.md](./docs/DISTRIBUTED_NETWORKING_MESH.md) — Zero-config WAN roaming (`iroh` P2P QUIC), 4-Class QoS transport, and Loro CRDT state synchronization.
+- [docs/VOICE_PIPELINE_SPECIFICATION.md](./docs/VOICE_PIPELINE_SPECIFICATION.md) — Streaming STT/TTS, Silero VAD, WeSpeaker biometric verification, AEC loopback, and full duplex barge-in.
+- [docs/EXECUTION_KERNEL_SPECIFICATION.md](./docs/EXECUTION_KERNEL_SPECIFICATION.md) — Deterministic DAG execution engine, epoch leases, saga compensations, attention-gated shadow sandboxes, and recovery.
+- [docs/CAPABILITY_FABRIC_SPECIFICATION.md](./docs/CAPABILITY_FABRIC_SPECIFICATION.md) — Tool registry, OS primitives, Android accessibility, embedded LSP multiplexer, and cyber capabilities.
+- [docs/MEMORY_AND_APPRAISAL_SPECIFICATION.md](./docs/MEMORY_AND_APPRAISAL_SPECIFICATION.md) — Hybrid context ledger, Loro CRDT source-of-truth projected into SQLite tables, and mid-task context auto-compaction.
+- [docs/STATE_MACHINE_AND_INVARIANTS.md](./docs/STATE_MACHINE_AND_INVARIANTS.md) — Canonical state lifecycle, macro operating mode coordination, and non-negotiables.
+- [docs/ROADMAP_AND_IMPLEMENTATION_PLAN.md](./docs/ROADMAP_AND_IMPLEMENTATION_PLAN.md) — Phased execution backlog for coding agents across all 10 phases.
+- [docs/SYSTEM_PROMPTS_AND_PERSONA.md](./docs/SYSTEM_PROMPTS_AND_PERSONA.md) — Master LLM prompts, few-shot examples, dynamic DAG continuation schemas, and Ciel verbal output formatting.
 
 ### Architectural Decision Records (ADRs)
-- [ADR-0001: Ciel Cognitive Model & Thought Acceleration](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/decisions/ADR-0001-CIEL-COGNITIVE-ARCHITECTURE.md)
-- [ADR-0002: Sub-200ms Duplex Voice Pipeline](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/decisions/ADR-0002-SUB-200MS-DUPLEX-VOICE-PIPELINE.md)
-- [ADR-0003: Deterministic DAG Execution Kernel](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/decisions/ADR-0003-DETERMINISTIC-DAG-EXECUTION-KERNEL.md)
-- [ADR-0004: Information Particle Manipulation & Cyber Mastery](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/decisions/ADR-0004-INFORMATION-PARTICLE-CYBER-MASTERY.md)
-- [ADR-0005: Distributed Cognitive Mesh via P2P QUIC & CRDT](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/decisions/ADR-0005-DISTRIBUTED-NETWORKING-MESH-AND-CRDT.md)
+- [ADR-0001: Ciel Cognitive Model & Thought Acceleration](./docs/decisions/ADR-0001-CIEL-COGNITIVE-ARCHITECTURE.md)
+- [ADR-0002: Sub-200ms Duplex Voice Pipeline](./docs/decisions/ADR-0002-SUB-200MS-DUPLEX-VOICE-PIPELINE.md)
+- [ADR-0003: Deterministic DAG Execution Kernel](./docs/decisions/ADR-0003-DETERMINISTIC-DAG-EXECUTION-KERNEL.md)
+- [ADR-0004: Information Particle Manipulation & Cyber Mastery](./docs/decisions/ADR-0004-INFORMATION-PARTICLE-CYBER-MASTERY.md)
+- [ADR-0005: Distributed Cognitive Mesh via P2P QUIC & CRDT](./docs/decisions/ADR-0005-DISTRIBUTED-NETWORKING-MESH-AND-CRDT.md)
 
 ---
 
@@ -148,7 +164,7 @@ To understand and build EON, explore the detailed specifications:
 If you are an LLM, AI Agent, or Developer assigned to build EON:
 1. **Do not ask the user questions.**
 2. **Do not pause to request approval for architectural decisions already specified.**
-3. Read [AGENT_EXECUTION_GUIDE.md](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/AGENT_EXECUTION_GUIDE.md).
-4. Follow [docs/ROADMAP_AND_IMPLEMENTATION_PLAN.md](file:///d:/Projects/EON%20%E2%80%94%20Engine%20Optimized%20for%20Netwotking/docs/ROADMAP_AND_IMPLEMENTATION_PLAN.md) sequentially.
+3. Read [AGENT_EXECUTION_GUIDE.md](./AGENT_EXECUTION_GUIDE.md).
+4. Follow [docs/ROADMAP_AND_IMPLEMENTATION_PLAN.md](./docs/ROADMAP_AND_IMPLEMENTATION_PLAN.md) sequentially.
 5. Verify every implemented module with automated unit and integration tests.
 6. Commit code systematically with structured messages.

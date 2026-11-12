@@ -11,9 +11,10 @@
 To achieve **Manas: Ciel's** performance targets—sub-200ms Time-to-First-Audio (TTFA), deterministic DAG scheduling, microsecond packet inspection, binary reverse engineering, and peer-to-peer QUIC mesh—EON eliminates runtime garbage-collection jitter on hot paths.
 
 EON deploys a **Dual-Engine Architecture**:
-1. **The Native Core Engine (`engine/core-rs`)**: Authored in **Rust (2024 Edition)**. Owns the audio loop, neural ONNX runtimes, the Vector DAG execution kernel, the Cyber and Information Particle manipulation engine, and the P2P QUIC mesh.
+1. **The Native Core Engine (`engine/core-rs`)**: Authored in **Rust (2024 Edition)**. Owns the audio loop, neural ONNX runtimes, the Vector DAG execution kernel, the Cyber and Information Particle manipulation engine, multimodal vision, and the P2P QUIC mesh.
 2. **The Mobile Platform Presence (`clients/android`)**: Authored in **Kotlin 2.0 / Android SDK 35+**. Owns system-level accessibility node traversal, the persistent HUD floating overlay, camera frames, and Android system controllers.
 3. **The Inter-Language Bridge**: Powered by **Mozilla UniFFI**, generating zero-overhead, memory-safe foreign function interfaces between the Rust core and Kotlin/Android without manual, error-prone JNI boilerplate.
+4. **The Over-The-Wire Serialization**: Powered by **Protocol Buffers (`proto/eon.proto`)**, defining the typed binary contract for P2P QUIC mesh RPC (`eon-mesh`) and desktop daemon IPC (`clients/daemon`).
 
 ---
 
@@ -21,13 +22,15 @@ EON deploys a **Dual-Engine Architecture**:
 
 | Layer | Language / Tool | Minimum Version | Target Triple / Runtime | Purpose |
 |---|---|---|---|---|
-| **Core Engine** | Rust | `1.82.0+` (Edition 2024) | `x86_64-pc-windows-msvc`<br/>`aarch64-linux-android`<br/>`x86_64-unknown-linux-gnu` | Kernel, Audio, DAG, Cyber, Mesh |
+| **Core Engine** | Rust | `1.82.0+` (Edition 2024) | `x86_64-pc-windows-msvc`<br/>`aarch64-linux-android`<br/>`x86_64-unknown-linux-gnu` | Kernel, Audio, DAG, Cyber, Mesh, Vision |
 | **Android Presence** | Kotlin | `2.0.20+` | Android SDK 35 (minSdk 28) | Accessibility, Overlay HUD, System Controller |
 | **Build System (Android)**| Gradle | `8.10+` with AGP `8.7+` | JVM 17/21 | Android packaging & compilation |
 | **Build System (Native)** | Cargo | `1.82.0+` | Cargo Workspace with `cargo-ndk` | Native core compilation & cross-targets |
-| **Inference Runtime** | ONNX Runtime | `1.20.0+` | C++ API / Native shared libraries | Silero VAD, Kokoro TTS, Zipformer ASR |
-| **Local SLM Engine** | `llama.cpp` | Latest stable | GGUF Q4_K_M / Q8 quantization | Tactical on-device SLM (Gemma-2B, Qwen-2.5-3B) |
-| **CLI / Terminal UI** | Rust | `1.82.0+` | Native CLI binary | Interactive terminal (`ratatui`) |
+| **Inference Runtime** | ONNX Runtime | `1.20.0+` | C++ API / Native shared libraries | Silero VAD, Kokoro TTS, Zipformer ASR, OmniParser |
+| **Local SLM Engine** | `llama.cpp` | Latest stable | GGUF Q4_K_M / Q8 quantization | Tactical on-device SLM (Qwen-2.5-3B, Qwen2.5-VL-3B, Gemma-2B) |
+| **Grammar Engine** | `llguidance` / GBNF | Latest | Embedded in `eon-cognition` | Token-level logit masking for 100% valid JSON DAG synthesis (< 50µs) |
+| **CLI / Terminal UI** | Rust | `1.82.0+` | Native CLI binary | Interactive terminal (`ratatui` + `ratatui-image`) |
+| **Interactive Canvas**| Rust / Kotlin | `1.82.0+` | Cross-Platform (`wgpu` / Compose) | Live AST diffs, reverse engineering CFGs, screen overlays |
 
 ---
 
@@ -40,25 +43,38 @@ engine/core-rs/
 ├── Cargo.toml                         # Workspace root manifest
 ├── crates/
 │   ├── eon-primitives/                # Level 0: ULIDs, MonotonicTime, EonResult, EonError
-│   ├── eon-foundation/                # Level 1: Append-only journal (redb/SQLite), Identity
-│   ├── eon-kernel/                    # Level 2 & 3: DAG scheduler, Epoch leases, Saga reconciler
-│   ├── eon-capability/                # Level 4: Capability traits, process exec, workspace fs
+│   ├── eon-foundation/                # Level 1: Append-only journal (redb/SQLite), Identity, SecretScrubber
+│   ├── eon-kernel/                    # Level 2 & 3: DAG scheduler, Epoch leases, Saga reconciler,
+│   │                                  # sccache build cache sharing, Tree-sitter 3-way AST merge
+│   ├── eon-capability/                # Level 4: Capability traits, LSP client multiplexer, Persistent PTY
 │   ├── eon-cyber/                     # Information Particle Manipulation:
 │   │                                  # - tree-sitter (AST parsing & self-healing compiler)
-│   │                                  # - capstone-rs (multi-arch disassembly)
-│   │                                  # - z3 (symbolic execution & constraint solver)
-│   │                                  # - pnet / socket2 (raw network frame crafting)
-│   │                                  # - aya-rs (eBPF telemetry for Linux/Android)
+│   │                                  # - sleigh-rs (Ghidra P-Code unified SSA lifter)
+│   │                                  # - LibAFL & z3 (coverage-guided concolic fuzzer)
+│   │                                  # - smoltcp (pure-Rust user-space TCP/IP stack for unprivileged sandboxes & VPN TUN)
+│   │                                  # - pnet / socket2 (raw network frame crafting where permitted)
+│   │                                  # - aya-rs / ETW / VpnService (tiered telemetry + eBPF TLS SSL_write/read uprobes)
 │   ├── eon-mesh/                      # Engine Optimized for Networking:
-│   │                                  # - s2n-quic or quiche (P2P QUIC transport, mTLS 1.3)
-│   │                                  # - loro or automerge (Delta-state CRDT synchronization)
+│   │                                  # - iroh (P2P QUIC, STUN hole-punching, Ed25519, relays)
+│   │                                  # - loro (High-performance delta-state CRDT synchronizer)
+│   │                                  # - 15ms Spatial Arbitration Protocol (SensoryClaim)
 │   ├── eon-voice/                     # Real-Time Perception:
-│   │                                  # - cpal / AAudio / WASAPI (low-latency audio loop)
+│   │                                  # - cpal / AAudio / WASAPI (native low-latency audio loop)
+│   │                                  # - webrtc-audio-processing (AEC reverse reference loopback)
 │   │                                  # - Silero VAD v5 (ONNX Runtime)
 │   │                                  # - sherpa-onnx (int8 Zipformer streaming ASR)
+│   │                                  # - misaki / espeak-ng (G2P IPA phonemizer & kokoro_vocab mapping)
 │   │                                  # - Kokoro-82M (ONNX streaming neural TTS)
-│   │                                  # - Acoustic Commitment Gate & Barge-in controller
-│   ├── eon-cognition/                 # Level 5: Thought Acceleration router, Ciel persona
+│   │                                  # - wespeaker (biometric speaker verification)
+│   │                                  # - Acoustic Commitment Gate, Dual-Channel Verbalizer & Barge-in controller
+│   ├── eon-vision/                    # Multimodal Screen & Video Perception:
+│   │                                  # - OmniParser-v2 (YOLO icon detector + PaddleOCR ONNX)
+│   │                                  # - Set-of-Mark (SoM) visual tagger ([1], [2], [3]) for 100% precision clicks
+│   │                                  # - 3-Tier Video Ingestion (Stream pixel-diff, SigLIP sqlite-vec Index, High-Res Crop)
+│   │                                  # - Adaptive 1-5 FPS keyframe sampler & 30s visual ring buffer
+│   ├── eon-cognition/                 # Level 5: Thought Acceleration router, Ciel persona,
+│   │                                  # llguidance / GBNF grammar-constrained decoding,
+│   │                                  # z3 SMT solver bridge (reasoning.smt_solve & Best-of-N rollouts)
 │   └── eon-uniffi/                    # UniFFI interface definitions for Kotlin & Swift
 ```
 
@@ -81,9 +97,14 @@ lto = "thin"
 
 ---
 
-## 4. UniFFI Interface Definition & Cross-Language Bridge
+## 4. Cross-Language Bridge vs. Wire Serialization
 
-EON uses Mozilla UniFFI to generate type-safe Kotlin classes directly from Rust interface definition files (`.udl` or proc-macros).
+EON maintains a strict distinction between **in-process foreign function interfaces** and **over-the-wire serialization**:
+
+| Layer | Contract Specification | Implementation | Purpose & Scope |
+|---|---|---|---|
+| **In-Process FFI Bridge** | `eon_core.udl` | Mozilla UniFFI | In-process zero-overhead bindings between native Rust core and Android Kotlin/Compose or Swift iOS frontends. |
+| **Over-the-Wire Mesh RPC & IPC** | `proto/eon.proto` | Protocol Buffers (prost) | Cross-machine P2P QUIC messaging (`eon-mesh`), desktop daemon IPC (`clients/daemon`), and binary stream QoS framing. |
 
 ### 4.1 Interface Contract (`eon_core.udl`)
 ```rust
@@ -115,7 +136,10 @@ interface EonVoiceBridge {
     constructor();
     void start_listening();
     void stop_listening();
-    void feed_audio_pcm(sequence<i16> samples);
+    
+    // Test injection hook only. In production, eon-voice reads directly from native C/NDK AAudio stream
+    void inject_audio_pcm_for_testing(sequence<i16> samples);
+    
     void register_barge_in_callback(BargeInCallback callback);
 };
 
@@ -147,16 +171,54 @@ The Android application acts as EON's mobile eyes, ears, and hands:
 - **Language**: Kotlin 2.0 with Jetpack Compose.
 - **Root Directory**: `clients/android/`
 - **Modules**:
-  - `app`: Main Android application packaging JNI libraries, settings, and permissions.
+  - `app`: Main Android application packaging JNI libraries, settings, and foreground audio permissions.
   - `accessibility`: Implements `EonAccessibilityService` to inspect `AccessibilityNodeInfo` hierarchies, execute taps, text entry, and window change listeners.
   - `overlay`: Implements `EonOverlayService` managing the floating visualizer HUD and thought bubbles via Android `WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY`.
   - `system`: Quick Settings Tile (`EonQuickActionTile`), MediaSession listeners, and WorkManager background reconciliation.
 
 ---
 
-## 6. Desktop & CLI Workspace (`clients/cli` & `clients/daemon`)
+## 6. Desktop & CLI Workspace (`clients/cli`, `clients/canvas` & `clients/daemon`)
 
 For desktop workstations and servers:
-- **Interactive Terminal**: Authored in Rust using `ratatui` + `crossterm`. Displays live audio wave visualizers, active DAG task graphs, and interactive slash commands (`/menu`, `/capabilities`, `/cyber`, `/mesh`).
-- **Headless Daemon**: Background service using local Named Pipes on Windows (`\\.\pipe\eon`) and Unix Domain Sockets on Linux (`/tmp/eon.sock`).
+- **Interactive Terminal**: Authored in Rust using `ratatui` + `crossterm` + `ratatui-image`. Displays live audio wave visualizers, active DAG task graphs, inline terminal graphics (Kitty/Sixel), and interactive slash commands (`/menu`, `/capabilities`, `/cyber`, `/mesh`, `/vision`).
+- **Interactive Live Canvas (`clients/canvas`)**: High-performance graphical workbench powered by `wgpu` or Compose Multiplatform + Skia for live side-by-side AST diff inspection, interactive reverse-engineering CFGs, and screen annotation overlays.
+- **Headless Daemon (`clients/daemon`)**: Background service using local Named Pipes on Windows (`\\.\pipe\eon`) and Unix Domain Sockets on Linux (`/tmp/eon.sock`), serializing messages via `proto/eon.proto`.
 
+---
+
+## 7. Hardware Execution Provider Matrix
+
+To extract maximum performance from modern mobile SoCs and workstation GPUs while adhering to the **sub-200ms latency budget**, EON maps neural inference across platform-specific Hardware Execution Providers (EPs):
+
+```mermaid
+graph TD
+    InferenceGraph["Neural Inference Request (VAD / ASR / TTS / SLM)"] --> PlatformRouter{"Target Platform & Hardware Substrate"}
+
+    PlatformRouter -->|Android aarch64| AndroidEP["Android Hardware Acceleration"]
+    AndroidEP -->|Snapdragon Hexagon| QNN["Qualcomm QNN (HTP / NPU)"]
+    AndroidEP -->|ARM Mali / MediaTek| VulkanAndroid["Vulkan + XNNPACK (ARM NEON)"]
+
+    PlatformRouter -->|Windows x86_64| WindowsEP["Windows Hardware Acceleration"]
+    WindowsEP -->|NVIDIA GPU| CudaWin["NVIDIA CUDA 12.x / TensorRT"]
+    WindowsEP -->|AMD / Intel / Qualcomm| DirectML["DirectML (DirectX 12 Compute)"]
+    WindowsEP -->|CPU Fallback| AvxSimd["AVX2 / AVX-512 Vector Extensions"]
+
+    PlatformRouter -->|Linux x86_64| LinuxEP["Linux Server Acceleration"]
+    LinuxEP -->|NVIDIA| CudaLinux["CUDA / cuDNN"]
+    LinuxEP -->|AMD ROCm| RocmLinux["ROCm / HIP Compute"]
+    LinuxEP -->|Generic Linux| VulkanLinux["Vulkan Compute + OpenBLAS"]
+```
+
+### 7.1 Cross-Platform Acceleration Matrix
+
+| Target Architecture | Neural Subsystem | Primary Hardware Provider | Fallback Provider | Key Compilation Flags / Libraries |
+|---|---|---|---|---|
+| **`aarch64-linux-android`** | VAD, ASR, TTS | Qualcomm QNN (Hexagon NPU) | XNNPACK (ARMv8.2-A FP16 NEON) | `--features qnn,xnnpack` with Android NDK r26c |
+| **`aarch64-linux-android`** | Tactical SLM (GGUF) | Vulkan Compute (`llama.cpp`) | OpenMP multi-core CPU | `-DGGML_VULKAN=ON -DGGML_ARM_NEON=ON` |
+| **`x86_64-pc-windows-msvc`** | VAD, ASR, TTS | DirectML (DirectX 12) | OpenVINO / CPU SIMD | `onnxruntime-directml.dll` linked via MSVC |
+| **`x86_64-pc-windows-msvc`** | Tactical SLM (GGUF) | NVIDIA CUDA 12.4 / DirectML | AVX2 / AVX-512 FMA SIMD | `-DGGML_CUDA=ON` or `-DGGML_DIRECTML=ON` |
+| **`x86_64-unknown-linux-gnu`**| VAD, ASR, TTS, SLM| CUDA 12.x / ROCm HIP | Vulkan Compute / oneDNN | `-DGGML_CUDA=ON` or `-DGGML_HIP_BLAS=ON` |
+
+### 7.2 Zero-JNI Mobile Hardware Ingestion
+On Android, hardware execution providers are linked **directly** into the native Rust shared library (`libeon_core.so`). The NDK AAudio microphone stream feeds directly into the native Sherpa/ONNX C++ runtime without crossing the JVM JNI boundary, avoiding thread context switches and eliminating garbage collection spikes.

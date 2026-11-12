@@ -8,6 +8,7 @@ members = [
     "crates/eon-cyber",
     "crates/eon-mesh",
     "crates/eon-voice",
+    "crates/eon-vision",
     "crates/eon-cognition",
     "crates/eon-uniffi",
 ]

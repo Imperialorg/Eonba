@@ -57,7 +57,46 @@ stateDiagram-v2
 
 ---
 
-## 2. Non-Negotiable Invariants
+## 2. Connecting Macro Operating Modes to the Per-Turn State Machine
+
+The 9-state **Per-Turn Cognitive State Machine** (§1) executes *within* the context of the active **Macro Operating Mode** defined in [OPERATING_MODES_AND_PRESENCE.md](./OPERATING_MODES_AND_PRESENCE.md). The active Operating Mode enforces operational constraints that alter state transitions:
+
+```mermaid
+flowchart TD
+    MacroMode["Active Macro Operating Mode (e.g. SILENT_COPILOT, FULL_DUPLEX_VOICE)"]
+    MacroMode -->|Governs Sensory & Output Gates| PerTurnFSM["Per-Turn Cognitive State Machine (9 States)"]
+
+    subgraph Alterations["Mode-Driven Transition Rules"]
+        VoiceRule["In FULL_DUPLEX_VOICE:<br/>SPEAKING streams 24kHz audio via Kokoro TTS."]
+        SilentRule["In SILENT_COPILOT:<br/>Audio output is muted. VERIFYING -> HUD Toast / Notification instead of SPEAKING."]
+        CyberRule["In CYBER_SENTINEL:<br/>Voice loop is dormant. Syscall/packet events trigger APPRAISING -> EXECUTING headlessly."]
+        DevRule["In PAIR_PROGRAMMING:<br/>Compiler/AST events trigger shadow workspace execution and IDE diff rendering."]
+        DormantRule["In DORMANT_MODE:<br/>All execution frozen; only hardware wake-word or push notification can awaken."]
+    end
+
+    PerTurnFSM --- Alterations
+```
+
+### Specific Mode Constraints:
+1. **Full-Duplex Voice (`FULL_DUPLEX_VOICE`)**:
+   - The canonical 9-state machine executes in its full standard audio loop.
+   - `LISTENING` uses continuous 16kHz microphone stream with AEC.
+   - `SPEAKING` drives Kokoro-82M neural TTS through low-latency audio buffers (< 170ms TTFA).
+2. **Silent Copilot (`SILENT_COPILOT`)**:
+   - Speaker output is strictly **MUTED**.
+   - The transition `VERIFYING` $\to$ `SPEAKING` is intercepted: the engine formats the output into a floating HUD notification card, toast pill, or terminal message and transitions directly to `RETURNING_TO_DORMANT`.
+3. **Autonomous Cyber Sentinel (`CYBER_SENTINEL`)**:
+   - Audio input and output remain dormant.
+   - Transitions are triggered by background kernel/network events (eBPF / ETW alerts). The system enters `APPRAISING` $\to$ `PLANNING` $\to$ `EXECUTING` headlessly in isolated sandboxes, notifying the user only upon Tier 4 unresolvable threats.
+4. **Deep Pair-Programming (`PAIR_PROGRAMMING`)**:
+   - Voice is optional and opportunistic.
+   - AST changes and build failures trigger `APPRAISING` $\to$ `PLANNING` in shadow sandboxes. Output is rendered visually via the live Artifact Canvas (`clients/canvas`) or terminal diffs (`ratatui`).
+5. **Low-Power Dormant (`DORMANT_MODE`)**:
+   - All state machine executions are inhibited. The system sits exclusively in `DORMANT` until an authorized wake signal occurs.
+
+---
+
+## 3. Non-Negotiable Invariants
 
 ### Invariant 1: Persistent Cognitive Operating System (Not a Launcher, Not a Chatbot)
 EON is not an app drawer, a home screen replacement, or a traditional chatbot UI.  
@@ -88,5 +127,21 @@ EON does not behave like a timid assistant that asks for permission to breathe.
 
 ### Invariant 7: Honest Telemetry & Zero Fabrication
 EON must report reality exactly as observed.  
-**Rule**: Never fabricate model confidence, fake successful verification, simulate device hardware states, or hallucinate missing facts. If an outcome is uncertain, it MUST be reported as `EXECUTED_UNVERIFIED` or `FAILED`.
+**Rule**: Never fabricate model confidence, fake successful verification, simulate device hardware states, or hallucinate missing facts.
+- When capability verification is physically confirmed, the task state is committed as `TaskState::Completed` (`VerificationStatus::SuccessVerified`).
+- If an outcome is uncertain or hardware feedback is non-deterministic, it MUST be reported as `TaskState::UncertainFailure` (`VerificationStatus::ExecutedUnverified`).
+- If verification demonstrates failure, it MUST be reported as `TaskState::Failed` (`VerificationStatus::VerificationFailed`).
 
+### Invariant 8: Untrusted-to-Privileged Escalation Gate (Cognitive Taint Tracking)
+EON ingests massive volumes of external, untrusted content (web scrapes, third-party git repos, decompiled binaries, untrusted app accessibility trees) while maintaining radical autonomy to write code and execute processes. This creates a lethal indirect prompt injection vulnerability unless strictly gated at the information-flow level.  
+**Rule**: All data entering the cognitive context is strictly partitioned into Information Flow Control (IFC) trust tiers:
+1. `TRUSTED_OPERATOR`: Directly uttered voice instructions from authenticated user biometrics, authenticated local terminal inputs, and system-level configuration files.
+2. `UNTRUSTED_EXTERNAL`: Web scrapes (`net.scrape_clean`), third-party repository files (`workspace.read`), decompiled bytecode/strings (`cyber.offense.decompile_dex`), and accessibility nodes from external applications (`android.screen_inspect`).
+
+**Deterministic Kernel Enforcement**:
+- If an active workflow or context ledger contains `UNTRUSTED_EXTERNAL` data spans, the `eon-kernel` `TaskDispatcher` evaluates all downstream tasks against the **Privileged Escalation Boundary**.
+- Any task requesting **Privileged Permissions** (`Permissions::MUTATE_WORKSPACE`, `Permissions::EXECUTE_PROCESS`, `Permissions::DEVICE_CONTROL`, `Permissions::INVOKE_NETWORK_EGRESS`) whose parameters (file paths, shell commands, script code, destination URLs) derive from untrusted spans is **STRICTLY BLOCKED** from autonomous execution.
+- To execute, the task must either:
+  1. Pass through an isolated **Dual-LLM Deterministic Privilege Filter** (a separate sandboxed verification model verifying zero instruction drift or prompt injection payloads), OR
+  2. Drop directly to a **NACK User Confirmation Gate** requiring explicit operator approval.
+- Radical Autonomy (Invariant 6) is subordinate to Invariant 8: untrusted external data can never autonomously trigger privileged host mutations.

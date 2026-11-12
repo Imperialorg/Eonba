@@ -1,8 +1,8 @@
 # VOICE PIPELINE SPECIFICATION (STT & TTS)
 
 > **Subsystem:** EON Perception & Speech Engine  
-> **Module:** `perception/voice-engine`  
-> **Latency Target:** Time-To-First-Audio (TTFA) < 200ms | End-of-Utterance to Token < 80ms
+> **Module:** `engine/core-rs/crates/eon-voice`  
+> **Latency Target:** Time-To-First-Audio (TTFA) < 170ms | End-of-Utterance to Token < 70ms
 
 ---
 
@@ -16,39 +16,56 @@ EON utilizes an **end-to-end streaming, chunked, duplex audio pipeline** where s
 [User Mic]
    │ (16kHz 16-bit PCM Audio Frames - 30ms chunks)
    ▼
-┌─────────────────────────┐
-│ Silero VAD (30ms chunk) │ ──► [Speech Detected: Confidence > 0.85]
-└───────────┬─────────────┘
-            │ Continuous Audio Stream
-            ▼
+┌─────────────────────────────────┐
+│ Acoustic Echo Canceller (AEC)   │ ◄─── [Reverse Reference Stream from TTS Buffer]
+└──────────────┬──────────────────┘
+               │ Echo-Cancelled Audio
+               ▼
+┌─────────────────────────────────┐
+│ Silero VAD v5 (30ms chunk)      │ ──► [Speech Detected: Confidence > 0.85]
+└──────────────┬──────────────────┘
+               │ Speech Active
+               ▼
+┌─────────────────────────────────┐
+│ Biometric Speaker ID (WeSpeaker)│ ──► [Score >= 0.78: Authorized Operator Confirmed]
+└──────────────┬──────────────────┘
+               │ Authorized Audio Stream
+               ▼
 ┌─────────────────────────────────┐
 │ Streaming Zipformer int8 ASR    │ ──► Emits partial tokens every 60ms
-└───────────┬─────────────────────┘
-            │ End-Of-Utterance (250ms silence) -> Final Utterance
-            ▼
+└──────────────┬──────────────────┘
+               │ End-Of-Utterance (250ms silence) -> Final Utterance
+               ▼
 ┌─────────────────────────────────┐
-│ Ciel Cognitive Router (SLM)     │ ──► Streams response tokens instantly
-└───────────┬─────────────────────┘
-            │ Token Stream: ["Affirmative.", " Analysis", " complete."]
-            ▼
+│ Ciel Cognitive Router (SLM)     │ ──► Dual-Stream Split:
+│                                 │     1. Silent <think>...</think> -> HUD / CLI only
+└──────────────┬──────────────────┘     2. Post-</think> Tokens -> Clause Chunker
+               │ Spoken Stream: ["Affirmative.", " Analysis", " complete."]
+               ▼
 ┌─────────────────────────────────┐
-│ Clause Chunker & Normalizer     │ ──► Sends first clause ("Affirmative.") immediately
-└───────────┬─────────────────────┘
-            │ Normalized Text Clauses
-            ▼
+│ Clause Chunker & Normalizer     │ ──► Sends first clause ("Affirmative.") in < 20ms
+└──────────────┬──────────────────┘
+               │ Normalized Text Clauses
+               ▼
 ┌─────────────────────────────────┐
 │ Kokoro-82M Neural Streaming TTS │ ──► RTF < 0.15 (Generates 1s audio in 150ms on CPU)
-└───────────┬─────────────────────┘
-            │ 24kHz PCM Audio Buffers
-            ▼
-[Audio Output Driver (AAudio / WASAPI)] ──► [Speaker] (User hears sound at T+180ms)
+└──────────────┬──────────────────┘
+               │ 24kHz PCM Audio Buffers
+               ▼
+[Native Audio Driver (AAudio/WASAPI)] ──► [Speaker] (User hears sound at T+170ms)
 ```
 
 ---
 
 ## 2. Low-Latency Speech-to-Text (STT) Subsystem
 
-### 2.1 Voice Activity Detection (VAD)
+### 2.1 Acoustic Echo Cancellation (AEC) & Loopback Reference
+To prevent EON from barging in on her own voice when speaking through open speakers:
+- **Engine**: `webrtc-audio-processing` (or native DSP loopback).
+- **Reverse Reference Stream**: The 24kHz TTS audio playback ring buffer is tapped and fed directly into the AEC module as the reference stream.
+- **Echo Suppression**: Cancels acoustic bleed from the physical speaker into the microphone prior to feeding samples to Silero VAD.
+
+### 2.2 Voice Activity Detection (VAD)
 - **Model**: Silero VAD v5 (ONNX format, quantized int8, model footprint: 2.1 MB).
 - **Frame Size**: 30ms (480 samples at 16,000 Hz, 16-bit linear PCM).
 - **Processing Time**: < 0.8ms per frame on modern CPU.
@@ -57,14 +74,20 @@ EON utilizes an **end-to-end streaming, chunked, duplex audio pipeline** where s
   - `end_speech_silence_duration`: 250ms of continuous silence below 0.35 confidence.
   - Dynamically lowers to 180ms when the user pauses after a complete syntactic sentence structure.
 
-### 2.2 Streaming ASR Engine
+### 2.3 Biometric Speaker Verification (WeSpeaker)
+To prevent accidental wakeups or interruptions from background TV audio, crowd speech, or third parties:
+- **Model**: `wespeaker-voxceleb-resnet34` (quantized INT8 ONNX, ~6.0 MB).
+- **Extraction**: Evaluates a 256-dimensional speaker voiceprint embedding on the first 120ms of detected speech (< 2ms evaluation on CPU).
+- **Cosine Verification**:
+  $$\text{CosineSimilarity}(\vec{e}_{\text{live}}, \vec{e}_{\text{owner}}) \ge 0.78$$
+  If similarity is below threshold, speech is tagged as ambient environmental noise and ignored.
+
+### 2.4 Streaming ASR Engine
 - **Engine**: `sherpa-onnx` runtime with pre-packaged **int8 Streaming Zipformer**.
 - **Model Parameters**: Multi-scale Zipformer transducer trained on LibriSpeech + GigaSpeech (streaming encoder chunk size: 32 frames = 160ms hop).
 - **Latency**:
   - Emits partial transcripts incrementally every 100ms.
   - Final transcript available within **40ms** of VAD end-of-utterance trigger.
-- **Accuracy Fallback**:
-  - For complex technical vocabulary, code snippets, or foreign names, a background Moonshine/Whisper-tiny int8 model runs rescoring asynchronously, updating context if a divergence is detected.
 
 ---
 
@@ -83,7 +106,48 @@ Traditional TTS systems wait for an entire paragraph before synthesizing speech.
 2. The `ClauseChunker` splits on punctuation delimiters (`.`, `!`, `?`, `,`, `;`, `:`) or reaches an 8-word chunk boundary.
 3. The first chunk `"Affirmative."` is dispatched to Kokoro within **20ms** of the cognitive core's first token.
 4. Kokoro produces the first 800ms audio buffer in **50ms**.
-5. Audio playback begins at **T+180ms**, while the next clause is synthesized concurrently in the background.
+5. Audio playback begins at **T+170ms**, while the next clause is synthesized concurrently in the background.
+
+### 3.3 Grapheme-to-Phoneme (G2P) Frontend & Vocabulary Mapping
+The Kokoro-82M neural ONNX graph does **not** ingest raw UTF-8 text strings directly; it requires a sequence of International Phonetic Alphabet (IPA) phoneme token IDs. To achieve real-time speech synthesis without external dependencies, `eon-voice` integrates an embedded **G2P Engine**:
+
+```mermaid
+flowchart LR
+    TextChunk["Normalized Text Chunk ('Affirmative.')"] --> Verbalizer["Dual-Channel Verbalizer (Pronunciation Normalizer)"]
+    Verbalizer --> G2P["misaki / espeak-ng G2P Engine"]
+    G2P --> Phonemes["IPA Phoneme String (/əˈfɜːrmətɪv/)"]
+    Phonemes --> VocabMap["kokoro_vocab.json Tokenizer (< 1ms)"]
+    VocabMap --> TokenIDs["Tensor of Token IDs: [24, 78, 12, 91]"]
+    TokenIDs --> KokoroONNX["kokoro-v0_19.onnx Neural Synthesis"]
+    KokoroONNX --> AudioPCM["24kHz 16-bit Mono PCM Samples"]
+```
+
+1. **Embedded Phonemizer (`misaki` / `espeak-ng`)**:
+   - Converts English orthography into IPA phoneme representations with native stress markers.
+   - Executes in $< 1\text{ms}$ per clause in pure Rust without spawning child processes.
+2. **Phoneme Vocabulary Tokenizer (`kokoro_vocab.json`)**:
+   - Maps IPA symbols to Kokoro's exact internal token indices defined in `perception/models/tts/kokoro_vocab.json`.
+   - Replaces missing or unmapped symbols with silence pauses (`_`), preventing tensor shape mismatches or runtime panics.
+
+### 3.4 The Dual-Channel Verbalizer Rule (Speaking Code Aloud)
+In software engineering, devops, and cyber operations, raw technical text contains file paths (`engine/core-rs/crates/eon-cyber/src/ast/tree_sitter_engine.rs`), 64-character SHA-256 digests (`4722513f56da...`), raw pointers (`0x7fff5fbff8c0`), and Rust generics (`EonResult<Option<Arc<RwLock<Task>>>>`). Reading these character-by-character over audio creates acoustic chaos and listener fatigue.
+
+Ciel strictly enforces the **Dual-Channel Verbalizer Architecture**:
+
+1. **Dual-Channel Separation**:
+   - **Spoken Summary Channel** (Kokoro TTS): Ciel emits a concise, conversational natural language synthesis designed purely for human listening.
+     - *Spoken*: *"Report: Patched timing vulnerability in authentication service on line 84. All 14 unit tests passed."*
+   - **Visual HUD / Terminal Channel** (Screen Overlay, Canvas, CLI): Full, unredacted AST diffs, line-number changes, SHA-256 digests, and compiler logs stream in real-time to the user's display.
+
+2. **Acoustic Normalization Rules for Technical Terms**:
+   When technical identifiers appear in the spoken stream, the verbalizer rewrites them for natural cadence:
+   - `lib.rs` $\to$ *"lib dot R-S"*
+   - `Cargo.toml` $\to$ *"Cargo dot tom-mel"*
+   - `fn main()` $\to$ *"function main"*
+   - `i32` / `u64` $\to$ *"32-bit integer"* / *"64-bit unsigned integer"*
+   - `0x00007FFF` $\to$ *"memory address seven F-F-F"*
+   - `v1.4.2` $\to$ *"version one point four point two"*
+   - `4722513f...` $\to$ *"digest starting four-seven-two-two"* (truncates hashes to 4 hex characters)
 
 ---
 
@@ -94,38 +158,37 @@ A truly intelligent assistant must allow the user to interrupt at any time witho
 ```mermaid
 sequenceDiagram
     participant Speaker as EON Speaker Output
-    participant AEC as Acoustic Echo Canceller
+    participant AEC as webrtc-audio-processing (AEC)
     participant Mic as Microphone Input
+    participant SpkID as WeSpeaker Biometric Check
     participant VAD as Silero VAD
     participant Core as EON Runtime Core
 
     Speaker->>Speaker: Playing: "Report: Detailed system log indicates..."
-    Speaker->>AEC: Reference Audio Feed
+    Speaker->>AEC: Reverse Reference Audio Feed
     Mic->>AEC: Raw Mic Input (User Speech + Speaker Bleed)
-    AEC->>VAD: Cleaned Audio Stream
+    AEC->>VAD: Cleaned Audio Stream (Speaker Bleed Cancelled)
     Note over Mic,VAD: User says: "Stop that"
-    VAD->>Core: BARGE_IN_TRIGGERED (Confidence: 0.92, Duration: 60ms)
-    activate Core
+    VAD->>SpkID: Speech Detected (60ms)
+    SpkID->>Core: Voice Authenticated (Cosine = 0.89)
     Core->>Speaker: IMMEDIATE ABORT (Mute & Flush Buffer < 5ms)
     Core->>Core: Cancel Active TTS Task
     Core->>Core: Transition State: SPEAKING -> LISTENING
-    deactivate Core
     Speaker-->>Speaker: Playback Halted Instantly
 ```
 
 ### Barge-In Invariants:
-1. **Zero Audio Lag on Cancellation**: When `BARGE_IN_TRIGGERED` is fired, the audio output buffer is flushed in **< 5ms** via native driver calls.
+1. **Zero Audio Lag on Cancellation**: When `BARGE_IN_TRIGGERED` is fired, the audio output driver buffer is flushed in **< 5ms** via native driver calls.
 2. **Cancellation Journaling**: The cancelled speech task is recorded in the event journal as `INTERRUPTED_BY_USER` with the timestamp and token offset.
 3. **Seamless State Handover**: The user's interrupting utterance is immediately routed to the Cognitive Core without requiring wake-words.
 
 ---
 
-## 5. Audio Buffer Management & Memory Bounds
+## 5. Audio Buffer Management & Hardware Drivers
 
 To prevent memory leaks or audio jitter:
 - **Audio Ring Buffer**: Fixed-size circular buffer holding 10 seconds of raw 16kHz audio (320 KB memory footprint).
-- **Zero Heap Allocations**: Native audio callbacks reuse pre-allocated `ByteBuffer` arrays; no GC pressure occurs on the audio hot-path.
-- **Hardware Integration**:
-  - Android: `AAudio` stream in `AAUDIO_PERFORMANCE_MODE_LOW_LATENCY` and `AAUDIO_SHARING_MODE_EXCLUSIVE`.
-  - Windows: `WASAPI` in Exclusive Mode with 10ms event-driven buffer periods.
-
+- **Native Hardware Drivers**:
+  - **Android**: Rust `eon-voice` opens native C/NDK `AAudio` / `Oboe` streams directly in `AAUDIO_PERFORMANCE_MODE_LOW_LATENCY` and `AAUDIO_SHARING_MODE_EXCLUSIVE`. Shared memory buffers ensure zero memory copies across language boundaries. (UniFFI `inject_audio_pcm_for_testing` is used only in test harnesses).
+  - **Windows**: WASAPI in Exclusive Mode with 10ms event-driven buffer periods.
+  - **Linux / macOS**: ALSA / PulseAudio / CoreAudio via `cpal`.

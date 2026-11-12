@@ -42,8 +42,9 @@ flowchart TD
         VAD["Silero VAD (30ms chunks)"]
         ASR["Streaming Zipformer ASR (int8)"]
         PreCog["Predictive Pre-Cognition (Early-Exit Decoder)"]
-        ScreenReader["Accessibility UI Tree / MediaProjection"]
-        BargeIn["Acoustic Echo Canceller & Barge-In Detector"]
+        ScreenReader["Accessibility UI Tree / OmniParser-v2"]
+        VideoSampler["Adaptive Keyframe Sampler (1-5 FPS)"]
+        BargeIn["Acoustic Echo Canceller (AEC) & Barge-In Detector"]
     end
 
     subgraph CielCognition["Ciel Cognitive Core (Thought Acceleration)"]
@@ -193,47 +194,56 @@ sequenceDiagram
 
 ## 4. Repository & Module Directory Layout
 
-The codebase in `d:\Projects\EON — Engine Optimized for Netwotking` is organized across dedicated, decoupled modules:
+The codebase in `./` is organized across dedicated, decoupled native Rust crates, platform clients, and definitive specifications:
 
 ```text
 EON/
 ├── README.md                              # System Overview, Vision & Ciel Pillars
 ├── AGENT_EXECUTION_GUIDE.md               # Mandatory Agent Zero-Question Protocol
+├── proto/                                 # Wire Serialization Contracts
+│   └── eon.proto                          # P2P QUIC Mesh RPC & Desktop Daemon IPC
 ├── docs/                                  # Definitive Specifications
 │   ├── ARCHITECTURE.md                    # This document
 │   ├── CIEL_CORE_SPECIFICATION.md         # Cognitive Soul & Thought Acceleration
 │   ├── CYBER_AND_PROGRAMMING_MASTERY.md   # Information Particle Manipulation & Cyber
 │   ├── DISTRIBUTED_NETWORKING_MESH.md     # Engine Optimized for Networking Spec
-│   ├── VOICE_PIPELINE_SPECIFICATION.md    # Low-latency duplex STT/TTS
+│   ├── VOICE_PIPELINE_SPECIFICATION.md    # Low-latency duplex STT/TTS & AEC loopback
+│   ├── MULTIMODAL_VISION_AND_RENDERING.md # Vision, OmniParser, Keyframes & Artifact Canvas
+│   ├── FOUNDATION_AND_PRIMITIVES_SPECIFICATION.md # Level 0 & 1 Primitives, Journal & Identity
 │   ├── EXECUTION_KERNEL_SPECIFICATION.md  # Vector DAG Execution Kernel
-│   ├── CAPABILITY_FABRIC_SPECIFICATION.md # Capability & Tool Runtime
-│   ├── MEMORY_AND_APPRAISAL_SPECIFICATION.md # Hybrid memory architecture
+│   ├── CAPABILITY_FABRIC_SPECIFICATION.md # Capability & Tool Runtime (LSP, Sandboxing)
+│   ├── MEMORY_AND_APPRAISAL_SPECIFICATION.md # Hybrid memory (CRDT source-of-truth + SQLite projection)
 │   ├── STATE_MACHINE_AND_INVARIANTS.md    # State machine & safety rules
 │   ├── ROADMAP_AND_IMPLEMENTATION_PLAN.md # Phased implementation backlog
 │   ├── SYSTEM_PROMPTS_AND_PERSONA.md      # Ciel Prompts & Output Schemas
+│   ├── MODELS_AND_WEIGHTS_SETUP.md        # Model weights, profiles & checksum downloader
+│   ├── OPERATING_MODES_AND_PRESENCE.md    # 5 Canonical Operating Modes
+│   ├── ANDROID_INTEGRATION_SPECIFICATION.md # Android presence, accessibility & native audio
+│   ├── TECH_STACK_AND_TOOLCHAINS.md       # Toolchains, Cargo workspace & UniFFI bridge
 │   └── decisions/                         # Architectural Decision Records (ADRs)
 │
-├── engine/                                # Vector Execution Kernel & Cyber (Kotlin / JVM)
-│   ├── build.gradle.kts                   # Root Gradle build configuration
-│   ├── settings.gradle.kts                # Module declarations
-│   ├── kernel-primitives/                 # Level 0: IDs, Time, Errors, Results
-│   ├── foundation-services/               # Level 1: Journal, State Store, Identity
-│   ├── execution-foundations/             # Level 2: Events, Leases, State Machines
-│   ├── resource-management/               # Resource accounting and budgeting
-│   ├── execution-engine/                  # Level 3: DAG Scheduler, Dispatcher, Recovery
-│   ├── capability-fabric/                 # Level 4: Tool Registry, Sandboxing
-│   ├── cyber-core/                        # Information Particle Manipulation & Security
-│   ├── mesh-network/                      # P2P QUIC Transport & CRDT Synchronizer
-│   ├── ciel-cognition/                    # Level 5: Thought Acceleration & Compiler
-│   └── local-capability-providers/        # OS, Files, Shell, Network, Binary tools
+├── engine/                                # Native Core Engine Workspace (Rust 2024 Edition)
+│   └── core-rs/
+│       ├── Cargo.toml                     # Cargo workspace root manifest
+│       └── crates/
+│           ├── eon-primitives/            # Level 0: ULIDs, MonotonicTime, EonResult, EonError
+│           ├── eon-foundation/            # Level 1: Append-only event journal, Identity, State Store
+│           ├── eon-kernel/                # Level 2 & 3: DAG scheduler, Epoch leases, Saga reconciler
+│           ├── eon-capability/            # Level 4: Tool registry, LSP client, Sandboxes, Process exec
+│           ├── eon-cyber/                 # Information Particle Manipulation (AST, LibAFL, Z3, P-Code)
+│           ├── eon-mesh/                  # P2P QUIC transport (iroh), Loro CRDT synchronizer
+│           ├── eon-voice/                 # Audio loop (CPAL/AAudio), VAD, ASR, Kokoro TTS, AEC loopback
+│           ├── eon-vision/                # OmniParser UI grounding, 1-5 FPS adaptive keyframe sampler
+│           ├── eon-cognition/             # Level 5: Thought Acceleration router, Ciel persona
+│           └── eon-uniffi/                # UniFFI interface definitions for Kotlin & Swift
 │
 ├── perception/                            # Perception & Speech Pipeline
-│   ├── voice-engine/                      # Sherpa-onnx, Zipformer, Kokoro, VAD
-│   └── models/                            # Quantized model weights & ONNX graphs
+│   └── models/                            # Quantized model weights & ONNX graphs (Silero, Kokoro, OmniParser)
 │
 ├── clients/                               # Interactive Frontends
-│   ├── cli/                               # Interactive terminal interface
-│   ├── android/                           # Android persistent presence & overlay
+│   ├── cli/                               # Interactive terminal interface (ratatui + ratatui-image)
+│   ├── android/                           # Android persistent presence, accessibility & overlay (Kotlin)
+│   ├── canvas/                            # Live interactive Artifact Canvas (wgpu / Compose Desktop)
 │   └── daemon/                            # System background service & IPC
 │
 └── tests/                                 # Full-System & Integration Test Suites
