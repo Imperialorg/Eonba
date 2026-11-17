@@ -3,6 +3,7 @@ pub mod asr;
 pub mod endpoint;
 pub mod gain;
 pub mod geometry;
+pub mod ring;
 pub mod vad;
 
 pub use eon_primitives::*;
