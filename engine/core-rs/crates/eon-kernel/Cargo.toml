@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+diffy = "0.4"
 eon-foundation = { version = "0.1.0", path = "../eon-foundation" }
 eon-primitives = { path = "../eon-primitives" }
 
