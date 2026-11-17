@@ -5,22 +5,21 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use eon_voice::ring::pcm_ring;
 
 struct CountingAlloc;
 
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-
+// Thread-local so that allocations on other test threads (tests run in parallel) cannot leak into this count.
 thread_local! {
     static ARMED: Cell<bool> = const { Cell::new(false) };
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
 unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if ARMED.with(Cell::get) {
-            ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
+            ALLOCATIONS.with(|count| count.set(count.get() + 1));
         }
         unsafe { System.alloc(layout) }
     }
@@ -34,11 +33,11 @@ unsafe impl GlobalAlloc for CountingAlloc {
 static GLOBAL: CountingAlloc = CountingAlloc;
 
 fn allocations_during(f: impl FnOnce()) -> usize {
-    ALLOCATIONS.store(0, Ordering::SeqCst);
+    ALLOCATIONS.with(|count| count.set(0));
     ARMED.with(|armed| armed.set(true));
     f();
     ARMED.with(|armed| armed.set(false));
-    ALLOCATIONS.load(Ordering::SeqCst)
+    ALLOCATIONS.with(Cell::get)
 }
 
 #[test]
