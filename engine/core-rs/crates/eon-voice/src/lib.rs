@@ -3,6 +3,7 @@ pub mod asr;
 pub mod endpoint;
 pub mod gain;
 pub mod geometry;
+pub mod resample;
 pub mod ring;
 pub mod runtime;
 pub mod vad;
