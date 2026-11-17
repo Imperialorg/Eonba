@@ -9,8 +9,9 @@ use std::collections::BTreeMap;
 use eon_primitives::{EonError, EonResult};
 
 use crate::ifc::rule_of_two::{Decision, TaskProfile, decide};
-use crate::schema;
 use crate::mcp_pinning::{PinStore, ToolDescriptor};
+use crate::melon::{self, MaskedRunner, ToolCall};
+use crate::schema;
 
 pub trait Tool: Send + Sync {
     fn descriptor(&self) -> ToolDescriptor;
@@ -21,6 +22,7 @@ pub trait Tool: Send + Sync {
 pub struct CapabilityRegistry {
     tools: BTreeMap<String, Box<dyn Tool>>,
     pins: PinStore,
+    melon: Option<Box<dyn MaskedRunner>>,
 }
 
 impl CapabilityRegistry {
@@ -37,8 +39,26 @@ impl CapabilityRegistry {
         Ok(())
     }
 
+    /// Installs the masked run used by MELON checks. Without one, `dispatch_guarded` skips the check.
+    pub fn set_melon_runner(&mut self, runner: Box<dyn MaskedRunner>) {
+        self.melon = Some(runner);
+    }
+
     /// Runs a tool only if it is not quarantined and the task passes the Rule-of-Two gate.
     pub fn dispatch(&mut self, name: &str, profile: &TaskProfile, input: &str) -> EonResult<String> {
+        self.dispatch_guarded(name, profile, input, None)
+    }
+
+    /// Like `dispatch`. `untrusted_context` is the tool output that preceded this call when that output came from an
+    /// untrusted source. With a MELON runner installed, such a call must pass the masked re-execution check before it
+    /// runs (docs/implementation/01, section 5.4).
+    pub fn dispatch_guarded(
+        &mut self,
+        name: &str,
+        profile: &TaskProfile,
+        input: &str,
+        untrusted_context: Option<&str>,
+    ) -> EonResult<String> {
         if self.pins.is_quarantined(name) {
             return Err(EonError::SecurityViolation(format!("tool '{name}' is quarantined")));
         }
@@ -62,6 +82,13 @@ impl CapabilityRegistry {
             .map_err(|e| EonError::ValidationError(format!("input for '{name}' is not JSON: {e}")))?;
         schema::validate(&schema_value, &input_value)
             .map_err(|e| EonError::ValidationError(format!("input for '{name}' rejected: {e}")))?;
+        if let (Some(context), Some(runner)) = (untrusted_context, self.melon.as_deref()) {
+            let proposed = ToolCall {
+                name: name.to_owned(),
+                arguments: input_value,
+            };
+            melon::check(runner, context, &proposed)?;
+        }
         tool.invoke(input)
     }
 }
@@ -187,6 +214,36 @@ mod tests {
             reg.dispatch("echo", &trusted_read_only(), r#"{"msg":"ok"}"#).unwrap(),
             r#"echo:{"msg":"ok"}"#
         );
+    }
+
+    struct FixedRunner(Vec<ToolCall>);
+    impl MaskedRunner for FixedRunner {
+        fn emitted_calls(&self, _: &str) -> EonResult<Vec<ToolCall>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn melon_refuses_a_call_after_untrusted_context_when_the_masked_run_repeats_it() {
+        let mut reg = CapabilityRegistry::new();
+        reg.register(strict_echo()).unwrap();
+        let proposed = ToolCall { name: "echo".into(), arguments: serde_json::json!({"msg": "ok"}) };
+        reg.set_melon_runner(Box::new(FixedRunner(vec![proposed])));
+        let outcome = reg.dispatch_guarded("echo", &trusted_read_only(), r#"{"msg":"ok"}"#, Some("web page text"));
+        assert!(matches!(outcome, Err(EonError::SecurityViolation(msg)) if msg.contains("MELON")));
+    }
+
+    #[test]
+    fn melon_is_skipped_without_untrusted_context_or_a_runner() {
+        let mut reg = CapabilityRegistry::new();
+        reg.register(strict_echo()).unwrap();
+        let proposed = ToolCall { name: "echo".into(), arguments: serde_json::json!({"msg": "ok"}) };
+        reg.set_melon_runner(Box::new(FixedRunner(vec![proposed])));
+        assert!(reg.dispatch_guarded("echo", &trusted_read_only(), r#"{"msg":"ok"}"#, None).is_ok());
+
+        let mut bare = CapabilityRegistry::new();
+        bare.register(strict_echo()).unwrap();
+        assert!(bare.dispatch_guarded("echo", &trusted_read_only(), r#"{"msg":"ok"}"#, Some("ctx")).is_ok());
     }
 
     #[test]
