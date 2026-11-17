@@ -10,6 +10,9 @@ blake3 = "1"
 eon-foundation = { version = "0.1.0", path = "../eon-foundation" }
 eon-primitives = { path = "../eon-primitives" }
 getrandom = "0.3"
+landlock = "0.4"
+libc = "0.2"
+seccompiler = "0.5"
 serde_json = "1"
 
 [dev-dependencies]

@@ -4,6 +4,7 @@ pub mod mcp_pinning;
 pub mod melon;
 pub mod quarantine;
 pub mod registry;
+pub mod sandbox;
 pub mod schema;
 
 pub use eon_primitives::*;
