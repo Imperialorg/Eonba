@@ -1,6 +1,8 @@
 //! Kernel event emission (docs/implementation/01, section 4). Every state change the kernel makes is reported to a
 //! sink before the caller sees success, so a durable sink (the group-commit journal) can record it first.
 
+use std::collections::BTreeMap;
+
 use eon_primitives::{EonResult, TaskId};
 
 use crate::fsm::TaskState;
@@ -17,6 +19,8 @@ fn fsm_state(state: workflow::TaskState) -> TaskState {
 pub enum KernelEvent {
     TaskTransition { task: TaskId, from: TaskState, to: TaskState },
     SubgraphSpliced { parent: TaskId, added: Vec<TaskId> },
+    /// A cognitive epoch committed these writes. Keys and values are already scrubbed when recorded.
+    EpochCommitted { id: u64, writes: BTreeMap<String, String> },
 }
 
 pub trait EventSink {

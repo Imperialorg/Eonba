@@ -5,6 +5,8 @@
 //! `S<TAB>parent<TAB>child,child,...`. The format is versioned by its leading tag so future event kinds can be
 //! added without breaking replay.
 
+use std::collections::BTreeMap;
+
 use eon_foundation::group_commit::GroupCommitJournal;
 use eon_primitives::{EonError, EonResult, TaskId};
 
@@ -40,6 +42,38 @@ fn corrupt(reason: String) -> EonError {
     EonError::InternalError(format!("corrupt kernel event: {reason}"))
 }
 
+/// Escapes tab, newline, and backslash so free-text keys and values cannot break the field layout.
+fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn unescape(text: &str) -> EonResult<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('\\') => out.push('\\'),
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            other => return Err(corrupt(format!("bad escape {other:?}"))),
+        }
+    }
+    Ok(out)
+}
+
 pub fn encode(event: &KernelEvent) -> Vec<u8> {
     let line = match event {
         KernelEvent::TaskTransition { task, from, to } => {
@@ -48,6 +82,14 @@ pub fn encode(event: &KernelEvent) -> Vec<u8> {
         KernelEvent::SubgraphSpliced { parent, added } => {
             let children: Vec<String> = added.iter().map(|id| id.to_string()).collect();
             format!("S\t{parent}\t{}", children.join(","))
+        }
+        KernelEvent::EpochCommitted { id, writes } => {
+            let mut fields = vec!["E".to_owned(), id.to_string()];
+            for (key, value) in writes {
+                fields.push(escape(key));
+                fields.push(escape(value));
+            }
+            fields.join("\t")
         }
     };
     line.into_bytes()
@@ -74,6 +116,19 @@ pub fn decode(bytes: &[u8]) -> EonResult<KernelEvent> {
             Ok(KernelEvent::SubgraphSpliced {
                 parent: parent.parse::<TaskId>().map_err(|e| corrupt(e.to_string()))?,
                 added,
+            })
+        }
+        ["E", id, rest @ ..] => {
+            if rest.len() % 2 != 0 {
+                return Err(corrupt("epoch record has an unpaired key".into()));
+            }
+            let mut writes = BTreeMap::new();
+            for pair in rest.chunks(2) {
+                writes.insert(unescape(pair[0])?, unescape(pair[1])?);
+            }
+            Ok(KernelEvent::EpochCommitted {
+                id: id.parse::<u64>().map_err(|e| corrupt(e.to_string()))?,
+                writes,
             })
         }
         _ => Err(corrupt(format!("unrecognized record with {} fields", fields.len()))),
@@ -113,6 +168,13 @@ mod tests {
             KernelEvent::TaskTransition { task: a.clone(), from: TaskState::Ready, to: TaskState::Running },
             KernelEvent::SubgraphSpliced { parent: a.clone(), added: vec![b.clone()] },
             KernelEvent::SubgraphSpliced { parent: a.clone(), added: vec![] },
+            KernelEvent::EpochCommitted {
+                id: 7,
+                writes: BTreeMap::from([
+                    ("back\\slash".to_owned(), "tab\there\nnewline".to_owned()),
+                    (String::new(), String::new()),
+                ]),
+            },
         ];
         for event in events {
             assert_eq!(decode(&encode(&event)).unwrap(), event);

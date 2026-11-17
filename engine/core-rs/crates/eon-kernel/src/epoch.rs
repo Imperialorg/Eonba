@@ -6,7 +6,10 @@
 
 use std::collections::BTreeMap;
 
+use eon_foundation::scrubber::scrub;
 use eon_primitives::{EonError, EonResult};
+
+use crate::events::{EventSink, KernelEvent};
 
 #[derive(Debug, Default)]
 pub struct SharedState {
@@ -45,6 +48,50 @@ impl SharedState {
 
     /// Applies an epoch's staged writes atomically. Refused if a newer epoch has already committed.
     pub fn commit(&mut self, epoch: &mut CognitiveEpoch) -> EonResult<()> {
+        self.ensure_committable(epoch)?;
+        let writes = std::mem::take(&mut epoch.staged);
+        self.apply(epoch, writes);
+        Ok(())
+    }
+
+    /// Commits like `commit`, but records the writes through `sink` before applying them. Keys and values are scrubbed
+    /// first, so the log and the in-memory state agree and neither holds a raw secret. If recording fails, nothing is
+    /// applied and the epoch stays open.
+    pub fn commit_recorded(&mut self, epoch: &mut CognitiveEpoch, sink: &mut dyn EventSink) -> EonResult<()> {
+        self.ensure_committable(epoch)?;
+        let writes: BTreeMap<String, String> = epoch
+            .staged
+            .iter()
+            .map(|(key, value)| (scrub(key), scrub(value)))
+            .collect();
+        sink.record(KernelEvent::EpochCommitted {
+            id: epoch.id,
+            writes: writes.clone(),
+        })?;
+        self.apply(epoch, writes);
+        Ok(())
+    }
+
+    /// Rebuilds state from recorded events in journal order. Other event kinds are ignored. An epoch that does not
+    /// advance the fence means the log is corrupt, so replay refuses it.
+    pub fn replay(events: &[KernelEvent]) -> EonResult<Self> {
+        let mut state = Self::new();
+        for event in events {
+            if let KernelEvent::EpochCommitted { id, writes } = event {
+                if *id <= state.fence {
+                    return Err(EonError::InternalError(format!(
+                        "epoch {id} does not advance past fence {}; the log is corrupt",
+                        state.fence
+                    )));
+                }
+                state.values.extend(writes.iter().map(|(k, v)| (k.clone(), v.clone())));
+                state.fence = *id;
+            }
+        }
+        Ok(state)
+    }
+
+    fn ensure_committable(&self, epoch: &mut CognitiveEpoch) -> EonResult<()> {
         if epoch.closed {
             return Err(EonError::ValidationError(format!("epoch {} is already closed", epoch.id)));
         }
@@ -55,12 +102,14 @@ impl SharedState {
                 epoch.id, self.fence
             )));
         }
-        for (key, value) in std::mem::take(&mut epoch.staged) {
-            self.values.insert(key, value);
-        }
+        Ok(())
+    }
+
+    fn apply(&mut self, epoch: &mut CognitiveEpoch, writes: BTreeMap<String, String>) {
+        self.values.extend(writes);
+        epoch.staged.clear();
         self.fence = epoch.id;
         epoch.closed = true;
-        Ok(())
     }
 }
 
@@ -145,5 +194,91 @@ mod tests {
         state.commit(&mut epoch).unwrap();
         assert!(epoch.stage("x", "y").is_err());
         assert!(state.commit(&mut epoch).is_err());
+    }
+
+    fn recorded_epochs(dir: &std::path::Path) -> Vec<KernelEvent> {
+        eon_foundation::journal::replay(dir)
+            .unwrap()
+            .iter()
+            .map(|frame| crate::journal_sink::decode(&frame.payload).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn recorded_commits_survive_restart_and_rebuild_the_same_state() {
+        use eon_foundation::group_commit::GroupCommitJournal;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = SharedState::new();
+        {
+            let journal = GroupCommitJournal::spawn(dir.path(), 16).unwrap();
+            let mut sink = crate::journal_sink::JournalSink::new(&journal);
+            let mut first = state.begin(1).unwrap();
+            first.stage("plan", "draft\twith\ttabs\nand a newline").unwrap();
+            state.commit_recorded(&mut first, &mut sink).unwrap();
+            let mut second = state.begin(2).unwrap();
+            second.stage("answer", "42").unwrap();
+            state.commit_recorded(&mut second, &mut sink).unwrap();
+        }
+
+        let rebuilt = SharedState::replay(&recorded_epochs(dir.path())).unwrap();
+        assert_eq!(rebuilt.fence(), 2);
+        assert_eq!(rebuilt.get("plan"), state.get("plan"));
+        assert_eq!(rebuilt.get("answer"), Some("42"));
+        assert_eq!(rebuilt.get("plan"), Some("draft\twith\ttabs\nand a newline"));
+    }
+
+    #[test]
+    fn secrets_are_scrubbed_before_reaching_the_log_or_state() {
+        use eon_foundation::group_commit::GroupCommitJournal;
+
+        let secret = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = SharedState::new();
+        {
+            let journal = GroupCommitJournal::spawn(dir.path(), 16).unwrap();
+            let mut sink = crate::journal_sink::JournalSink::new(&journal);
+            let mut epoch = state.begin(1).unwrap();
+            epoch.stage("note", format!("deploy with {secret} now")).unwrap();
+            state.commit_recorded(&mut epoch, &mut sink).unwrap();
+        }
+
+        assert!(!state.get("note").unwrap().contains(secret));
+        assert!(state.get("note").unwrap().contains("REDACTED"));
+        for frame in eon_foundation::journal::replay(dir.path()).unwrap() {
+            assert!(!String::from_utf8_lossy(&frame.payload).contains(secret), "raw secret reached the log");
+        }
+    }
+
+    struct FailingSink;
+    impl EventSink for FailingSink {
+        fn record(&mut self, _: KernelEvent) -> EonResult<()> {
+            Err(EonError::OperationFailed {
+                operation: "test.sink".into(),
+                reason: "disk full".into(),
+            })
+        }
+    }
+
+    #[test]
+    fn failed_recording_applies_nothing_and_leaves_the_epoch_open() {
+        let mut state = SharedState::new();
+        let mut epoch = state.begin(1).unwrap();
+        epoch.stage("plan", "draft").unwrap();
+        assert!(state.commit_recorded(&mut epoch, &mut FailingSink).is_err());
+        assert_eq!(state.get("plan"), None);
+        assert_eq!(state.fence(), 0);
+        state.commit(&mut epoch).unwrap();
+        assert_eq!(state.get("plan"), Some("draft"));
+    }
+
+    #[test]
+    fn replay_refuses_an_epoch_that_does_not_advance_the_fence() {
+        let writes = BTreeMap::from([("k".to_owned(), "v".to_owned())]);
+        let events = [
+            KernelEvent::EpochCommitted { id: 3, writes: writes.clone() },
+            KernelEvent::EpochCommitted { id: 3, writes },
+        ];
+        assert!(SharedState::replay(&events).is_err());
     }
 }
