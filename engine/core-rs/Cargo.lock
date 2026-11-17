@@ -1437,8 +1437,10 @@ dependencies = [
 name = "eon-cognition"
 version = "0.1.0"
 dependencies = [
+ "eon-capability",
  "eon-primitives",
  "llama-cpp-2",
+ "serde_json",
 ]
 
 [[package]]
