@@ -8,4 +8,5 @@ license.workspace = true
 [dependencies]
 eon-primitives = { path = "../eon-primitives" }
 petgraph = "0.8"
+serde_json = "1"
 
