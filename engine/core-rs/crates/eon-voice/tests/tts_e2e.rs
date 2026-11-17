@@ -42,3 +42,33 @@ fn synthesized_speech_is_intelligible_to_the_pinned_asr() {
     eprintln!("ROUND_TRIP transcript={transcript:?} found={found}");
     assert!(found >= 3, "round trip recovered {found} of 5 words: {transcript:?}");
 }
+
+#[test]
+fn streaming_delivers_the_first_clause_before_the_reply_is_finished() {
+    let models = repo_models();
+    let mut tts = KokoroTts::load(models.join("tts/kokoro-v1.0-int8.onnx"), models.join("tts/voices/af_heart.bin"))
+        .expect("pinned Kokoro model must load");
+    let mut callbacks = 0usize;
+    let mut total_samples = 0usize;
+    let timing = tts
+        .synthesize_streaming(
+            "Affirmative. The report is ready, and the tests all passed. Shall I summarize it now?",
+            1.0,
+            |samples| {
+                callbacks += 1;
+                total_samples += samples.len();
+            },
+        )
+        .expect("streaming synthesis must succeed");
+
+    assert_eq!(timing.clauses, 4, "four clauses: commas and full stops both split");
+    assert_eq!(callbacks, 4, "one callback per clause");
+    let seconds = total_samples as f32 / SAMPLE_RATE_HZ as f32;
+    assert!(seconds > 2.0, "streamed audio is only {seconds:.2} s");
+    assert!(
+        timing.first_audio < timing.total.mul_f32(0.7),
+        "first audio at {:?} is not clearly before the full reply at {:?}",
+        timing.first_audio,
+        timing.total
+    );
+}

@@ -4,7 +4,16 @@
 //! ALSA's first period can take over a second to arrive, so the waits are long enough to see the first callback.
 
 use std::sync::atomic::Ordering;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
+
+/// The device tests share one audio server and sink, and concurrent streams on it produce driver errors. Each test
+/// holds this lock for its whole duration.
+static DEVICE: Mutex<()> = Mutex::new(());
+
+fn device_guard() -> MutexGuard<'static, ()> {
+    DEVICE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 use eon_voice::barge_in::BargeIn;
 use eon_voice::device::{capture_default_input, play_default_output};
@@ -12,6 +21,7 @@ use eon_voice::ring::pcm_ring;
 
 #[test]
 fn default_input_delivers_frames_without_driver_errors() {
+    let _device = device_guard();
     let (producer, consumer) = pcm_ring(1 << 16);
     let handle = match capture_default_input(producer) {
         Ok(handle) => handle,
@@ -32,6 +42,7 @@ fn default_input_delivers_frames_without_driver_errors() {
 
 #[test]
 fn default_output_drains_queued_audio_and_counts_underruns_when_empty() {
+    let _device = device_guard();
     let (mut producer, consumer) = pcm_ring(1 << 16);
     let tone: Vec<f32> = (0..8_000)
         .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16_000.0).sin() * 0.2)
@@ -54,6 +65,7 @@ fn default_output_drains_queued_audio_and_counts_underruns_when_empty() {
 
 #[test]
 fn barge_in_flushes_queued_speech_during_playback() {
+    let _device = device_guard();
     let (mut producer, consumer) = pcm_ring(1 << 20);
     let speech: Vec<f32> = (0..160_000)
         .map(|i| (2.0 * std::f32::consts::PI * 220.0 * i as f32 / 16_000.0).sin() * 0.2)

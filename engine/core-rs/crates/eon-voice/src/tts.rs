@@ -109,6 +109,32 @@ impl KokoroTts {
     }
 
     /// Synthesizes `text` at `speed` (0.5 to 2.0) and returns mono samples at `SAMPLE_RATE_HZ`.
+    /// Synthesizes clause by clause and hands each clause's samples to `on_clause` as soon as they exist. This lets
+    /// playback start before the whole reply is synthesized.
+    pub fn synthesize_streaming(
+        &mut self,
+        text: &str,
+        speed: f32,
+        mut on_clause: impl FnMut(&[f32]),
+    ) -> EonResult<StreamTiming> {
+        let started = std::time::Instant::now();
+        let clauses = split_clauses(text);
+        if clauses.is_empty() {
+            return Err(EonError::ValidationError("text has no speakable clauses".into()));
+        }
+        let mut first_audio = None;
+        for clause in &clauses {
+            let samples = self.synthesize(clause, speed)?;
+            first_audio.get_or_insert_with(|| started.elapsed());
+            on_clause(&samples);
+        }
+        Ok(StreamTiming {
+            clauses: clauses.len(),
+            first_audio: first_audio.unwrap_or_default(),
+            total: started.elapsed(),
+        })
+    }
+
     pub fn synthesize(&mut self, text: &str, speed: f32) -> EonResult<Vec<f32>> {
         if !SPEED_RANGE.contains(&speed) {
             return Err(EonError::ValidationError(format!("speed {speed} is outside 0.5 to 2.0")));
@@ -143,9 +169,49 @@ impl KokoroTts {
     }
 }
 
+/// Splits text into clauses after sentence and clause punctuation. Each clause keeps its punctuation. Empty pieces are
+/// dropped, so every returned clause has at least one speakable character.
+pub fn split_clauses(text: &str) -> Vec<String> {
+    let mut clauses = Vec::new();
+    let mut current = String::new();
+    for c in text.chars() {
+        current.push(c);
+        if matches!(c, '.' | '!' | '?' | ';' | ':' | ',') {
+            let trimmed = current.trim();
+            if trimmed.chars().any(char::is_alphanumeric) {
+                clauses.push(trimmed.to_owned());
+            }
+            current.clear();
+        }
+    }
+    let rest = current.trim();
+    if rest.chars().any(char::is_alphanumeric) {
+        clauses.push(rest.to_owned());
+    }
+    clauses
+}
+
+/// Timing of one streamed synthesis. `first_audio` is the time until the first clause's samples were delivered.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StreamTiming {
+    pub clauses: usize,
+    pub first_audio: std::time::Duration,
+    pub total: std::time::Duration,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clauses_keep_their_punctuation_and_drop_empty_pieces() {
+        assert_eq!(
+            split_clauses("Affirmative. I am running the test now, and the report follows shortly."),
+            vec!["Affirmative.", "I am running the test now,", "and the report follows shortly."]
+        );
+        assert_eq!(split_clauses("  ... ,  "), Vec::<String>::new());
+        assert_eq!(split_clauses("no punctuation here"), vec!["no punctuation here"]);
+    }
 
     #[test]
     fn vocab_maps_single_characters_to_the_reference_ids() {

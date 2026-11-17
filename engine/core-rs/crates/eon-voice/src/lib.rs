@@ -2,6 +2,7 @@
 pub mod aec;
 pub mod asr;
 pub mod barge_in;
+pub mod delay;
 pub mod device;
 pub mod endpoint;
 pub mod features;
