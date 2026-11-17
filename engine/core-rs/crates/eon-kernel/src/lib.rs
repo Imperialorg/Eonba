@@ -5,6 +5,7 @@ pub mod fsm;
 pub mod journal_sink;
 pub mod resource;
 pub mod saga;
+pub mod schedule;
 pub mod shadow;
 pub mod worktree;
 pub mod workflow;
