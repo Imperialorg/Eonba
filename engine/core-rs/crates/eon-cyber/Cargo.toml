@@ -7,5 +7,5 @@ license.workspace = true
 
 [dependencies]
 eon-primitives = { path = "../eon-primitives" }
-eon-capability = { path = "../eon-capability" }
+petgraph = "0.8"
 

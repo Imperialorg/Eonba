@@ -1,0 +1,15 @@
+[package]
+name = "eon-daemon"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+eon-cli = { path = "../eon-cli" }
+eon-primitives = { path = "../eon-primitives" }
+libc = "0.2"
+
+[dev-dependencies]
+eon-foundation = { path = "../eon-foundation" }
+tempfile = "3"

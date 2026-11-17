@@ -1,3 +1,5 @@
-//! EON Distributed Networking Mesh: P2P QUIC Transport & CRDT Synchronizer.
-pub use eon_primitives::*;
+//! EON Distributed Mesh: spatial election and replicated projection state.
+pub mod election;
+pub mod sync;
 
+pub use eon_primitives::*;

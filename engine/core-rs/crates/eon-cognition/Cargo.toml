@@ -7,5 +7,5 @@ license.workspace = true
 
 [dependencies]
 eon-primitives = { path = "../eon-primitives" }
-eon-kernel = { path = "../eon-kernel" }
+llama-cpp-2 = "0.1"
 

@@ -1,3 +1,8 @@
-//! EON Perception Engine: Low-Latency VAD, Streaming ASR & Kokoro Neural TTS.
-pub use eon_primitives::*;
+//! EON Voice Pipeline: frame geometry, endpointing, VAD and ASR inference, and ASR gain control.
+pub mod asr;
+pub mod endpoint;
+pub mod gain;
+pub mod geometry;
+pub mod vad;
 
+pub use eon_primitives::*;

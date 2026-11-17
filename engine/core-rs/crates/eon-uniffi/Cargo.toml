@@ -7,6 +7,14 @@ license.workspace = true
 
 [dependencies]
 eon-primitives = { path = "../eon-primitives" }
-eon-kernel = { path = "../eon-kernel" }
 eon-voice = { path = "../eon-voice" }
+uniffi = { version = "0.29", features = ["cli"] }
+eon-cognition = { version = "0.1.0", path = "../eon-cognition" }
 
+
+[lib]
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"

@@ -6,5 +6,15 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+aho-corasick = "1"
+blake3 = "1"
+crc32fast = "1"
 eon-primitives = { path = "../eon-primitives" }
+rusqlite = { version = "0.37", features = ["bundled"] }
+sqlite-vec = "0.1.9"
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
 
