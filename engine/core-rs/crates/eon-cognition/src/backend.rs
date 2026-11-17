@@ -45,6 +45,18 @@ impl LocalModel {
 
     /// Generates up to `max_tokens` tokens greedily after `prompt`, stopping at end-of-generation.
     pub fn generate_greedy(&self, prompt: &str, max_tokens: usize) -> EonResult<String> {
+        self.generate_with(prompt, max_tokens, LlamaSampler::greedy())
+    }
+
+    /// Generates greedily under a GBNF grammar, so every token keeps the output inside the grammar. The grammar's
+    /// root rule is `root`. Generation stops when the grammar is complete or `max_tokens` is reached.
+    pub fn generate_constrained(&self, prompt: &str, grammar: &str, max_tokens: usize) -> EonResult<String> {
+        let constraint = LlamaSampler::grammar(&self.model, grammar, "root")
+            .map_err(|e| llm_err("grammar", e))?;
+        self.generate_with(prompt, max_tokens, LlamaSampler::chain_simple([constraint, LlamaSampler::greedy()]))
+    }
+
+    fn generate_with(&self, prompt: &str, max_tokens: usize, mut sampler: LlamaSampler) -> EonResult<String> {
         let ctx_size = NonZeroU32::new(CONTEXT_TOKENS).expect("nonzero constant");
         let mut ctx = self
             .model
@@ -66,12 +78,11 @@ impl LocalModel {
         }
         ctx.decode(&mut batch).map_err(|e| llm_err("decode", e))?;
 
-        let mut sampler = LlamaSampler::greedy();
         let mut output = Vec::new();
         let mut logits_index = batch.n_tokens() - 1;
         for position in (prompt_tokens.len() as i32..).take(max_tokens) {
+            // `sample` also accepts the token into the sampler chain, so it must not be accepted again.
             let token = sampler.sample(&ctx, logits_index);
-            sampler.accept(token);
             if vocab.is_eog(token) {
                 break;
             }
