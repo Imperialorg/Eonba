@@ -1,6 +1,7 @@
 //! EON Voice Pipeline: frame geometry, endpointing, VAD and ASR inference, and ASR gain control.
 pub mod aec;
 pub mod asr;
+pub mod barge_in;
 pub mod device;
 pub mod endpoint;
 pub mod gain;

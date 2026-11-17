@@ -63,7 +63,9 @@ impl PcmConsumer {
         read
     }
 
-    /// Discards everything queued, in one index update. Used on barge-in so stale TTS audio never plays.
+    /// Discards everything queued. Used on barge-in so stale TTS audio never plays. rtrb walks the discarded slots to
+    /// drop them, which is a no-op for `f32` and folds away in optimized builds, so the cost is constant there. Debug
+    /// builds pay per queued sample.
     pub fn flush(&mut self) -> usize {
         let available = self.inner.slots();
         if available == 0 {
@@ -141,5 +143,22 @@ mod tests {
         let mut out = [0.0f32; 8];
         assert_eq!(rx.pop_slice(&mut out), 8);
         assert!(out.iter().all(|&s| s == 0.25));
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn flushing_a_full_ring_takes_under_five_milliseconds() {
+        let capacity = 1 << 20;
+        let (mut tx, mut rx) = pcm_ring(capacity);
+        let block = vec![0.1f32; 4096];
+        while tx.push_slice(&block) == block.len() {}
+        let queued = rx.available();
+        assert!(queued > capacity / 2, "ring must be nearly full before the flush");
+
+        let start = std::time::Instant::now();
+        let dropped = rx.flush();
+        let elapsed = start.elapsed();
+        assert_eq!(dropped, queued);
+        assert!(elapsed < std::time::Duration::from_millis(5), "flush took {elapsed:?}");
     }
 }

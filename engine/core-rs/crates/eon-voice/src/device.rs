@@ -12,6 +12,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample, Stream};
 use eon_primitives::{EonError, EonResult};
 
+use crate::barge_in::BargeIn;
 use crate::ring::{PcmConsumer, PcmProducer};
 
 const SCRATCH_FRAMES: usize = 16_384;
@@ -23,6 +24,8 @@ pub struct DeviceCounters {
     pub frames: AtomicU64,
     pub underruns: AtomicU64,
     pub driver_errors: AtomicU64,
+    pub barge_in_flushes: AtomicU64,
+    pub flushed_samples: AtomicU64,
 }
 
 fn device_err(operation: &str, reason: impl std::fmt::Display) -> EonError {
@@ -107,6 +110,7 @@ fn build_playback<T>(
     config: &cpal::SupportedStreamConfig,
     mut consumer: PcmConsumer,
     counters: Arc<DeviceCounters>,
+    barge: BargeIn,
 ) -> EonResult<Stream>
 where
     T: SizedSample + FromSample<f32>,
@@ -122,9 +126,16 @@ where
             move |out: &mut [T], _| {
                 data_counters.callbacks.fetch_add(1, Ordering::Relaxed);
                 let frames = out.len() / channels;
-                let want = frames.min(mono.len());
-                let got = consumer.pop_slice(&mut mono[..want]);
-                if got < frames {
+                let mut got = 0;
+                if barge.take() {
+                    let dropped = consumer.flush();
+                    data_counters.barge_in_flushes.fetch_add(1, Ordering::Relaxed);
+                    data_counters.flushed_samples.fetch_add(dropped as u64, Ordering::Relaxed);
+                } else {
+                    let want = frames.min(mono.len());
+                    got = consumer.pop_slice(&mut mono[..want]);
+                }
+                if got < frames && !barge.is_pending() {
                     data_counters.underruns.fetch_add(1, Ordering::Relaxed);
                 }
                 for (frame_index, frame) in out.chunks_exact_mut(channels).enumerate() {
@@ -142,8 +153,9 @@ where
         .map_err(|e| device_err("playback.build", e))
 }
 
-/// Opens the default output device and plays mono PCM pulled from `consumer` until the handle is dropped.
-pub fn play_default_output(consumer: PcmConsumer) -> EonResult<PlaybackHandle> {
+/// Opens the default output device and plays mono PCM pulled from `consumer` until the handle is dropped. A pending
+/// `barge` request flushes the ring and silences the next callback.
+pub fn play_default_output(consumer: PcmConsumer, barge: BargeIn) -> EonResult<PlaybackHandle> {
     let device = cpal::default_host()
         .default_output_device()
         .ok_or_else(|| device_err("playback.device", "no default output device"))?;
@@ -152,8 +164,8 @@ pub fn play_default_output(consumer: PcmConsumer) -> EonResult<PlaybackHandle> {
         .map_err(|e| device_err("playback.config", e))?;
     let counters = Arc::new(DeviceCounters::default());
     let stream = match config.sample_format() {
-        SampleFormat::F32 => build_playback::<f32>(&device, &config, consumer, Arc::clone(&counters))?,
-        SampleFormat::I16 => build_playback::<i16>(&device, &config, consumer, Arc::clone(&counters))?,
+        SampleFormat::F32 => build_playback::<f32>(&device, &config, consumer, Arc::clone(&counters), barge)?,
+        SampleFormat::I16 => build_playback::<i16>(&device, &config, consumer, Arc::clone(&counters), barge)?,
         other => return Err(device_err("playback.format", format!("unsupported sample format {other:?}"))),
     };
     stream.play().map_err(|e| device_err("playback.play", e))?;

@@ -6,6 +6,7 @@
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use eon_voice::barge_in::BargeIn;
 use eon_voice::device::{capture_default_input, play_default_output};
 use eon_voice::ring::pcm_ring;
 
@@ -36,7 +37,7 @@ fn default_output_drains_queued_audio_and_counts_underruns_when_empty() {
         .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16_000.0).sin() * 0.2)
         .collect();
     assert_eq!(producer.push_slice(&tone), tone.len());
-    let handle = match play_default_output(consumer) {
+    let handle = match play_default_output(consumer, BargeIn::new()) {
         Ok(handle) => handle,
         Err(e) => {
             eprintln!("skipping playback: {e}");
@@ -48,5 +49,33 @@ fn default_output_drains_queued_audio_and_counts_underruns_when_empty() {
     let underruns = handle.counters.underruns.load(Ordering::Relaxed);
     assert_eq!(errors, 0, "driver reported errors during playback");
     assert!(underruns > 0, "an empty ring must be counted as underrun, not silently skipped");
+    drop(handle);
+}
+
+#[test]
+fn barge_in_flushes_queued_speech_during_playback() {
+    let (mut producer, consumer) = pcm_ring(1 << 20);
+    let speech: Vec<f32> = (0..160_000)
+        .map(|i| (2.0 * std::f32::consts::PI * 220.0 * i as f32 / 16_000.0).sin() * 0.2)
+        .collect();
+    assert_eq!(producer.push_slice(&speech), speech.len());
+    let barge = BargeIn::new();
+    let handle = match play_default_output(consumer, barge.clone()) {
+        Ok(handle) => handle,
+        Err(e) => {
+            eprintln!("skipping barge-in playback: {e}");
+            return;
+        }
+    };
+    std::thread::sleep(Duration::from_millis(1000));
+    barge.trigger();
+    std::thread::sleep(Duration::from_millis(1500));
+    let flushes = handle.counters.barge_in_flushes.load(Ordering::Relaxed);
+    let dropped = handle.counters.flushed_samples.load(Ordering::Relaxed);
+    let errors = handle.counters.driver_errors.load(Ordering::Relaxed);
+    assert_eq!(errors, 0, "driver reported errors during barge-in");
+    assert_eq!(flushes, 1, "the trigger must flush exactly once");
+    assert!(dropped > 0, "the flush must drop the queued speech, not play it out");
+    assert!(!barge.is_pending(), "the request must be consumed");
     drop(handle);
 }
