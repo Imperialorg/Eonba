@@ -13,6 +13,7 @@ eon-primitives = { path = "../eon-primitives" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 sqlite-vec = "0.1.9"
 zeroize = { version = "1", features = ["derive"] }
+zstd = "0.13"
 
 [dev-dependencies]
 proptest = "1"

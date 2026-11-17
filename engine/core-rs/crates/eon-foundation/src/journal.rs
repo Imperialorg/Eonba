@@ -18,6 +18,11 @@ pub const FRAME_VERSION: u16 = 1;
 pub const HEADER_LEN: usize = 32;
 pub const MAX_PAYLOAD_LEN: usize = 16 * 1024 * 1024;
 pub const DEFAULT_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
+/// Header flag: the stored payload is a zstd frame. Replay decompresses it and never returns this bit.
+pub const FLAG_ZSTD: u16 = 0x0001;
+/// Payloads below this size are never compressed, since the frame overhead would dominate.
+pub const COMPRESS_MIN_BYTES: usize = 256;
+const ZSTD_LEVEL: i32 = 3;
 
 const SEGMENT_PREFIX: &str = "seg_";
 const SEGMENT_SUFFIX: &str = ".eonj";
@@ -40,6 +45,7 @@ pub struct JournalWriter {
     segment_len: u64,
     next_seq: u64,
     max_segment_bytes: u64,
+    compress: bool,
 }
 
 impl JournalWriter {
@@ -65,6 +71,7 @@ impl JournalWriter {
                 segment_len: 0,
                 next_seq: 1,
                 max_segment_bytes,
+                compress: false,
             });
         };
 
@@ -94,7 +101,14 @@ impl JournalWriter {
             segment_len: scan.valid_end as u64,
             next_seq: scan.next_seq,
             max_segment_bytes,
+            compress: false,
         })
+    }
+
+    /// Enables zstd compression for payloads of at least `COMPRESS_MIN_BYTES`. A payload is stored compressed only
+    /// when that is smaller than the original, so enabling this never grows the journal.
+    pub fn set_compression(&mut self, enabled: bool) {
+        self.compress = enabled;
     }
 
     /// Appends payloads as one group commit. Returns the sequence number assigned to each payload.
@@ -113,7 +127,16 @@ impl JournalWriter {
                 )));
             }
             let seq = self.next_seq + i as u64;
-            encode_frame(seq, ts, 0, payload, &mut buf);
+            let compressed = if self.compress && payload.len() >= COMPRESS_MIN_BYTES {
+                zstd::bulk::compress(payload, ZSTD_LEVEL).map_err(|e| io_err("journal.compress", e))?
+            } else {
+                Vec::new()
+            };
+            if !compressed.is_empty() && compressed.len() < payload.len() {
+                encode_frame(seq, ts, FLAG_ZSTD, &compressed, &mut buf);
+            } else {
+                encode_frame(seq, ts, 0, payload, &mut buf);
+            }
             seqs.push(seq);
         }
 
@@ -384,15 +407,22 @@ fn decode_at(buf: &[u8]) -> Option<(Frame, usize)> {
     if payload_len > MAX_PAYLOAD_LEN || buf.len() < HEADER_LEN + payload_len {
         return None;
     }
-    let payload = &buf[HEADER_LEN..HEADER_LEN + payload_len];
-    if checksum(&buf[4..24], payload) != u32_at(24) {
+    let stored = &buf[HEADER_LEN..HEADER_LEN + payload_len];
+    if checksum(&buf[4..24], stored) != u32_at(24) {
         return None;
     }
+    let mut flags = u16::from_le_bytes([buf[6], buf[7]]);
+    let payload = if flags & FLAG_ZSTD != 0 {
+        flags &= !FLAG_ZSTD;
+        zstd::bulk::decompress(stored, MAX_PAYLOAD_LEN).ok()?
+    } else {
+        stored.to_vec()
+    };
     let frame = Frame {
         seq_no: u64::from_le_bytes(buf[8..16].try_into().expect("8 bytes")),
         mono_ts_ns: u64::from_le_bytes(buf[16..24].try_into().expect("8 bytes")),
-        flags: u16::from_le_bytes([buf[6], buf[7]]),
-        payload: payload.to_vec(),
+        flags,
+        payload,
     };
     Some((frame, HEADER_LEN + payload_len))
 }
@@ -694,5 +724,46 @@ mod tests {
             Err(EonError::ValidationError(_))
         ));
         assert!(replay(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn compressed_payloads_round_trip_and_shrink_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = vec![b'a'; 4096];
+        let small = b"tiny".to_vec();
+        let mut writer = JournalWriter::open(dir.path()).unwrap();
+        writer.set_compression(true);
+        writer.append_batch(&[big.as_slice(), small.as_slice()]).unwrap();
+
+        let segment = list_segments(dir.path()).unwrap().remove(0).1;
+        let on_disk = fs::metadata(&segment).unwrap().len() as usize;
+        assert!(on_disk < HEADER_LEN * 2 + big.len() + small.len(), "on-disk {on_disk} not compressed");
+
+        let frames = replay(dir.path()).unwrap();
+        assert_eq!(frames[0].payload, big);
+        assert_eq!(frames[1].payload, small);
+        assert_eq!(frames[0].flags & FLAG_ZSTD, 0, "replay must not expose the storage flag");
+    }
+
+    #[test]
+    fn corrupt_compressed_frame_is_not_replayed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = JournalWriter::open(dir.path()).unwrap();
+        writer.set_compression(true);
+        writer.append_batch(&[vec![b'z'; 4096].as_slice()]).unwrap();
+        drop(writer);
+
+        let segment = list_segments(dir.path()).unwrap().remove(0).1;
+        let mut bytes = fs::read(&segment).unwrap();
+        let mut header = [0u8; HEADER_LEN];
+        header.copy_from_slice(&bytes[..HEADER_LEN]);
+        let stored = &bytes[HEADER_LEN..];
+        let garbage = vec![0x5Au8; stored.len()];
+        let mut forged = Vec::new();
+        encode_frame(1, u64::from_le_bytes(header[16..24].try_into().unwrap()), FLAG_ZSTD, &garbage, &mut forged);
+        bytes = forged;
+        fs::write(&segment, &bytes).unwrap();
+
+        assert!(replay(dir.path()).is_err(), "undecodable complete frame must be refused, not dropped");
     }
 }
