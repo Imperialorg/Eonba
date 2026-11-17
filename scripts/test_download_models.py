@@ -8,6 +8,7 @@ import http.server
 import io
 import json
 import os
+import pathlib
 import re
 import tempfile
 import threading
@@ -128,11 +129,23 @@ class PlanAndRefusal(unittest.TestCase):
         self.assertNotIn("UNPINNED", out)
 
     def test_fetching_an_unpinned_model_is_refused_without_network(self):
+        unpinned_lock = {
+            "schema_version": 3,
+            "models": [
+                {"id": "unpinned-probe", "dest": "probe/model.onnx", "url": "https://example.invalid/m.onnx",
+                 "sha256": None, "size_bytes": None, "license": "Apache-2.0"},
+            ],
+        }
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(dm.urllib.request, "urlopen") as opener:
-            code, _ = self.run_main(["--ids", "wespeaker-resnet34", "--root", tmp])
+            lock_path = pathlib.Path(tmp) / "lock.json"
+            with open(lock_path, "w", encoding="utf-8") as fh:
+                json.dump(unpinned_lock, fh)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = dm.main(["--ids", "unpinned-probe", "--root", tmp], lock_path=lock_path, root=tmp)
             opener.assert_not_called()
             self.assertEqual(code, 1)
-            self.assertEqual(os.listdir(tmp), [])
+            self.assertEqual(os.listdir(tmp), ["lock.json"])
 
     def test_unknown_profile_exits_with_usage_error(self):
         code, _ = self.run_main(["--profile", "p9"])

@@ -8,13 +8,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use eon_primitives::{EonError, EonResult};
-use kaldi_native_fbank::online::FeatureComputer;
-use kaldi_native_fbank::{FbankComputer, FbankOptions, OnlineFeature};
+
+use crate::features::{kaldi_fbank, NUM_MEL_BINS};
 use ort::session::{Session, SessionInputValue};
 use ort::value::{Tensor, TensorElementType, ValueType};
 
-const SAMPLE_RATE_HZ: f32 = 16_000.0;
-const NUM_MEL_BINS: usize = 80;
 const CHUNK_FRAMES: usize = 45;
 const CHUNK_SHIFT: usize = 32;
 const CONTEXT_SIZE: usize = 2;
@@ -99,26 +97,6 @@ fn initial_caches(encoder: &Session) -> EonResult<Vec<CacheTensor>> {
         .collect()
 }
 
-fn fbank(samples: &[f32]) -> EonResult<Vec<Vec<f32>>> {
-    let mut opts = FbankOptions::default();
-    opts.frame_opts.dither = 0.0;
-    opts.frame_opts.snip_edges = false;
-    opts.mel_opts.num_bins = NUM_MEL_BINS;
-    opts.use_energy = false;
-    let computer = FbankComputer::new(opts).map_err(|e| onnx_err("fbank", e))?;
-    let mut features = OnlineFeature::new(FeatureComputer::Fbank(computer));
-    features.accept_waveform(SAMPLE_RATE_HZ, samples);
-    features.input_finished();
-    (0..features.num_frames_ready())
-        .map(|i| {
-            features
-                .get_frame(i)
-                .map(<[f32]>::to_vec)
-                .ok_or_else(|| onnx_err("fbank", format!("missing frame {i}")))
-        })
-        .collect()
-}
-
 fn argmax(values: &[f32]) -> i64 {
     values
         .iter()
@@ -148,7 +126,7 @@ impl ZipformerAsr {
     pub fn transcribe(&mut self, samples: &[f32]) -> EonResult<String> {
         self.caches = initial_caches(&self.encoder)?;
 
-        let mut frames = fbank(samples)?;
+        let mut frames = kaldi_fbank(samples)?;
         frames.extend(std::iter::repeat_with(|| vec![0.0; NUM_MEL_BINS]).take(CHUNK_FRAMES));
 
         let mut context = [BLANK_ID; CONTEXT_SIZE];
