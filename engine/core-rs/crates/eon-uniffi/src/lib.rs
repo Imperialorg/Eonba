@@ -10,13 +10,14 @@ uniffi::setup_scaffolding!();
 
 #[derive(Debug, uniffi::Error)]
 pub enum BridgeError {
-    InvalidInput { message: String },
+    /// Named `reason` rather than `message`: Kotlin's `Exception.message` would clash with a generated property.
+    InvalidInput { reason: String },
 }
 
 impl std::fmt::Display for BridgeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidInput { message } => write!(f, "invalid input: {message}"),
+            Self::InvalidInput { reason } => write!(f, "invalid input: {reason}"),
         }
     }
 }
@@ -43,7 +44,7 @@ impl From<Completeness> for VoiceCompleteness {
 pub fn select_model_profile(memory_gb: f64) -> Result<String, BridgeError> {
     ModelProfile::select_for_memory_gb(memory_gb)
         .map(|profile| profile.lock_key().to_string())
-        .map_err(|e| BridgeError::InvalidInput { message: e.to_string() })
+        .map_err(|e| BridgeError::InvalidInput { reason: e.to_string() })
 }
 
 /// End-of-turn silence threshold in milliseconds for a transcript completeness tier.
