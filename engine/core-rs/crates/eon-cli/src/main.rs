@@ -14,8 +14,15 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        [_, cmd, dir] if cmd == "watch" => match eon_cli::run_watch(&PathBuf::from(dir), std::time::Duration::from_millis(250)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("eon: {err}");
+                ExitCode::FAILURE
+            }
+        },
         _ => {
-            eprintln!("usage: eon status <journal-dir>");
+            eprintln!("usage: eon status|watch <journal-dir>");
             ExitCode::from(2)
         }
     }

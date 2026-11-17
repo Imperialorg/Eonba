@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+crossterm = "0.28"
 eon-foundation = { path = "../eon-foundation" }
 eon-primitives = { path = "../eon-primitives" }
 ratatui = "0.29"
