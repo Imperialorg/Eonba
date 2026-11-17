@@ -6,5 +6,6 @@ pub mod quarantine;
 pub mod registry;
 pub mod sandbox;
 pub mod schema;
+pub mod wasm_tool;
 
 pub use eon_primitives::*;
