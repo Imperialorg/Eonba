@@ -6,6 +6,7 @@ pub mod device;
 pub mod endpoint;
 pub mod gain;
 pub mod geometry;
+pub mod linear_echo;
 pub mod resample;
 pub mod ring;
 pub mod runtime;
