@@ -1607,6 +1607,7 @@ dependencies = [
  "ort",
  "rtrb",
  "rubato",
+ "serde_json",
 ]
 
 [[package]]

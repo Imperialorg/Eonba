@@ -12,4 +12,5 @@ kaldi-native-fbank = "0.1"
 ort = { version = "=2.0.0-rc.15", features = ["download-binaries"] }
 rtrb = "0.3"
 rubato = "5.1"
+serde_json = "1"
 

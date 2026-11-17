@@ -7,6 +7,7 @@ pub mod geometry;
 pub mod resample;
 pub mod ring;
 pub mod runtime;
+pub mod tts;
 pub mod vad;
 
 pub use eon_primitives::*;
