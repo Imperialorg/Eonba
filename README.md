@@ -128,6 +128,19 @@ In Tensura, Ciel never wastes time asking Rimuru trivial questions like *"Should
 
 ## 4. Documentation Map
 
+### Deep-Dive Engineering Implementation Manuals (2026 Edition)
+Start here when writing, compiling, or auditing code across the Rust workspace and platform clients:
+
+- [docs/IMPLEMENTATION_BLUEPRINT.md](./docs/IMPLEMENTATION_BLUEPRINT.md): Master 2026 engineering blueprint, baseline repository defect audit, verified Cargo dependency matrix, and build profiles (`profile-mobile-edge` vs `profile-workstation`).
+- [docs/implementation/01_KERNEL_FOUNDATION_AND_CAPABILITY_SECURITY.md](./docs/implementation/01_KERNEL_FOUNDATION_AND_CAPABILITY_SECURITY.md): CSPRNG ULID fix, `0x454F4E4A` group-commit journal, SQLite WAL + `sqlite-vec`, deadlock-free DAG & dynamic splicing, and CaMeL / FIDES / Rule-of-Two / MCP `2026-07-28` prompt-injection defense.
+- [docs/implementation/02_AI_COGNITION_MODELS_AND_INFERENCE_2026.md](./docs/implementation/02_AI_COGNITION_MODELS_AND_INFERENCE_2026.md): Gemma 4 and Qwen 3.5 / 3.6 model profiles, `llama-cpp-2` + `mistralrs` dual backend, `llguidance 1.9` cancellable grammar masks, `+ZoomIn` + OmniParser-v2 + Set-of-Mark GUI grounding, and `madvise` Memory Governor.
+- [docs/implementation/03_CYBERSECURITY_PROGRAM_ANALYSIS_AND_SANDBOXING.md](./docs/implementation/03_CYBERSECURITY_PROGRAM_ANALYSIS_AND_SANDBOXING.md): DARPA AIxCC CRS pipeline, pure-Rust Code Property Graphs, OSV/CycloneDX/SLSA audit, `libpcode` / `icicle-vm` P-Code lifting, `LibAFL 0.16` + Z3 concolic fuzzing, production `aya` CO-RE eBPF + BoringSSL uprobes, and 4-tier Landlock/seccomp/Firecracker/Wasmtime sandboxing.
+- [docs/implementation/04_DUPLEX_VOICE_AUDIO_AND_REALTIME_DSP.md](./docs/implementation/04_DUPLEX_VOICE_AUDIO_AND_REALTIME_DSP.md): Zipformer `2023-06-26` and `Nemotron-0.6B` streaming ASR, Kokoro-82M v1.0 + boot-cached Ciel bridges, wait-free `rtrb` DSP loop, delay-aligned AEC3, WeSpeaker gate, and 3-tier semantic endpointing.
+- [docs/implementation/05_DISTRIBUTED_MESH_CRDT_AND_CLIENTS.md](./docs/implementation/05_DISTRIBUTED_MESH_CRDT_AND_CLIENTS.md): Stabilized `iroh 1.4` (`EndpointId`, `Router`, 4-Class QUIC QoS), clock-skew-immune 15ms Spatial Election, Loro 1.4 CRDT + FIDES SQLite projector, Android 14+ `ROLE_ASSISTANT` + zero-copy `AHardwareBuffer`, daemon, CLI, and `wgpu` canvas.
+- [docs/implementation/06_VERIFICATION_BENCHMARKS_AND_PHASED_PLAYBOOK.md](./docs/implementation/06_VERIFICATION_BENCHMARKS_AND_PHASED_PLAYBOOK.md): Verified SHA-256 model lockfiles, Linux/Windows/Android NDK cross-compile recipes, 5 chaos & red-team gates, and Phase 0 to 10 execution playbook.
+
+### Architectural Vision Specifications
+
 To understand and build EON, explore the detailed specifications:
 
 - [AGENT_EXECUTION_GUIDE.md](./AGENT_EXECUTION_GUIDE.md) — **MANDATORY PROTOCOL** for autonomous AI coding agents implementing EON.
