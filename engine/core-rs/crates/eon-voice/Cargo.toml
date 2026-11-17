@@ -8,6 +8,6 @@ license.workspace = true
 [dependencies]
 eon-primitives = { path = "../eon-primitives" }
 kaldi-native-fbank = "0.1"
-ort = { version = "=2.0.0-rc.10", features = ["download-binaries"] }
+ort = { version = "=2.0.0-rc.15", features = ["download-binaries"] }
 rtrb = "0.3"
 

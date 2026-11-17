@@ -28,7 +28,7 @@ fn onnx_err(context: &str, e: impl std::fmt::Display) -> EonError {
 impl SileroVad {
     /// Loads the model from `path`. The file is expected to be the digest-verified artifact from `models.lock.json`.
     pub fn load(path: impl AsRef<Path>) -> EonResult<Self> {
-        let session = Session::builder()
+        let session = Session::builder(crate::runtime::environment()?)
             .map_err(|e| onnx_err("builder", e))?
             .with_intra_threads(1)
             .map_err(|e| onnx_err("threads", e))?

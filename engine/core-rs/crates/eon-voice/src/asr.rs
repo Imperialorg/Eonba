@@ -11,8 +11,7 @@ use eon_primitives::{EonError, EonResult};
 use kaldi_native_fbank::online::FeatureComputer;
 use kaldi_native_fbank::{FbankComputer, FbankOptions, OnlineFeature};
 use ort::session::{Session, SessionInputValue};
-use ort::tensor::TensorElementType;
-use ort::value::{Tensor, ValueType};
+use ort::value::{Tensor, TensorElementType, ValueType};
 
 const SAMPLE_RATE_HZ: f32 = 16_000.0;
 const NUM_MEL_BINS: usize = 80;
@@ -54,7 +53,7 @@ fn onnx_err(context: &str, e: impl std::fmt::Display) -> EonError {
 }
 
 fn load_session(path: &Path) -> EonResult<Session> {
-    Session::builder()
+    Session::builder(crate::runtime::environment()?)
         .map_err(|e| onnx_err("builder", e))?
         .with_intra_threads(1)
         .map_err(|e| onnx_err("threads", e))?
@@ -77,22 +76,22 @@ fn load_tokens(path: &Path) -> EonResult<HashMap<i64, String>> {
 /// the batch size used at inference.
 fn initial_caches(encoder: &Session) -> EonResult<Vec<CacheTensor>> {
     encoder
-        .inputs
+        .inputs()
         .iter()
-        .filter(|input| input.name != "x")
+        .filter(|input| input.name() != "x")
         .map(|input| {
-            let ValueType::Tensor { ty, shape, .. } = &input.input_type else {
-                return Err(onnx_err("caches", format!("non-tensor input {}", input.name)));
+            let ValueType::Tensor { ty, shape, .. } = input.dtype() else {
+                return Err(onnx_err("caches", format!("non-tensor input {}", input.name())));
             };
             let dims: Vec<i64> = shape.iter().map(|&d| if d <= 0 { 1 } else { d }).collect();
             let len = dims.iter().product::<i64>() as usize;
             let data = match ty {
                 TensorElementType::Float32 => CacheData::F32(vec![0.0; len]),
                 TensorElementType::Int64 => CacheData::I64(vec![0; len]),
-                other => return Err(onnx_err("caches", format!("unsupported {other:?} for {}", input.name))),
+                other => return Err(onnx_err("caches", format!("unsupported {other:?} for {}", input.name()))),
             };
             Ok(CacheTensor {
-                name: input.name.clone(),
+                name: input.name().to_owned(),
                 shape: dims,
                 data,
             })
