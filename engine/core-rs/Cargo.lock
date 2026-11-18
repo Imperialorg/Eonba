@@ -1578,6 +1578,7 @@ dependencies = [
 name = "eon-mesh"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "eon-primitives",
  "iroh",
  "loro",

@@ -5,8 +5,10 @@
 //! unless a peer address points elsewhere. Protocol negotiation uses an ALPN string, so a peer that does not speak it
 //! is refused during the handshake.
 
+use crate::qos::TrafficClass;
+use bytes::Bytes;
 use eon_primitives::{EonError, EonResult};
-use iroh::endpoint::{presets::Minimal, Endpoint};
+use iroh::endpoint::{presets::Minimal, Connection, Endpoint};
 use iroh::{EndpointAddr, RelayMode};
 
 /// Application protocol identifier. Peers that do not offer it are refused during the handshake.
@@ -47,14 +49,25 @@ impl PeerNode {
         self.endpoint.addr()
     }
 
-    /// Sends `payload` to `peer` and returns the reply.
+    /// Sends `payload` to `peer` at bulk priority and returns the reply.
     pub async fn request(&self, peer: impl Into<EndpointAddr>, payload: &[u8]) -> EonResult<Vec<u8>> {
-        let connection = self
-            .endpoint
-            .connect(peer, ALPN)
-            .await
-            .map_err(|e| transport_err("connect", e))?;
+        self.request_with_class(peer, TrafficClass::Bulk, payload).await
+    }
+
+    /// Sends `payload` to `peer` on a stream scheduled at `class`'s priority and returns the reply.
+    /// `TrafficClass::Audio` is refused because audio travels as datagrams, see [`Link::send_audio`].
+    pub async fn request_with_class(
+        &self,
+        peer: impl Into<EndpointAddr>,
+        class: TrafficClass,
+        payload: &[u8],
+    ) -> EonResult<Vec<u8>> {
+        let priority = class
+            .stream_priority()
+            .ok_or_else(|| transport_err("request", "audio uses datagrams, not streams"))?;
+        let connection = self.dial(peer).await?;
         let (mut send, mut recv) = connection.open_bi().await.map_err(|e| transport_err("open_stream", e))?;
+        send.set_priority(priority).map_err(|e| transport_err("set_priority", e))?;
         send.write_all(payload).await.map_err(|e| transport_err("send", e))?;
         send.finish().map_err(|e| transport_err("send", e))?;
         let reply = recv
@@ -63,6 +76,31 @@ impl PeerNode {
             .map_err(|e| transport_err("receive", e))?;
         connection.close(0u32.into(), b"done");
         Ok(reply)
+    }
+
+    /// Opens a connection to `peer` for datagram audio and classed requests.
+    pub async fn connect(&self, peer: impl Into<EndpointAddr>) -> EonResult<Link> {
+        Ok(Link {
+            connection: self.dial(peer).await?,
+        })
+    }
+
+    /// Waits for the next incoming connection and returns it as a [`Link`].
+    pub async fn accept(&self) -> EonResult<Link> {
+        let incoming = self
+            .endpoint
+            .accept()
+            .await
+            .ok_or_else(|| transport_err("accept", "endpoint closed"))?;
+        let connection = incoming.await.map_err(|e| transport_err("handshake", e))?;
+        Ok(Link { connection })
+    }
+
+    async fn dial(&self, peer: impl Into<EndpointAddr>) -> EonResult<Connection> {
+        self.endpoint
+            .connect(peer, ALPN)
+            .await
+            .map_err(|e| transport_err("connect", e))
     }
 
     /// Accepts one connection, reads one request, answers it with `handler`, and waits for the peer to close.
@@ -86,5 +124,39 @@ impl PeerNode {
 
     pub async fn close(self) {
         self.endpoint.close().await;
+    }
+}
+
+/// An established connection to one peer. Audio frames go out as datagrams, so a frame that cannot be delivered in
+/// time is dropped rather than retransmitted.
+pub struct Link {
+    connection: Connection,
+}
+
+impl Link {
+    /// Sends one audio frame as a datagram. Frames larger than the path allows are refused, not split.
+    pub fn send_audio(&self, frame: &[u8]) -> EonResult<()> {
+        let max = self
+            .connection
+            .max_datagram_size()
+            .ok_or_else(|| transport_err("send_audio", "peer does not accept datagrams"))?;
+        if frame.len() > max {
+            return Err(transport_err(
+                "send_audio",
+                format!("frame of {} bytes exceeds the {max} byte datagram limit", frame.len()),
+            ));
+        }
+        self.connection
+            .send_datagram(Bytes::copy_from_slice(frame))
+            .map_err(|e| transport_err("send_audio", e))
+    }
+
+    /// Waits for the next audio datagram from the peer.
+    pub async fn recv_audio(&self) -> EonResult<Vec<u8>> {
+        self.connection
+            .read_datagram()
+            .await
+            .map(|frame| frame.to_vec())
+            .map_err(|e| transport_err("recv_audio", e))
     }
 }
