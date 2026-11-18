@@ -13,6 +13,7 @@ members = [
     "crates/eon-uniffi",
     "crates/eon-cli",
     "crates/eon-daemon",
+    "crates/eon-canvas",
 ]
 
 [workspace.package]

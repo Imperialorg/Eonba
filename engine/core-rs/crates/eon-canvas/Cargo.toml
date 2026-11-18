@@ -1,0 +1,10 @@
+[package]
+name = "eon-canvas"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+pollster = "1.0.2"
+wgpu = "30.0.2"
