@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use eon_mesh::blob::{fetch, Manifest};
+use eon_mesh::blob::{fetch, fetch_missing, Assembler, Manifest};
 use eon_mesh::qos::BulkPacer;
 use eon_mesh::transport::PeerNode;
 
@@ -78,3 +78,31 @@ async fn a_substituted_chunk_stops_the_transfer_at_that_chunk() {
     client.close().await;
     assert!(err.contains("chunk 2 failed BLAKE3 verification"), "{err}");
 }
+
+#[tokio::test]
+async fn an_interrupted_transfer_resumes_with_only_the_missing_chunks() {
+    let blob = sample_blob();
+    let manifest = Manifest::for_bytes(&blob, CHUNK).unwrap();
+    let mut assembler = Assembler::new(manifest);
+    let client = PeerNode::start().await.unwrap();
+
+    let server = PeerNode::start().await.unwrap();
+    let server_addr = server.addr();
+    let serving = tokio::spawn(serve_chunks(server, blob.clone(), 3, Some(2)));
+    let interrupted = fetch_missing(&client, server_addr, &mut assembler, &mut BulkPacer::new(LINK_BYTES_PER_SEC)).await;
+    serving.await.unwrap();
+    assert!(interrupted.is_err());
+    assert_eq!(assembler.missing(), vec![2, 3]);
+
+    let server = PeerNode::start().await.unwrap();
+    let server_addr = server.addr();
+    let serving = tokio::spawn(serve_chunks(server, blob.clone(), 2, None));
+    fetch_missing(&client, server_addr, &mut assembler, &mut BulkPacer::new(LINK_BYTES_PER_SEC))
+        .await
+        .unwrap();
+    serving.await.unwrap();
+    client.close().await;
+
+    assert_eq!(assembler.finish().unwrap(), blob);
+}
+

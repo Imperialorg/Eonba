@@ -106,18 +106,29 @@ impl Assembler {
     }
 }
 
-/// Fetches every chunk of `manifest` from `server`, one Bulk-class stream per chunk. Each chunk waits for `pacer` to admit
-/// it, and is verified before it is accepted.
+/// Fetches every chunk of `manifest` from `server`. See [`fetch_missing`].
 pub async fn fetch(
     client: &PeerNode,
     server: EndpointAddr,
     manifest: &Manifest,
     pacer: &mut BulkPacer,
 ) -> EonResult<Vec<u8>> {
-    let started = Instant::now();
     let mut assembler = Assembler::new(manifest.clone());
-    for index in 0..manifest.chunk_count() {
-        let len = manifest.chunk_len(index).expect("index is within the manifest");
+    fetch_missing(client, server, &mut assembler, pacer).await?;
+    assembler.finish()
+}
+
+/// Fetches only the chunks `assembler` does not have yet, one Bulk-class stream each, so an interrupted transfer resumes
+/// where it stopped. Each chunk waits for `pacer` to admit it and is verified before it is accepted.
+pub async fn fetch_missing(
+    client: &PeerNode,
+    server: EndpointAddr,
+    assembler: &mut Assembler,
+    pacer: &mut BulkPacer,
+) -> EonResult<()> {
+    let started = Instant::now();
+    for index in assembler.missing() {
+        let len = assembler.manifest.chunk_len(index).expect("index is within the manifest");
         let may_start_at = pacer.admit(started.elapsed(), len);
         tokio::time::sleep(may_start_at.saturating_sub(started.elapsed())).await;
         let chunk = client
@@ -125,7 +136,7 @@ pub async fn fetch(
             .await?;
         assembler.accept(index, &chunk)?;
     }
-    assembler.finish()
+    Ok(())
 }
 
 #[cfg(test)]
