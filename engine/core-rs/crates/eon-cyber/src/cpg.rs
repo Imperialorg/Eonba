@@ -79,14 +79,30 @@ fn parse_error(reason: impl std::fmt::Display) -> EonError {
     }
 }
 
-/// Last identifier of a callee expression: `helper` for `helper()`, `new` for `Thing::new()`, `run` for `self.run()`.
-fn callee_name(node: Node, source: &[u8]) -> Option<String> {
+/// Last identifier of a callee expression, with the module or type qualifier when the call names one. `helper()` gives
+/// (`helper`, None), `store::save()` gives (`save`, `store`), `Thing::new()` gives (`new`, `Thing`), and `self.run()` gives
+/// (`run`, None) because the receiver type is unknown.
+fn callee_name(node: Node, source: &[u8]) -> Option<(String, Option<String>)> {
     let text = |n: Node| n.utf8_text(source).ok().map(str::to_owned);
+    let last_segment = |n: Node, separator: &str| {
+        text(n).map(|t| t.rsplit(separator).next().unwrap_or_default().to_owned())
+    };
     match node.kind() {
-        "identifier" => text(node),
-        "scoped_identifier" => node.child_by_field_name("name").and_then(text),
-        "field_expression" => node.child_by_field_name("field").and_then(text),
-        "attribute" => node.child_by_field_name("attribute").and_then(text),
+        "identifier" => text(node).map(|name| (name, None)),
+        "scoped_identifier" => {
+            let name = node.child_by_field_name("name").and_then(text)?;
+            let qualifier = node.child_by_field_name("path").and_then(|p| last_segment(p, "::"));
+            Some((name, qualifier))
+        }
+        "field_expression" => node.child_by_field_name("field").and_then(text).map(|name| (name, None)),
+        "attribute" => {
+            let name = node.child_by_field_name("attribute").and_then(text)?;
+            let qualifier = node
+                .child_by_field_name("object")
+                .filter(|o| o.kind() == "identifier")
+                .and_then(text);
+            Some((name, qualifier))
+        }
         _ => None,
     }
 }
@@ -102,7 +118,7 @@ fn call_callee(lang: Lang, call: Node) -> Option<Node> {
 struct Walk<'a> {
     lang: Lang,
     source: &'a [u8],
-    calls: Vec<(String, String)>,
+    calls: Vec<RawCall>,
     defined: Vec<String>,
 }
 
@@ -119,8 +135,10 @@ impl Walk<'_> {
             }
             return;
         }
-        if let (Some(caller), Some(callee)) = (current, call_callee(self.lang, node).and_then(|c| callee_name(c, self.source))) {
-            self.calls.push((caller.to_owned(), callee));
+        if let (Some(caller), Some((callee, qualifier))) =
+            (current, call_callee(self.lang, node).and_then(|c| callee_name(c, self.source)))
+        {
+            self.calls.push((caller.to_owned(), callee, qualifier));
         }
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -129,8 +147,11 @@ impl Walk<'_> {
     }
 }
 
-/// Builds the code graph for one source file.
-pub fn build(lang: Lang, source: &str) -> EonResult<CodeGraph> {
+/// Function definitions and calls of one file, in source order. Each call carries the qualifier it was written with, if any.
+/// A call as written: caller, callee name, and the module or type qualifier if one was written.
+type RawCall = (String, String, Option<String>);
+
+fn analyze(lang: Lang, source: &str) -> EonResult<(Vec<String>, Vec<RawCall>)> {
     let mut parser = Parser::new();
     parser.set_language(&lang.language()).map_err(parse_error)?;
     let tree = parser.parse(source, None).ok_or_else(|| parse_error("parser produced no tree"))?;
@@ -141,13 +162,18 @@ pub fn build(lang: Lang, source: &str) -> EonResult<CodeGraph> {
         defined: Vec::new(),
     };
     walk.visit(tree.root_node(), None);
+    Ok((walk.defined, walk.calls))
+}
 
-    let defined: BTreeSet<&str> = walk.defined.iter().map(String::as_str).collect();
+/// Builds the code graph for one source file.
+pub fn build(lang: Lang, source: &str) -> EonResult<CodeGraph> {
+    let (defined_names, calls) = analyze(lang, source)?;
+    let defined: BTreeSet<&str> = defined_names.iter().map(String::as_str).collect();
     let mut graph = CodeGraph {
-        functions: walk.defined.clone(),
+        functions: defined_names.clone(),
         ..CodeGraph::default()
     };
-    for (caller, callee) in &walk.calls {
+    for (caller, callee, _qualifier) in &calls {
         if defined.contains(callee.as_str()) {
             graph.edges.insert((caller.clone(), callee.clone()));
         } else {
@@ -240,39 +266,83 @@ impl ProjectGraph {
     }
 }
 
-/// Builds one code graph for several files. A call resolves across files only when exactly one function of that name, in
-/// the same language, exists in the whole project. Otherwise it is kept as unresolved or ambiguous.
+/// The module a file defines: its stem, or its directory name for `mod.rs`, `lib.rs`, and `main.rs`.
+fn module_name(path: &str) -> &str {
+    let file = std::path::Path::new(path);
+    let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    match stem {
+        "mod" | "lib" | "main" | "__init__" => file.parent().and_then(|d| d.file_name()).and_then(|s| s.to_str()).unwrap_or(stem),
+        _ => stem,
+    }
+}
+
+/// Builds one code graph for several files. A call resolves into another file only when the project has exactly one
+/// matching definition, in the same language. A qualified call (`store::save`) matches the module the qualifier names;
+/// an unqualified call prefers a definition in its own file. Calls that match several definitions are reported as
+/// ambiguous. Calls that match none stay unresolved.
 pub fn build_project(files: &[SourceFile]) -> EonResult<ProjectGraph> {
     let mut graph = ProjectGraph::default();
-    let mut definitions: BTreeMap<(&'static str, String), Vec<String>> = BTreeMap::new();
-    let mut per_file = Vec::with_capacity(files.len());
+    let mut definitions: BTreeMap<(&'static str, String), Vec<(&str, String)>> = BTreeMap::new();
+    let mut analyzed = Vec::with_capacity(files.len());
     for file in files {
-        let local = build(file.lang, file.source)?;
-        for name in &local.functions {
+        let (defined, calls) = analyze(file.lang, file.source)?;
+        for name in &defined {
             let qualified = format!("{}::{name}", file.path);
             graph.functions.push(qualified.clone());
-            definitions.entry((file.lang.name(), name.clone())).or_default().push(qualified);
+            definitions
+                .entry((file.lang.name(), name.clone()))
+                .or_default()
+                .push((file.path, qualified));
         }
-        per_file.push((file, local));
+        analyzed.push((file, calls));
     }
 
-    for (file, local) in per_file {
-        for (caller, callee) in local.edges {
-            graph.edges.insert((format!("{}::{caller}", file.path), format!("{}::{callee}", file.path)));
-        }
-        for (caller, callees) in local.unresolved {
+    for (file, calls) in analyzed {
+        for (caller, callee, qualifier) in calls {
             let caller = format!("{}::{caller}", file.path);
-            for callee in callees {
-                match definitions.get(&(file.lang.name(), callee.clone())).map(Vec::as_slice) {
-                    Some([only]) => {
-                        graph.edges.insert((caller.clone(), only.clone()));
+            let candidates: &[(&str, String)] = definitions
+                .get(&(file.lang.name(), callee.clone()))
+                .map_or(&[], Vec::as_slice);
+            let matches: BTreeSet<&str> = match qualifier.as_deref() {
+                Some(module) => {
+                    let by_module: BTreeSet<&str> = candidates
+                        .iter()
+                        .filter(|(path, _)| module_name(path) == module)
+                        .map(|(_, qualified)| qualified.as_str())
+                        .collect();
+                    if by_module.is_empty() {
+                        candidates
+                            .iter()
+                            .filter(|(path, _)| *path == file.path)
+                            .map(|(_, qualified)| qualified.as_str())
+                            .collect()
+                    } else {
+                        by_module
                     }
-                    Some(_) => {
-                        graph.ambiguous.entry(caller.clone()).or_default().insert(callee);
+                }
+                None => {
+                    let same_file: BTreeSet<&str> = candidates
+                        .iter()
+                        .filter(|(path, _)| *path == file.path)
+                        .map(|(_, qualified)| qualified.as_str())
+                        .collect();
+                    if same_file.is_empty() {
+                        candidates.iter().map(|(_, qualified)| qualified.as_str()).collect()
+                    } else {
+                        same_file
                     }
-                    None => {
-                        graph.unresolved.entry(caller.clone()).or_default().insert(callee);
-                    }
+                }
+            };
+            match matches.len() {
+                0 => {
+                    graph.unresolved.entry(caller).or_default().insert(callee);
+                }
+                1 => {
+                    let target = matches.into_iter().next().unwrap_or_default();
+                    graph.edges.insert((caller, target.to_owned()));
+                }
+                _ => {
+                    graph.ambiguous.entry(caller).or_default().insert(callee);
                 }
             }
         }

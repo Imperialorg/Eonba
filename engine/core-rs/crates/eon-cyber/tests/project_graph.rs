@@ -46,3 +46,50 @@ fn a_python_name_does_not_resolve_to_a_rust_definition() {
     assert!(graph.unresolved["a.py::run"].contains("helper"));
     assert!(graph.edges.is_empty());
 }
+
+#[test]
+fn a_module_qualifier_picks_the_named_module_when_two_files_define_the_name() {
+    let caller = "fn run() { store::save(1) }\n";
+    let files = [
+        SourceFile { path: "run.rs", lang: Lang::Rust, source: caller },
+        SourceFile { path: "store.rs", lang: Lang::Rust, source: "pub fn save(x: i32) {}\n" },
+        SourceFile { path: "audit.rs", lang: Lang::Rust, source: "pub fn save(x: i32) {}\n" },
+    ];
+    let graph = build_project(&files).unwrap();
+    assert!(graph.edges.contains(&("run.rs::run".into(), "store.rs::save".into())));
+    assert!(!graph.edges.contains(&("run.rs::run".into(), "audit.rs::save".into())));
+    assert!(graph.ambiguous.is_empty());
+}
+
+#[test]
+fn a_type_qualified_call_still_resolves_inside_its_own_file() {
+    let files = [SourceFile {
+        path: "thing.rs",
+        lang: Lang::Rust,
+        source: "struct Thing;\nimpl Thing { fn new() -> Thing { Thing } }\nfn build() { Thing::new(); }\n",
+    }];
+    let graph = build_project(&files).unwrap();
+    assert!(graph.edges.contains(&("thing.rs::build".into(), "thing.rs::new".into())));
+}
+
+#[test]
+fn a_python_module_attribute_resolves_to_the_named_module() {
+    let files = [
+        SourceFile { path: "app.py", lang: Lang::Python, source: "import store\ndef run():\n    store.save(1)\n" },
+        SourceFile { path: "store.py", lang: Lang::Python, source: "def save(x):\n    pass\n" },
+        SourceFile { path: "audit.py", lang: Lang::Python, source: "def save(x):\n    pass\n" },
+    ];
+    let graph = build_project(&files).unwrap();
+    assert!(graph.edges.contains(&("app.py::run".into(), "store.py::save".into())));
+}
+
+#[test]
+fn a_qualifier_naming_a_module_outside_the_project_stays_unresolved() {
+    let files = [
+        SourceFile { path: "run.rs", lang: Lang::Rust, source: "fn run() { serde_json::save(1) }\n" },
+        SourceFile { path: "store.rs", lang: Lang::Rust, source: "pub fn save(x: i32) {}\n" },
+    ];
+    let graph = build_project(&files).unwrap();
+    assert!(graph.edges.is_empty());
+    assert!(graph.unresolved["run.rs::run"].contains("save"));
+}
