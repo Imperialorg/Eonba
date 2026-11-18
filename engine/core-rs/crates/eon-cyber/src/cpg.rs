@@ -17,6 +17,13 @@ pub enum Lang {
 }
 
 impl Lang {
+    fn name(self) -> &'static str {
+        match self {
+            Lang::Rust => "rust",
+            Lang::Python => "python",
+        }
+    }
+
     fn language(self) -> Language {
         match self {
             Lang::Rust => Language::new(tree_sitter_rust::LANGUAGE),
@@ -188,6 +195,89 @@ fn collect_blocks(lang: Lang, node: Node, source: &str, blocks: &mut Vec<Functio
     for child in node.children(&mut cursor) {
         collect_blocks(lang, child, source, blocks);
     }
+}
+
+/// One source file of a project, identified by its path.
+#[derive(Debug, Clone, Copy)]
+pub struct SourceFile<'a> {
+    pub path: &'a str,
+    pub lang: Lang,
+    pub source: &'a str,
+}
+
+/// Code graph across several files. Nodes are `path::function`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ProjectGraph {
+    pub functions: Vec<String>,
+    /// Resolved edges, same-file or cross-file.
+    pub edges: BTreeSet<(String, String)>,
+    /// Calls with no definition anywhere in the project, keyed by qualified caller.
+    pub unresolved: BTreeMap<String, BTreeSet<String>>,
+    /// Calls whose name has more than one definition in the project. They are not resolved, because the right callee is
+    /// unknown.
+    pub ambiguous: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl ProjectGraph {
+    /// True when `to` can be reached from `from` through resolved edges.
+    pub fn reaches(&self, from: &str, to: &str) -> bool {
+        let mut seen = BTreeSet::new();
+        let mut queue = VecDeque::from([from.to_owned()]);
+        while let Some(current) = queue.pop_front() {
+            if current == to {
+                return true;
+            }
+            if !seen.insert(current.clone()) {
+                continue;
+            }
+            for (caller, callee) in &self.edges {
+                if *caller == current {
+                    queue.push_back(callee.clone());
+                }
+            }
+        }
+        false
+    }
+}
+
+/// Builds one code graph for several files. A call resolves across files only when exactly one function of that name, in
+/// the same language, exists in the whole project. Otherwise it is kept as unresolved or ambiguous.
+pub fn build_project(files: &[SourceFile]) -> EonResult<ProjectGraph> {
+    let mut graph = ProjectGraph::default();
+    let mut definitions: BTreeMap<(&'static str, String), Vec<String>> = BTreeMap::new();
+    let mut per_file = Vec::with_capacity(files.len());
+    for file in files {
+        let local = build(file.lang, file.source)?;
+        for name in &local.functions {
+            let qualified = format!("{}::{name}", file.path);
+            graph.functions.push(qualified.clone());
+            definitions.entry((file.lang.name(), name.clone())).or_default().push(qualified);
+        }
+        per_file.push((file, local));
+    }
+
+    for (file, local) in per_file {
+        for (caller, callee) in local.edges {
+            graph.edges.insert((format!("{}::{caller}", file.path), format!("{}::{callee}", file.path)));
+        }
+        for (caller, callees) in local.unresolved {
+            let caller = format!("{}::{caller}", file.path);
+            for callee in callees {
+                match definitions.get(&(file.lang.name(), callee.clone())).map(Vec::as_slice) {
+                    Some([only]) => {
+                        graph.edges.insert((caller.clone(), only.clone()));
+                    }
+                    Some(_) => {
+                        graph.ambiguous.entry(caller.clone()).or_default().insert(callee);
+                    }
+                    None => {
+                        graph.unresolved.entry(caller.clone()).or_default().insert(callee);
+                    }
+                }
+            }
+        }
+    }
+    Ok(graph)
 }
 
 #[cfg(test)]
