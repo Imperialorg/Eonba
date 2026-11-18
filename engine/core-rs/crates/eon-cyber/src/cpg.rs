@@ -156,6 +156,9 @@ pub struct FunctionBlock {
     pub name: String,
     /// One-based line where the definition starts.
     pub start_line: usize,
+    /// Byte offsets of the definition in the source it was parsed from.
+    pub start_byte: usize,
+    pub end_byte: usize,
     pub text: String,
 }
 
@@ -176,6 +179,8 @@ fn collect_blocks(lang: Lang, node: Node, source: &str, blocks: &mut Vec<Functio
         blocks.push(FunctionBlock {
             name: source[name.byte_range()].to_owned(),
             start_line: node.start_position().row + 1,
+            start_byte: node.start_byte(),
+            end_byte: node.end_byte(),
             text: source[node.byte_range()].to_owned(),
         });
     }

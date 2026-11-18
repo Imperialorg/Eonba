@@ -102,6 +102,59 @@ impl Review {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyError {
+    /// The reviewable pairing at `index` has no decision yet.
+    Pending { index: usize },
+}
+
+/// Builds the patched source. Applied changes take the new text, applied removals are deleted, and applied additions are
+/// appended at the end. NACKed changes keep the old text. Refuses to run while a reviewable pairing is still pending.
+/// `old` must be the blocks parsed from `old_source`.
+pub fn apply_review(
+    old_source: &str,
+    old: &[FunctionBlock],
+    new: &[FunctionBlock],
+    pairings: &[Pairing],
+    review: &Review,
+) -> Result<String, ApplyError> {
+    let mut edits: Vec<(usize, usize, &str)> = Vec::new();
+    let mut appended: Vec<&str> = Vec::new();
+    for (index, pairing) in pairings.iter().enumerate() {
+        let decision = review.decision(index).unwrap_or(Decision::Pending);
+        if decision == Decision::Pending {
+            return Err(ApplyError::Pending { index });
+        }
+        let applied = decision == Decision::Applied;
+        match (pairing.old, pairing.new) {
+            (Some(i), Some(j)) if applied && old[i].text != new[j].text => {
+                edits.push((old[i].start_byte, old[i].end_byte, new[j].text.as_str()));
+            }
+            (Some(i), None) if applied => edits.push((old[i].start_byte, old[i].end_byte, "")),
+            (None, Some(j)) if applied => appended.push(new[j].text.as_str()),
+            _ => {}
+        }
+    }
+
+    edits.sort_by_key(|edit| edit.0);
+    let mut patched = String::with_capacity(old_source.len());
+    let mut cursor = 0;
+    for (start, end, replacement) in edits {
+        patched.push_str(&old_source[cursor..start]);
+        patched.push_str(replacement);
+        cursor = end;
+    }
+    patched.push_str(&old_source[cursor..]);
+    for text in &appended {
+        patched.push_str("\n\n");
+        patched.push_str(text);
+    }
+    if !appended.is_empty() {
+        patched.push('\n');
+    }
+    Ok(patched)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,6 +163,8 @@ mod tests {
         FunctionBlock {
             name: name.into(),
             start_line: 1,
+            start_byte: 0,
+            end_byte: text.len(),
             text: text.into(),
         }
     }
