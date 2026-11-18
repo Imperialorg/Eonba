@@ -61,6 +61,14 @@ impl LocalModel {
         Ok(Self { model })
     }
 
+    /// Runs one short generation so the weights and the compute graph are paged in before the first real request. Returns
+    /// how long the warm-up took.
+    pub fn warm_up(&self) -> EonResult<std::time::Duration> {
+        let started = std::time::Instant::now();
+        self.generate_greedy("Warm-up.", 1)?;
+        Ok(started.elapsed())
+    }
+
     /// Generates up to `max_tokens` tokens greedily after `prompt`, stopping at end-of-generation.
     pub fn generate_greedy(&self, prompt: &str, max_tokens: usize) -> EonResult<String> {
         self.generate_with(prompt, max_tokens, LlamaSampler::greedy())
