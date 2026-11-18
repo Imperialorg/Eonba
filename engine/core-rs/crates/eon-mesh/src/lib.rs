@@ -2,6 +2,7 @@
 pub mod blob;
 pub mod discovery;
 pub mod election;
+pub mod exchange;
 pub mod qos;
 pub mod sync;
 pub mod transport;

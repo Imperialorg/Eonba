@@ -4,27 +4,9 @@
 
 use std::sync::Arc;
 
+use eon_mesh::exchange::{answer, exchange};
 use eon_mesh::sync::Replica;
 use eon_mesh::transport::PeerNode;
-use iroh::EndpointAddr;
-
-fn frame(version: &[u8], update: &[u8]) -> Vec<u8> {
-    let mut out = (version.len() as u32).to_le_bytes().to_vec();
-    out.extend_from_slice(version);
-    out.extend_from_slice(update);
-    out
-}
-
-fn unframe(bytes: &[u8]) -> (&[u8], &[u8]) {
-    let len = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
-    (&bytes[4..4 + len], &bytes[4 + len..])
-}
-
-async fn sync_with_hub(client: &PeerNode, hub: EndpointAddr, replica: &Replica) {
-    let request = frame(&replica.version(), &replica.export_all().unwrap());
-    let reply = client.request(hub, &request).await.unwrap();
-    replica.apply(&reply).unwrap();
-}
 
 #[tokio::test]
 async fn three_peers_converge_through_a_hub_in_two_rounds() {
@@ -42,13 +24,9 @@ async fn three_peers_converge_through_a_hub_in_two_rounds() {
     let hub_task = tokio::spawn(async move {
         for _ in 0..rounds {
             let served = Arc::clone(&served);
-            hub.serve_one(move |request| {
-                let (version, update) = unframe(&request);
-                served.apply(update).expect("a peer's state must apply");
-                served.export_since(version).expect("a peer's version must decode")
-            })
-            .await
-            .unwrap();
+            hub.serve_one(move |request: Vec<u8>| answer(&served, &request).expect("a peer's offer must apply"))
+                .await
+                .unwrap();
         }
         hub.close().await;
     });
@@ -59,7 +37,7 @@ async fn three_peers_converge_through_a_hub_in_two_rounds() {
     }
     for _ in 0..2 {
         for (peer, client) in peers.iter().zip(&clients) {
-            sync_with_hub(client, hub_addr.clone(), peer).await;
+            exchange(client, hub_addr.clone(), peer).await.unwrap();
         }
     }
     hub_task.await.unwrap();
