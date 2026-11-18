@@ -93,3 +93,26 @@ fn a_qualifier_naming_a_module_outside_the_project_stays_unresolved() {
     assert!(graph.edges.is_empty());
     assert!(graph.unresolved["run.rs::run"].contains("save"));
 }
+
+#[test]
+fn a_call_through_a_use_import_resolves_to_the_imported_module() {
+    let files = [
+        SourceFile { path: "run.rs", lang: Lang::Rust, source: "use store::save;\nfn run() { save(1) }\n" },
+        SourceFile { path: "store.rs", lang: Lang::Rust, source: "pub fn save(x: i32) {}\n" },
+        SourceFile { path: "audit.rs", lang: Lang::Rust, source: "pub fn save(x: i32) {}\n" },
+    ];
+    let graph = build_project(&files).unwrap();
+    assert!(graph.edges.contains(&("run.rs::run".into(), "store.rs::save".into())));
+    assert!(graph.ambiguous.is_empty());
+}
+
+#[test]
+fn an_aliased_use_import_resolves_the_original_name() {
+    let files = [
+        SourceFile { path: "run.rs", lang: Lang::Rust, source: "use store::save as persist;\nfn run() { persist(1) }\n" },
+        SourceFile { path: "store.rs", lang: Lang::Rust, source: "pub fn save(x: i32) {}\n" },
+        SourceFile { path: "audit.rs", lang: Lang::Rust, source: "pub fn save(x: i32) {}\n" },
+    ];
+    let graph = build_project(&files).unwrap();
+    assert!(graph.edges.contains(&("run.rs::run".into(), "store.rs::save".into())));
+}

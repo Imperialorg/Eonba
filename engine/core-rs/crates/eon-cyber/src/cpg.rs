@@ -151,7 +151,59 @@ impl Walk<'_> {
 /// A call as written: caller, callee name, and the module or type qualifier if one was written.
 type RawCall = (String, String, Option<String>);
 
-fn analyze(lang: Lang, source: &str) -> EonResult<(Vec<String>, Vec<RawCall>)> {
+/// A Rust `use` import: the name it binds locally, and the module and original name it refers to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Import {
+    local: String,
+    module: String,
+    name: String,
+}
+
+/// The import a `use` declaration makes, if it is a plain path or an `as` alias of one. Lists and globs are skipped.
+fn import_of(argument: Node, source: &[u8]) -> Option<Import> {
+    let text = |n: Node| n.utf8_text(source).ok().map(str::to_owned);
+    let last = |n: Node| text(n).map(|t| t.rsplit("::").next().unwrap_or_default().to_owned());
+    match argument.kind() {
+        "scoped_identifier" => {
+            let module = last(argument.child_by_field_name("path")?)?;
+            let name = argument.child_by_field_name("name").and_then(text)?;
+            Some(Import { local: name.clone(), module, name })
+        }
+        "use_as_clause" => {
+            let path = argument.child_by_field_name("path")?;
+            if path.kind() != "scoped_identifier" {
+                return None;
+            }
+            let module = last(path.child_by_field_name("path")?)?;
+            let name = path.child_by_field_name("name").and_then(text)?;
+            let local = argument.child_by_field_name("alias").and_then(text)?;
+            Some(Import { local, module, name })
+        }
+        _ => None,
+    }
+}
+
+fn collect_imports(node: Node, source: &[u8], imports: &mut Vec<Import>) {
+    if node.kind() == "use_declaration" {
+        if let Some(import) = node.child_by_field_name("argument").and_then(|a| import_of(a, source)) {
+            imports.push(import);
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_imports(child, source, imports);
+    }
+}
+
+/// Definitions, calls, and (for Rust) `use` imports of one file.
+struct Analysis {
+    defined: Vec<String>,
+    calls: Vec<RawCall>,
+    imports: Vec<Import>,
+}
+
+fn analyze(lang: Lang, source: &str) -> EonResult<Analysis> {
     let mut parser = Parser::new();
     parser.set_language(&lang.language()).map_err(parse_error)?;
     let tree = parser.parse(source, None).ok_or_else(|| parse_error("parser produced no tree"))?;
@@ -162,12 +214,24 @@ fn analyze(lang: Lang, source: &str) -> EonResult<(Vec<String>, Vec<RawCall>)> {
         defined: Vec::new(),
     };
     walk.visit(tree.root_node(), None);
-    Ok((walk.defined, walk.calls))
+    let mut imports = Vec::new();
+    if lang == Lang::Rust {
+        collect_imports(tree.root_node(), source.as_bytes(), &mut imports);
+    }
+    Ok(Analysis {
+        defined: walk.defined,
+        calls: walk.calls,
+        imports,
+    })
 }
 
 /// Builds the code graph for one source file.
 pub fn build(lang: Lang, source: &str) -> EonResult<CodeGraph> {
-    let (defined_names, calls) = analyze(lang, source)?;
+    let Analysis {
+        defined: defined_names,
+        calls,
+        ..
+    } = analyze(lang, source)?;
     let defined: BTreeSet<&str> = defined_names.iter().map(String::as_str).collect();
     let mut graph = CodeGraph {
         functions: defined_names.clone(),
@@ -285,7 +349,11 @@ pub fn build_project(files: &[SourceFile]) -> EonResult<ProjectGraph> {
     let mut definitions: BTreeMap<(&'static str, String), Vec<(&str, String)>> = BTreeMap::new();
     let mut analyzed = Vec::with_capacity(files.len());
     for file in files {
-        let (defined, calls) = analyze(file.lang, file.source)?;
+        let Analysis {
+            defined,
+            calls,
+            imports,
+        } = analyze(file.lang, file.source)?;
         for name in &defined {
             let qualified = format!("{}::{name}", file.path);
             graph.functions.push(qualified.clone());
@@ -294,14 +362,19 @@ pub fn build_project(files: &[SourceFile]) -> EonResult<ProjectGraph> {
                 .or_default()
                 .push((file.path, qualified));
         }
-        analyzed.push((file, calls));
+        analyzed.push((file, calls, imports));
     }
 
-    for (file, calls) in analyzed {
+    for (file, calls, imports) in analyzed {
         for (caller, callee, qualifier) in calls {
             let caller = format!("{}::{caller}", file.path);
+            // A call through a `use` import is qualified by the module it was imported from.
+            let (lookup, qualifier) = match (&qualifier, imports.iter().find(|i| i.local == callee)) {
+                (None, Some(import)) => (import.name.clone(), Some(import.module.clone())),
+                _ => (callee.clone(), qualifier),
+            };
             let candidates: &[(&str, String)] = definitions
-                .get(&(file.lang.name(), callee.clone()))
+                .get(&(file.lang.name(), lookup))
                 .map_or(&[], Vec::as_slice);
             let matches: BTreeSet<&str> = match qualifier.as_deref() {
                 Some(module) => {
