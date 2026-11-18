@@ -1,4 +1,5 @@
 //! EON Distributed Mesh: spatial election and replicated projection state.
+pub mod blob;
 pub mod election;
 pub mod qos;
 pub mod sync;
