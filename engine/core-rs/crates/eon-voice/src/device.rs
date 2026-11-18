@@ -16,6 +16,9 @@ use crate::barge_in::BargeIn;
 use crate::ring::{PcmConsumer, PcmProducer};
 
 const SCRATCH_FRAMES: usize = 16_384;
+/// Playback buffer in frames. The backend default makes PulseAudio's ALSA plugin fail `snd_pcm_avail_delay` with I/O error
+/// 5 about a third of the time at stream start, so playback asks for an explicit size.
+const PLAYBACK_BUFFER_FRAMES: u32 = 4096;
 
 /// Counters shared between the device callbacks and the owner.
 #[derive(Debug, Default)]
@@ -116,7 +119,8 @@ where
     T: SizedSample + FromSample<f32>,
 {
     let channels = usize::from(config.channels());
-    let stream_config = config.config();
+    let mut stream_config = config.config();
+    stream_config.buffer_size = cpal::BufferSize::Fixed(PLAYBACK_BUFFER_FRAMES);
     let data_counters = Arc::clone(&counters);
     let error_counters = Arc::clone(&counters);
     let mut mono: Vec<f32> = vec![0.0; SCRATCH_FRAMES];
