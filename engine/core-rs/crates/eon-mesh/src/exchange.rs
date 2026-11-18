@@ -52,9 +52,41 @@ pub async fn exchange(client: &PeerNode, peer: EndpointAddr, replica: &Replica) 
     replica.apply(&reply)
 }
 
+/// Picks up to `fanout` distinct indices out of `count` for one gossip round. The same `seed` always picks the same
+/// indices, so a schedule can be replayed.
+pub fn pick_neighbours(count: usize, fanout: usize, seed: u64) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..count).collect();
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    for i in (1..count).rev() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        order.swap(i, (state % (i as u64 + 1)) as usize);
+    }
+    order.truncate(fanout.min(count));
+    order
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picks_are_distinct_in_range_and_capped_at_the_neighbour_count() {
+        let picks = pick_neighbours(10, 3, 7);
+        assert_eq!(picks.len(), 3);
+        assert!(picks.iter().all(|&i| i < 10));
+        let mut unique = picks.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), 3);
+        assert_eq!(pick_neighbours(2, 5, 1).len(), 2);
+    }
+
+    #[test]
+    fn the_same_seed_picks_the_same_neighbours() {
+        assert_eq!(pick_neighbours(8, 3, 42), pick_neighbours(8, 3, 42));
+    }
 
     #[test]
     fn a_truncated_offer_is_refused() {
