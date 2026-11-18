@@ -1,0 +1,98 @@
+//! Matches the functions of two sources by name, so the diff pane can connect each pair of blocks.
+
+use eon_cyber::cpg::FunctionBlock;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    Unchanged,
+    Changed,
+    Added,
+    Removed,
+}
+
+/// One row of the diff: an index into the old blocks, into the new blocks, or both when the function was matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pairing {
+    pub status: Status,
+    pub old: Option<usize>,
+    pub new: Option<usize>,
+}
+
+/// Matches functions by name, pairing each old function with the first unclaimed new function of the same name. A pair is
+/// unchanged when the text is identical, otherwise changed. Unmatched old functions are removed and unmatched new ones added.
+pub fn match_blocks(old: &[FunctionBlock], new: &[FunctionBlock]) -> Vec<Pairing> {
+    let mut claimed = vec![false; new.len()];
+    let mut pairings = Vec::new();
+    for (i, block) in old.iter().enumerate() {
+        let found = new
+            .iter()
+            .enumerate()
+            .position(|(j, candidate)| !claimed[j] && candidate.name == block.name);
+        match found {
+            Some(j) => {
+                claimed[j] = true;
+                let status = if new[j].text == block.text {
+                    Status::Unchanged
+                } else {
+                    Status::Changed
+                };
+                pairings.push(Pairing {
+                    status,
+                    old: Some(i),
+                    new: Some(j),
+                });
+            }
+            None => pairings.push(Pairing {
+                status: Status::Removed,
+                old: Some(i),
+                new: None,
+            }),
+        }
+    }
+    for (j, _) in claimed.iter().enumerate().filter(|(_, taken)| !**taken) {
+        pairings.push(Pairing {
+            status: Status::Added,
+            old: None,
+            new: Some(j),
+        });
+    }
+    pairings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn block(name: &str, text: &str) -> FunctionBlock {
+        FunctionBlock {
+            name: name.into(),
+            start_line: 1,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn unchanged_changed_added_and_removed_functions_are_classified() {
+        let old = [block("load", "a"), block("save", "b"), block("drop_cache", "c")];
+        let new = [block("load", "a"), block("save", "b2"), block("audit", "d")];
+        let pairings = match_blocks(&old, &new);
+        let statuses: Vec<Status> = pairings.iter().map(|p| p.status).collect();
+        assert_eq!(
+            statuses,
+            vec![Status::Unchanged, Status::Changed, Status::Removed, Status::Added]
+        );
+        assert_eq!(pairings[1].old, Some(1));
+        assert_eq!(pairings[1].new, Some(1));
+        assert_eq!(pairings[3].new, Some(2));
+    }
+
+    #[test]
+    fn duplicate_names_pair_in_order_and_never_twice() {
+        let old = [block("helper", "one"), block("helper", "two")];
+        let new = [block("helper", "two")];
+        let pairings = match_blocks(&old, &new);
+        assert_eq!(pairings[0].status, Status::Changed);
+        assert_eq!(pairings[0].new, Some(0));
+        assert_eq!(pairings[1].status, Status::Removed);
+    }
+}

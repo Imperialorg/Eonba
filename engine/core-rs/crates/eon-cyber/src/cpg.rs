@@ -150,6 +150,41 @@ pub fn build(lang: Lang, source: &str) -> EonResult<CodeGraph> {
     Ok(graph)
 }
 
+/// One function definition with its source text, for structural diffs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionBlock {
+    pub name: String,
+    /// One-based line where the definition starts.
+    pub start_line: usize,
+    pub text: String,
+}
+
+/// Lists every function definition in `source` in source order. Nested functions are included.
+pub fn function_blocks(lang: Lang, source: &str) -> EonResult<Vec<FunctionBlock>> {
+    let mut parser = Parser::new();
+    parser.set_language(&lang.language()).map_err(parse_error)?;
+    let tree = parser.parse(source, None).ok_or_else(|| parse_error("parser produced no tree"))?;
+    let mut blocks = Vec::new();
+    collect_blocks(lang, tree.root_node(), source, &mut blocks);
+    Ok(blocks)
+}
+
+fn collect_blocks(lang: Lang, node: Node, source: &str, blocks: &mut Vec<FunctionBlock>) {
+    if node.kind() == lang.function_kind()
+        && let Some(name) = node.child_by_field_name("name")
+    {
+        blocks.push(FunctionBlock {
+            name: source[name.byte_range()].to_owned(),
+            start_line: node.start_position().row + 1,
+            text: source[node.byte_range()].to_owned(),
+        });
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_blocks(lang, child, source, blocks);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
