@@ -183,10 +183,51 @@ fn import_of(argument: Node, source: &[u8]) -> Option<Import> {
     }
 }
 
+/// The imports in a grouped `use module::{a, b as c};`. Items that are nested paths or globs are skipped.
+fn grouped_imports(argument: Node, source: &[u8]) -> Vec<Import> {
+    let text = |n: Node| n.utf8_text(source).ok().map(str::to_owned);
+    let module = argument
+        .child_by_field_name("path")
+        .and_then(text)
+        .and_then(|t| t.rsplit("::").next().map(str::to_owned));
+    let (Some(module), Some(list)) = (module, argument.child_by_field_name("list")) else {
+        return Vec::new();
+    };
+    let mut imports = Vec::new();
+    let mut cursor = list.walk();
+    for item in list.named_children(&mut cursor) {
+        let import = match item.kind() {
+            "identifier" => text(item).map(|name| Import {
+                local: name.clone(),
+                module: module.clone(),
+                name,
+            }),
+            "use_as_clause" => match (
+                item.child_by_field_name("path").and_then(text),
+                item.child_by_field_name("alias").and_then(text),
+            ) {
+                (Some(name), Some(local)) => Some(Import {
+                    local,
+                    module: module.clone(),
+                    name,
+                }),
+                _ => None,
+            },
+            _ => None,
+        };
+        imports.extend(import);
+    }
+    imports
+}
+
 fn collect_imports(node: Node, source: &[u8], imports: &mut Vec<Import>) {
     if node.kind() == "use_declaration" {
-        if let Some(import) = node.child_by_field_name("argument").and_then(|a| import_of(a, source)) {
-            imports.push(import);
+        if let Some(argument) = node.child_by_field_name("argument") {
+            if argument.kind() == "scoped_use_list" {
+                imports.extend(grouped_imports(argument, source));
+            } else if let Some(import) = import_of(argument, source) {
+                imports.push(import);
+            }
         }
         return;
     }

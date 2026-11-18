@@ -116,3 +116,20 @@ fn an_aliased_use_import_resolves_the_original_name() {
     let graph = build_project(&files).unwrap();
     assert!(graph.edges.contains(&("run.rs::run".into(), "store.rs::save".into())));
 }
+
+#[test]
+fn calls_through_a_grouped_import_resolve_to_the_imported_module() {
+    let files = [
+        SourceFile {
+            path: "run.rs",
+            lang: Lang::Rust,
+            source: "use store::{save, load as fetch};\nfn run() { save(1); fetch(2) }\n",
+        },
+        SourceFile { path: "store.rs", lang: Lang::Rust, source: "pub fn save(x: i32) {}\npub fn load(x: i32) {}\n" },
+        SourceFile { path: "audit.rs", lang: Lang::Rust, source: "pub fn save(x: i32) {}\npub fn load(x: i32) {}\n" },
+    ];
+    let graph = build_project(&files).unwrap();
+    assert!(graph.edges.contains(&("run.rs::run".into(), "store.rs::save".into())));
+    assert!(graph.edges.contains(&("run.rs::run".into(), "store.rs::load".into())));
+    assert!(graph.ambiguous.is_empty());
+}
