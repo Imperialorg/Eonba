@@ -2422,6 +2422,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-python",
  "tree-sitter-rust",
+ "z3",
 ]
 
 [[package]]
@@ -10306,6 +10307,35 @@ dependencies = [
  "quote",
  "syn 3.0.10",
  "synstructure 0.14.0",
+]
+
+[[package]]
+name = "z3"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e15d1881aea4bc4c16060ccade996d8627c37524fff3d088396eac0daf5e1a81"
+dependencies = [
+ "log",
+ "z3-sys",
+]
+
+[[package]]
+name = "z3-src"
+version = "504.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fac5ca92a7c69b2aa3359eff9745299b6c53921abe376c5d2a92353c771d5dde"
+dependencies = [
+ "cmake",
+]
+
+[[package]]
+name = "z3-sys"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c38c58e9de00b081506ec9266daccca60bfb315d0fdd8d709317cc1b835d81c"
+dependencies = [
+ "pkg-config",
+ "z3-src",
 ]
 
 [[package]]
