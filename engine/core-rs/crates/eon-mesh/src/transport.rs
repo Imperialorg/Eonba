@@ -49,6 +49,11 @@ impl PeerNode {
         self.endpoint.addr()
     }
 
+    /// Signs this node's current address for peers to store with [`crate::discovery::Directory`].
+    pub fn announce(&self, seq: u64) -> EonResult<crate::discovery::Announcement> {
+        crate::discovery::sign(self.endpoint.secret_key(), self.addr(), seq)
+    }
+
     /// Sends `payload` to `peer` at bulk priority and returns the reply.
     pub async fn request(&self, peer: impl Into<EndpointAddr>, payload: &[u8]) -> EonResult<Vec<u8>> {
         self.request_with_class(peer, TrafficClass::Bulk, payload).await

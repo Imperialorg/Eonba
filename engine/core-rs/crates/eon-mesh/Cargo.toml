@@ -11,5 +11,7 @@ bytes = "1"
 eon-primitives = { path = "../eon-primitives" }
 iroh = "1.4"
 loro = "1"
+postcard = { version = "1", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 
