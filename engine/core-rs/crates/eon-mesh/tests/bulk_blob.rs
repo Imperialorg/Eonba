@@ -1,13 +1,15 @@
-//! Bulk blob transfer over the iroh loopback transport. The client requests one chunk per Bulk-class stream and verifies it
-//! before accepting it. A server that substitutes bytes in one chunk is refused at that chunk.
+//! Bulk blob transfer over the iroh loopback transport. The client requests one chunk per Bulk-class stream, paced by a
+//! `BulkPacer`, and verifies each chunk before accepting it. A server that substitutes bytes in one chunk is refused at that
+//! chunk.
 
-use eon_mesh::blob::{Assembler, Manifest};
-use eon_mesh::qos::TrafficClass;
+use std::time::{Duration, Instant};
+
+use eon_mesh::blob::{fetch, Manifest};
+use eon_mesh::qos::BulkPacer;
 use eon_mesh::transport::PeerNode;
-use eon_primitives::EonResult;
-use iroh::EndpointAddr;
 
 const CHUNK: usize = 256 * 1024;
+const LINK_BYTES_PER_SEC: f64 = 4.0 * 1024.0 * 1024.0;
 
 fn sample_blob() -> Vec<u8> {
     (0..3 * CHUNK + 17).map(|i| (i.wrapping_mul(31) % 251) as u8).collect()
@@ -33,19 +35,8 @@ async fn serve_chunks(server: PeerNode, blob: Vec<u8>, requests: usize, tampered
     server.close().await;
 }
 
-async fn fetch(client: &PeerNode, server: EndpointAddr, manifest: &Manifest) -> EonResult<Vec<u8>> {
-    let mut assembler = Assembler::new(manifest.clone());
-    for index in 0..manifest.chunk_count() {
-        let chunk = client
-            .request_with_class(server.clone(), TrafficClass::Bulk, &(index as u32).to_le_bytes())
-            .await?;
-        assembler.accept(index, &chunk)?;
-    }
-    assembler.finish()
-}
-
 #[tokio::test]
-async fn a_blob_fetched_chunk_by_chunk_matches_the_manifest() {
+async fn a_paced_blob_fetched_chunk_by_chunk_matches_the_manifest() {
     let blob = sample_blob();
     let manifest = Manifest::for_bytes(&blob, CHUNK).unwrap();
 
@@ -54,10 +45,19 @@ async fn a_blob_fetched_chunk_by_chunk_matches_the_manifest() {
     let server_addr = server.addr();
     let serving = tokio::spawn(serve_chunks(server, blob.clone(), manifest.chunk_count(), None));
 
-    let fetched = fetch(&client, server_addr, &manifest).await.unwrap();
+    let started = Instant::now();
+    let fetched = fetch(&client, server_addr, &manifest, &mut BulkPacer::new(LINK_BYTES_PER_SEC))
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
     serving.await.unwrap();
     client.close().await;
+
     assert_eq!(fetched, blob);
+    assert!(
+        elapsed >= Duration::from_millis(180),
+        "the pacer must space the four chunks at link rate, took {elapsed:?}"
+    );
 }
 
 #[tokio::test]
@@ -70,7 +70,10 @@ async fn a_substituted_chunk_stops_the_transfer_at_that_chunk() {
     let server_addr = server.addr();
     let serving = tokio::spawn(serve_chunks(server, blob.clone(), 3, Some(2)));
 
-    let err = fetch(&client, server_addr, &manifest).await.unwrap_err().to_string();
+    let err = fetch(&client, server_addr, &manifest, &mut BulkPacer::new(LINK_BYTES_PER_SEC))
+        .await
+        .unwrap_err()
+        .to_string();
     serving.await.unwrap();
     client.close().await;
     assert!(err.contains("chunk 2 failed BLAKE3 verification"), "{err}");

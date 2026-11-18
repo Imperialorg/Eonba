@@ -4,7 +4,13 @@
 //! commit, because a manifest supplied by the peer that serves the bytes proves nothing. Each chunk is verified as it
 //! arrives, so a corrupt or substituted chunk is refused and the transfer can resume from the missing indices.
 
+use std::time::Instant;
+
 use eon_primitives::{EonError, EonResult};
+use iroh::EndpointAddr;
+
+use crate::qos::{BulkPacer, TrafficClass};
+use crate::transport::PeerNode;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
@@ -98,6 +104,28 @@ impl Assembler {
         }
         Ok(self.chunks.into_iter().flatten().flatten().collect())
     }
+}
+
+/// Fetches every chunk of `manifest` from `server`, one Bulk-class stream per chunk. Each chunk waits for `pacer` to admit
+/// it, and is verified before it is accepted.
+pub async fn fetch(
+    client: &PeerNode,
+    server: EndpointAddr,
+    manifest: &Manifest,
+    pacer: &mut BulkPacer,
+) -> EonResult<Vec<u8>> {
+    let started = Instant::now();
+    let mut assembler = Assembler::new(manifest.clone());
+    for index in 0..manifest.chunk_count() {
+        let len = manifest.chunk_len(index).expect("index is within the manifest");
+        let may_start_at = pacer.admit(started.elapsed(), len);
+        tokio::time::sleep(may_start_at.saturating_sub(started.elapsed())).await;
+        let chunk = client
+            .request_with_class(server.clone(), TrafficClass::Bulk, &(index as u32).to_le_bytes())
+            .await?;
+        assembler.accept(index, &chunk)?;
+    }
+    assembler.finish()
 }
 
 #[cfg(test)]
