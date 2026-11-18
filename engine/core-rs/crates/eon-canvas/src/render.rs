@@ -99,7 +99,7 @@ pub fn image_size(layout: &Layout) -> (u32, u32) {
     (width as u32, height as u32)
 }
 
-fn centre(rank: usize, slot: usize) -> [f32; 2] {
+pub fn node_centre(rank: usize, slot: usize) -> [f32; 2] {
     [
         MARGIN + slot as f32 * COLUMN_WIDTH + COLUMN_WIDTH / 2.0,
         MARGIN + rank as f32 * ROW_HEIGHT + ROW_HEIGHT / 2.0,
@@ -127,8 +127,8 @@ fn geometry(layout: &Layout, style: &Style, size: (u32, u32)) -> Vec<f32> {
 
     for path in &layout.edge_paths {
         for pair in path.windows(2) {
-            let a = centre(pair[0].0, pair[0].1);
-            let b = centre(pair[1].0, pair[1].1);
+            let a = node_centre(pair[0].0, pair[0].1);
+            let b = node_centre(pair[1].0, pair[1].1);
             let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
             let length = (dx * dx + dy * dy).sqrt().max(f32::EPSILON);
             let (nx, ny) = (-dy / length * EDGE_THICKNESS / 2.0, dx / length * EDGE_THICKNESS / 2.0);
@@ -145,7 +145,7 @@ fn geometry(layout: &Layout, style: &Style, size: (u32, u32)) -> Vec<f32> {
     }
 
     for (&rank, &slot) in layout.rank.iter().zip(&layout.slot) {
-        let [cx, cy] = centre(rank, slot);
+        let [cx, cy] = node_centre(rank, slot);
         push_box(
             &mut vertices,
             [cx - NODE_WIDTH / 2.0, cy - NODE_HEIGHT / 2.0],

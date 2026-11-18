@@ -2,6 +2,7 @@
 //! ranks, and barycenter crossing reduction (docs/implementation/05, section 5.2).
 
 pub mod render;
+pub mod view;
 
 use std::cmp::Ordering;
 use std::collections::VecDeque;

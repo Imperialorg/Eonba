@@ -6,5 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+eframe = "0.37.0"
+egui = "0.37.0"
 pollster = "1.0.2"
 wgpu = "30.0.2"
