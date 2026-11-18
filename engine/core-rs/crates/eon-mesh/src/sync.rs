@@ -4,7 +4,7 @@
 //! bytes, and converge without coordination. Imports are idempotent, so a duplicate or replayed update is harmless.
 //! The transport is out of scope here. Only the sync semantics are implemented and tested.
 
-use loro::{ExportMode, LoroDoc, LoroValue};
+use loro::{ExportMode, LoroDoc, LoroValue, VersionVector};
 
 use eon_primitives::{EonError, EonResult};
 
@@ -41,6 +41,17 @@ impl Replica {
     /// Everything this replica knows, as one update blob. Pass it to another replica's `apply`.
     pub fn export_all(&self) -> EonResult<Vec<u8>> {
         self.doc.export(ExportMode::all_updates()).map_err(loro_err)
+    }
+
+    /// This replica's version vector. A peer sends it back so this replica can export only what the peer lacks.
+    pub fn version(&self) -> Vec<u8> {
+        self.doc.oplog_vv().encode()
+    }
+
+    /// The updates a peer lacks, given the version vector it sent. Empty of new operations when the peer is current.
+    pub fn export_since(&self, peer_version: &[u8]) -> EonResult<Vec<u8>> {
+        let from = VersionVector::decode(peer_version).map_err(loro_err)?;
+        self.doc.export(ExportMode::updates(&from)).map_err(loro_err)
     }
 
     /// Applies an update blob. Applying the same blob twice has no further effect.
@@ -102,6 +113,30 @@ mod tests {
     fn corrupt_update_is_refused() {
         let b = Replica::new(2).unwrap();
         assert!(b.apply(b"not a loro update").is_err());
+    }
+
+    #[test]
+    fn delta_carries_only_what_the_peer_lacks() {
+        let a = Replica::new(1).unwrap();
+        let b = Replica::new(2).unwrap();
+        for i in 0..100 {
+            a.set(&format!("old{i}"), "x").unwrap();
+        }
+        b.apply(&a.export_all().unwrap()).unwrap();
+
+        a.set("new", "y").unwrap();
+        let delta = a.export_since(&b.version()).unwrap();
+        assert!(delta.len() < a.export_all().unwrap().len() / 4, "delta must not repeat the shared history");
+
+        b.apply(&delta).unwrap();
+        assert_eq!(b.get("new").as_deref(), Some("y"));
+        assert_eq!(b.get("old99").as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn corrupt_version_vector_is_refused() {
+        let a = Replica::new(1).unwrap();
+        assert!(a.export_since(b"not a version").is_err());
     }
 
     #[test]
