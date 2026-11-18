@@ -4,7 +4,7 @@
 use eframe::egui;
 use eon_cyber::cpg::FunctionBlock;
 
-use crate::diff::{Pairing, Status};
+use crate::diff::{Decision, Pairing, Review, Status};
 use crate::render::{node_centre, NODE_HEIGHT, NODE_WIDTH};
 use crate::Layout;
 
@@ -73,6 +73,61 @@ pub fn paint_diff(
     }
 }
 
+const CONTROL_LABEL_X: f32 = 840.0;
+const APPLY_X: f32 = 1000.0;
+const NACK_X: f32 = 1070.0;
+const CONTROL_WIDTH: f32 = 64.0;
+const CONTROL_HEIGHT: f32 = 20.0;
+
+/// Where the Apply (`nack` false) or NACK (`nack` true) button of review row `row` sits.
+pub fn control_rect(origin: egui::Pos2, row: usize, nack: bool) -> egui::Rect {
+    let x = if nack { NACK_X } else { APPLY_X };
+    let top_left = origin + egui::vec2(x, 40.0 + row as f32 * ROW_HEIGHT + 12.0);
+    egui::Rect::from_min_size(top_left, egui::vec2(CONTROL_WIDTH, CONTROL_HEIGHT))
+}
+
+/// Apply and NACK buttons for every pairing that needs review, one row per pairing in list order. A click records the
+/// decision in `review`.
+pub fn review_controls(
+    ui: &mut egui::Ui,
+    origin: egui::Pos2,
+    old: &[FunctionBlock],
+    new: &[FunctionBlock],
+    pairings: &[Pairing],
+    review: &mut Review,
+) {
+    for (row, pairing) in pairings.iter().enumerate() {
+        if pairing.status == Status::Unchanged {
+            continue;
+        }
+        let name = pairing
+            .new
+            .map(|j| new[j].name.as_str())
+            .or_else(|| pairing.old.map(|i| old[i].name.as_str()))
+            .unwrap_or_default();
+        let label_at = origin + egui::vec2(CONTROL_LABEL_X, 40.0 + row as f32 * ROW_HEIGHT + 22.0);
+        ui.painter().text(
+            label_at,
+            egui::Align2::LEFT_CENTER,
+            format!("{name} ({:?})", pairing.status),
+            egui::FontId::monospace(12.0),
+            LABEL,
+        );
+        if ui
+            .put(control_rect(origin, row, false), egui::Button::new("Apply"))
+            .clicked()
+        {
+            review.decide(row, Decision::Applied);
+        }
+        if ui
+            .put(control_rect(origin, row, true), egui::Button::new("NACK"))
+            .clicked()
+        {
+            review.decide(row, Decision::Nacked);
+        }
+    }
+}
+
 pub fn paint_layout(painter: &egui::Painter, origin: egui::Pos2, layout: &Layout) {
     let at = |p: [f32; 2]| origin + egui::vec2(p[0], p[1]);
     for path in &layout.edge_paths {
@@ -126,25 +181,35 @@ pub struct DiffView {
     old: Vec<FunctionBlock>,
     new: Vec<FunctionBlock>,
     pairings: Vec<Pairing>,
+    review: Review,
 }
 
 impl eframe::App for DiffView {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let origin = ui.max_rect().min;
         paint_diff(ui.painter(), origin, &self.old, &self.new, &self.pairings);
+        review_controls(ui, origin, &self.old, &self.new, &self.pairings, &mut self.review);
     }
 }
 
 /// Opens a window that shows the structural diff of two sources until it is closed.
 pub fn run_diff(old: Vec<FunctionBlock>, new: Vec<FunctionBlock>) -> eframe::Result {
     let pairings = crate::diff::match_blocks(&old, &new);
+    let review = Review::new(&pairings);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 400.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1160.0, 400.0]),
         ..Default::default()
     };
     eframe::run_native(
         "eon-canvas diff",
         options,
-        Box::new(move |_creation| Ok(Box::new(DiffView { old, new, pairings }))),
+        Box::new(move |_creation| {
+            Ok(Box::new(DiffView {
+                old,
+                new,
+                pairings,
+                review,
+            }))
+        }),
     )
 }

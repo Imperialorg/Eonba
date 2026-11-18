@@ -59,6 +59,49 @@ pub fn match_blocks(old: &[FunctionBlock], new: &[FunctionBlock]) -> Vec<Pairing
     pairings
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    Pending,
+    Applied,
+    Nacked,
+}
+
+/// Reviewer decisions, one per pairing. Unchanged pairings need no review and start applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Review {
+    reviewable: Vec<bool>,
+    decisions: Vec<Decision>,
+}
+
+impl Review {
+    pub fn new(pairings: &[Pairing]) -> Self {
+        let reviewable: Vec<bool> = pairings.iter().map(|p| p.status != Status::Unchanged).collect();
+        let decisions = reviewable
+            .iter()
+            .map(|&needs_review| if needs_review { Decision::Pending } else { Decision::Applied })
+            .collect();
+        Self { reviewable, decisions }
+    }
+
+    pub fn decision(&self, index: usize) -> Option<Decision> {
+        self.decisions.get(index).copied()
+    }
+
+    /// Records `decision` for a reviewable pairing. Returns false for unchanged pairings, out-of-range indices, and
+    /// attempts to set `Pending`.
+    pub fn decide(&mut self, index: usize, decision: Decision) -> bool {
+        if decision == Decision::Pending || !self.reviewable.get(index).copied().unwrap_or(false) {
+            return false;
+        }
+        self.decisions[index] = decision;
+        true
+    }
+
+    pub fn pending(&self) -> usize {
+        self.decisions.iter().filter(|&&d| d == Decision::Pending).count()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,6 +127,18 @@ mod tests {
         assert_eq!(pairings[1].old, Some(1));
         assert_eq!(pairings[1].new, Some(1));
         assert_eq!(pairings[3].new, Some(2));
+    }
+
+    #[test]
+    fn unchanged_pairings_start_applied_and_cannot_be_decided() {
+        let pairings = match_blocks(&[block("a", "1"), block("b", "2")], &[block("a", "1"), block("b", "3")]);
+        let mut review = Review::new(&pairings);
+        assert_eq!(review.decision(0), Some(Decision::Applied));
+        assert!(!review.decide(0, Decision::Nacked));
+        assert_eq!(review.decision(1), Some(Decision::Pending));
+        assert!(review.decide(1, Decision::Nacked));
+        assert_eq!(review.decision(1), Some(Decision::Nacked));
+        assert_eq!(review.pending(), 0);
     }
 
     #[test]
