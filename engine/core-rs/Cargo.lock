@@ -2247,6 +2247,8 @@ dependencies = [
  "eframe",
  "egui",
  "eon-cyber",
+ "eon-kernel",
+ "eon-primitives",
  "pollster",
  "wgpu",
 ]

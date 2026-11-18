@@ -4,6 +4,7 @@
 pub mod diff;
 pub mod render;
 pub mod view;
+pub mod writeback;
 
 use std::cmp::Ordering;
 use std::collections::VecDeque;

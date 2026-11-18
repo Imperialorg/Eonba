@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 eon-cyber = { path = "../eon-cyber" }
+eon-kernel = { path = "../eon-kernel" }
+eon-primitives = { path = "../eon-primitives" }
 eframe = "0.37.0"
 egui = "0.37.0"
 pollster = "1.0.2"
