@@ -8,6 +8,7 @@ pub mod resource;
 pub mod saga;
 pub mod schedule;
 pub mod shadow;
+pub mod structural;
 pub mod worktree;
 pub mod workflow;
 

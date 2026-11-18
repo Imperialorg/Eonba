@@ -2334,6 +2334,7 @@ name = "eon-kernel"
 version = "0.1.0"
 dependencies = [
  "diffy",
+ "eon-cyber",
  "eon-foundation",
  "eon-primitives",
  "proptest",
