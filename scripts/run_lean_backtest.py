@@ -35,6 +35,9 @@ def run(algorithm: str, data: Path, output_root: Path) -> Path:
     project = LEAN / "Launcher" / "QuantConnect.Lean.Launcher.csproj"
     if not project.is_file():
         raise ValueError("initialize LEAN first: git submodule update --init -- integrations/lean")
+    # LEAN otherwise falls back to the launcher's config, which can select a live brokerage.
+    if not CONFIG.is_file():
+        raise ValueError(f"missing backtest configuration: {CONFIG}")
     if not data.is_dir():
         raise ValueError(f"no local data directory at {data}")
     subprocess.run(["dotnet", "build", str(project), "-c", "Release"], cwd=LEAN, check=True)
@@ -46,6 +49,7 @@ def run(algorithm: str, data: Path, output_root: Path) -> Path:
         [
             "dotnet", str(binary),
             "--config", str(CONFIG),
+            "--environment", "backtesting",
             "--algorithm-type-name", algorithm,
             "--algorithm-id", algorithm,
             "--data-folder", str(data.resolve()),

@@ -2,8 +2,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from run_lean_backtest import verify_summary
+from run_lean_backtest import run, verify_summary
 
 
 class BacktestResultTests(unittest.TestCase):
@@ -40,6 +41,15 @@ class BacktestResultTests(unittest.TestCase):
         self.path.write_text("{", encoding="utf-8")
         with self.assertRaises(ValueError):
             verify_summary(self.path, True)
+
+    def test_missing_config_never_falls_back_to_the_launcher_default(self):
+        lean = self.path.parent
+        launcher = lean / "Launcher"
+        launcher.mkdir()
+        (launcher / "QuantConnect.Lean.Launcher.csproj").touch()
+        with patch("run_lean_backtest.LEAN", lean), patch("run_lean_backtest.CONFIG", self.path):
+            with self.assertRaisesRegex(ValueError, "missing backtest configuration"):
+                run("BasicTemplateAlgorithm", lean, lean)
 
 
 if __name__ == "__main__":
