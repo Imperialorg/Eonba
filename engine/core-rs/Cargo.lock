@@ -2469,6 +2469,8 @@ dependencies = [
  "eon-foundation",
  "eon-primitives",
  "proptest",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

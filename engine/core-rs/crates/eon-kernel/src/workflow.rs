@@ -1,6 +1,6 @@
 //! Workflow DAG with Kahn validation and dynamic subgraph splicing (docs/implementation/01, section 4.2).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use eon_primitives::{EonError, EonResult, TaskId};
 
@@ -32,6 +32,24 @@ pub struct Workflow {
     tasks: BTreeMap<TaskId, Task>,
 }
 
+/// Project the validated definition into a fresh execution graph. All tasks start
+/// pending; capability contracts and objective metadata stay in the immutable definition.
+impl From<&crate::model::Workflow> for Workflow {
+    fn from(definition: &crate::model::Workflow) -> Self {
+        let tasks = definition
+            .tasks()
+            .iter()
+            .map(|(id, t)| {
+                (
+                    id.clone(),
+                    Task::new(id.clone(), t.dependencies.iter().cloned()),
+                )
+            })
+            .collect();
+        Self { tasks }
+    }
+}
+
 impl Workflow {
     pub fn new() -> Self {
         Self::default()
@@ -44,8 +62,19 @@ impl Workflow {
                 task.id
             )));
         }
+        // A fresh node depending only on existing nodes cannot close a cycle.
+        if let Some(dep) = task
+            .dependencies
+            .iter()
+            .find(|dep| !self.tasks.contains_key(dep))
+        {
+            return Err(EonError::ValidationError(format!(
+                "task {} depends on unknown task {dep}",
+                task.id
+            )));
+        }
         self.tasks.insert(task.id.clone(), task);
-        self.validate_topological_order()
+        Ok(())
     }
 
     pub fn get(&self, id: &TaskId) -> Option<&Task> {
@@ -79,41 +108,7 @@ impl Workflow {
 
     /// Kahn's algorithm: every dependency must exist and the graph must have no cycle.
     pub fn validate_topological_order(&self) -> EonResult<()> {
-        let mut in_degree: BTreeMap<&TaskId, usize> = BTreeMap::new();
-        for task in self.tasks.values() {
-            for dep in &task.dependencies {
-                if !self.tasks.contains_key(dep) {
-                    return Err(EonError::ValidationError(format!(
-                        "task {} depends on unknown task {dep}",
-                        task.id
-                    )));
-                }
-            }
-            in_degree.insert(&task.id, task.dependencies.len());
-        }
-
-        let mut queue: Vec<&TaskId> = in_degree
-            .iter()
-            .filter(|&(_, &d)| d == 0)
-            .map(|(id, _)| *id)
-            .collect();
-        let mut visited = 0;
-        while let Some(id) = queue.pop() {
-            visited += 1;
-            for task in self.tasks.values().filter(|t| t.dependencies.contains(id)) {
-                let degree = in_degree.get_mut(&task.id).expect("every task is indexed");
-                *degree -= 1;
-                if *degree == 0 {
-                    queue.push(&task.id);
-                }
-            }
-        }
-        if visited != self.tasks.len() {
-            return Err(EonError::ValidationError(
-                "workflow contains a dependency cycle".to_string(),
-            ));
-        }
-        Ok(())
+        topological_order(&self.tasks, |t| &t.dependencies).map(|_| ())
     }
 
     /// Replaces a completed continuation `parent` with `children`. Downstream tasks that depended
@@ -186,6 +181,51 @@ impl Workflow {
         }
         Ok(())
     }
+}
+
+/// Shared by the submission and execution graphs. Roots and siblings enter the
+/// queue in stable ID order; each outgoing edge is visited once during traversal.
+pub(crate) fn topological_order<T>(
+    tasks: &BTreeMap<TaskId, T>,
+    dependencies: impl Fn(&T) -> &BTreeSet<TaskId>,
+) -> EonResult<Vec<TaskId>> {
+    let mut degree = BTreeMap::new();
+    let mut dependents: BTreeMap<&TaskId, Vec<&TaskId>> = BTreeMap::new();
+    let mut ready = VecDeque::new();
+    for (id, task) in tasks {
+        let deps = dependencies(task);
+        degree.insert(id, deps.len());
+        if deps.is_empty() {
+            ready.push_back(id);
+        }
+        for dep in deps {
+            if !tasks.contains_key(dep) {
+                return Err(EonError::ValidationError(format!(
+                    "task {id} depends on unknown task {dep}"
+                )));
+            }
+            dependents.entry(dep).or_default().push(id);
+        }
+    }
+    let mut order = Vec::with_capacity(tasks.len());
+    while let Some(id) = ready.pop_front() {
+        order.push(id.clone());
+        if let Some(children) = dependents.get(id) {
+            for child in children {
+                let remaining = degree.get_mut(child).expect("every task is indexed");
+                *remaining -= 1;
+                if *remaining == 0 {
+                    ready.push_back(child);
+                }
+            }
+        }
+    }
+    if order.len() != tasks.len() {
+        return Err(EonError::ValidationError(
+            "workflow contains a dependency cycle".into(),
+        ));
+    }
+    Ok(order)
 }
 
 #[cfg(test)]
@@ -280,6 +320,8 @@ mod tests {
     #[test]
     fn insert_rejects_unknown_dependency() {
         let mut wf = Workflow::new();
+        let before = wf.clone();
         assert!(wf.insert(Task::new(id("40"), [id("99")])).is_err());
+        assert_eq!(wf, before);
     }
 }

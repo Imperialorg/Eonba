@@ -3,6 +3,7 @@ pub mod epoch;
 pub mod events;
 pub mod fsm;
 pub mod journal_sink;
+pub mod model;
 pub mod overlay;
 pub mod resource;
 pub mod saga;

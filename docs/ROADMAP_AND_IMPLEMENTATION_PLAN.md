@@ -233,6 +233,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Crates**: `eon-capability`, `eon-foundation`
   - **Requirements**: Untrusted tools cannot read outside their workspace, open a network socket, or exceed their resource budgets. Verify that audit records contain no raw test credentials and that teardown releases resources even when a tool fails.
   - **Verification**: Denied access leaves a sentinel file unchanged; an over-budget tool terminates; replayed audit records and on-disk frames contain only redacted fixtures. Run real sandbox tests on a supported host. An unavailable backend is not evidence that isolation passed.
+  - **Verified on Linux**: The Wasmtime backend denies filesystem and socket imports, caps a guest's linear memory at 64 MiB, and releases its instance and memory after fuel exhaustion. The journal tests check recognized secret fixtures on disk and after replay. Wasm guest limits do not bound host-side compilation or native processes; containment for all backends is still open.
 
 ---
 

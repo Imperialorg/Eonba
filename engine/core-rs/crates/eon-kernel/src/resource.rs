@@ -14,11 +14,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use eon_primitives::{EonError, EonResult, LeaseId};
+use serde::{Deserialize, Serialize};
 
 /// Lifetime of a lease obtained via [`ResourceManager::acquire`], measured from its grant.
 pub const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(60);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ResourceRank {
     CpuCores = 0,
     GpuCompute = 1,
@@ -28,14 +29,14 @@ pub enum ResourceRank {
 }
 
 /// Total order over resources. Every request is sorted by this key before acquisition.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct CanonicalResourceKey {
     pub rank: ResourceRank,
     /// Empty for countable pools; a canonical URI for file locks.
     pub id: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Demand {
     /// Takes `units` from a countable pool.
     Pool(u64),
@@ -45,7 +46,7 @@ pub enum Demand {
     ExclusiveWrite,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Requirement {
     pub key: CanonicalResourceKey,
     pub demand: Demand,
@@ -268,7 +269,7 @@ impl ResourceManager {
 
 /// Collapses duplicate keys. Pools sum. Lock demands upgrade to the strongest mode.
 /// Mixing a pool and a lock on one key is a programming error.
-fn merge(requirements: Vec<Requirement>) -> EonResult<Vec<Requirement>> {
+pub(crate) fn merge(requirements: Vec<Requirement>) -> EonResult<Vec<Requirement>> {
     let mut by_key: BTreeMap<CanonicalResourceKey, Demand> = BTreeMap::new();
     for req in requirements {
         match (req.key.rank, req.demand) {
