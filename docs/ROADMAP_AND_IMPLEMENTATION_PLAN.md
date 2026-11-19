@@ -57,7 +57,7 @@
   - **Files**: `src/identity.rs`, `src/permissions.rs`, `src/credentials.rs`, `src/scrubber.rs`
   - **Requirements**: Ownership identities (System, User, EphemeralAgent). Permission bitflags (`READ_WORKSPACE`, `MUTATE_WORKSPACE`, `EXECUTE_PROCESS`, `CYBER_OPERATIONS`, `NETWORK_ACCESS`, `DEVICE_CONTROL`, `SPAWN_SUBAGENT`). Opaque credential handles (`secret://<vault_key>`) with late-binding memory resolution from hardware OS enclaves (Android Keystore, Windows DPAPI, Linux Keyring). In-flight `JournalScrubber` redacting tokens and high-entropy strings ($\mathcal{H} > 4.5$) before journal disk commitment.
   - **Unit Tests**: `cargo test -p eon-foundation identity_and_credential_tests` verifying zero secret leaks to disk frames and entropy-based redaction.
-  - **Still open**: Text redaction is not a platform keystore. The in-memory broker does not establish hardware-backed secret resolution or enforce identity permissions.
+  - **Verified on Linux**: The process keyring binds owner-scoped handles to child stdin after checking the caller's grants. Delegation cannot add grants; unsupported backends fail closed. Process-lifetime software storage is not a hardware enclave. Android Keystore and Windows DPAPI remain open.
 
 ---
 
