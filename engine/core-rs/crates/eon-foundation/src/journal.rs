@@ -60,8 +60,8 @@ impl JournalWriter {
         dir: impl AsRef<Path>,
         max_segment_bytes: u64,
     ) -> EonResult<Self> {
-        let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir).map_err(|e| io_err("journal.create_dir", e))?;
+        let dir = fs::canonicalize(dir).map_err(|e| io_err("journal.resolve_dir", e))?;
         let writer_lock = lock_writer(&dir)?;
 
         let segments = list_segments(&dir)?;
@@ -99,6 +99,8 @@ impl JournalWriter {
             .append(true)
             .open(&path)
             .map_err(|e| io_err("journal.append_segment", e))?;
+        // An earlier segment creation may have failed at the directory sync.
+        sync_directory(&dir)?;
         Ok(Self {
             _writer_lock: writer_lock,
             dir,
@@ -156,11 +158,11 @@ impl JournalWriter {
 
         // A failed write or sync can leave complete but unacknowledged frames on disk.
         // Do not reuse their sequence numbers until open() inspects the actual tail.
-        self.needs_recovery = true;
         if self.segment_len > 0 && self.segment_len + buf.len() as u64 > self.max_segment_bytes {
             self.roll_segment()?;
         }
 
+        self.needs_recovery = true;
         self.file.write_all(&buf).map_err(|e| io_err("journal.write", e))?;
         self.file
             .sync_data()
@@ -183,6 +185,7 @@ impl JournalWriter {
         let sealed = fs::read(segment_path(&self.dir, self.segment_first_seq))
             .map_err(|e| io_err("journal.read_sealed", e))?;
         write_index(&self.dir, self.segment_first_seq, &sealed)?;
+        self.needs_recovery = true;
         self.file = create_segment(&self.dir, self.next_seq)?;
         self.segment_first_seq = self.next_seq;
         self.segment_len = 0;
@@ -259,7 +262,10 @@ pub fn replay_from(dir: impl AsRef<Path>, from_seq: u64) -> EonResult<Vec<Frame>
     let segments = list_segments(dir)?;
     let mut frames = Vec::new();
     let start = segments.partition_point(|(first_seq, _)| *first_seq <= from_seq).saturating_sub(1);
-    let mut expected = if start == 0 { 1 } else { segments[start].0 };
+    let Some(&(first, _)) = segments.get(start) else {
+        return Ok(frames);
+    };
+    let mut expected = first.min(from_seq.max(1));
     for (first_seq, path) in &segments[start..] {
         if *first_seq != expected {
             return Err(EonError::InternalError(format!("expected segment {expected}, found {first_seq}")));
@@ -267,11 +273,7 @@ pub fn replay_from(dir: impl AsRef<Path>, from_seq: u64) -> EonResult<Vec<Frame>
         let bytes = fs::read(path).map_err(|e| io_err("journal.read_segment", e))?;
         let (mut offset, mut seq) = (0usize, *first_seq);
         if from_seq > *first_seq
-            && let Some(entries) = read_index(dir, *first_seq)
-            && let Some(&(entry_seq, entry_offset)) = entries.iter().rev()
-                .find(|(s, _)| *first_seq < *s && *s <= from_seq && (*s - *first_seq).is_multiple_of(INDEX_STRIDE))
-            && let Ok(start) = usize::try_from(entry_offset)
-            && bytes.get(start..).and_then(decode_at).is_some_and(|(f, _)| f.seq_no == entry_seq)
+            && let Some((start, entry_seq)) = indexed_start(dir, *first_seq, from_seq, &bytes)
         {
             offset = start;
             seq = entry_seq;
@@ -292,6 +294,30 @@ pub fn replay_from(dir: impl AsRef<Path>, from_seq: u64) -> EonResult<Vec<Frame>
         expected = seq;
     }
     Ok(frames)
+}
+
+/// An index is only a hint: a payload can itself contain a valid encoded frame. Confirm the
+/// offset against top-level frame lengths without checksumming or decompressing skipped payloads.
+fn indexed_start(dir: &Path, first: u64, wanted: u64, bytes: &[u8]) -> Option<(usize, u64)> {
+    let entries = read_index(dir, first)?;
+    let &(seq, offset) = entries.iter().rev().find(|(s, _)| first < *s && *s <= wanted)?;
+    if !(seq - first).is_multiple_of(INDEX_STRIDE) {
+        return None;
+    }
+    let target = usize::try_from(offset).ok()?;
+    let mut at = 0usize;
+    for expected in first..seq {
+        let prefix = bytes.get(at..target)?.get(..HEADER_LEN)?;
+        if prefix[..4] != FRAME_MAGIC.to_le_bytes() || prefix[8..16] != expected.to_le_bytes() {
+            return None;
+        }
+        let len = u32::from_le_bytes(prefix[28..32].try_into().ok()?) as usize;
+        if len > MAX_PAYLOAD_LEN {
+            return None;
+        }
+        at = at.checked_add(HEADER_LEN + len)?;
+    }
+    (at == target).then_some((at, seq))
 }
 
 struct SegmentScan {
@@ -457,10 +483,14 @@ fn create_segment(dir: &Path, first_seq: u64) -> EonResult<File> {
         .append(true)
         .open(segment_path(dir, first_seq))
         .map_err(|e| io_err("journal.create_segment", e))?;
+    sync_directory(dir)?;
+    Ok(file)
+}
+
+fn sync_directory(dir: &Path) -> EonResult<()> {
     File::open(dir)
         .and_then(|d| d.sync_all())
-        .map_err(|e| io_err("journal.sync_dir", e))?;
-    Ok(file)
+        .map_err(|e| io_err("journal.sync_dir", e))
 }
 
 fn list_segments(dir: &Path) -> EonResult<Vec<(u64, PathBuf)>> {
@@ -739,6 +769,28 @@ mod tests {
         assert!(replay(dir.path()).is_err());
         assert!(replay_from(dir.path(), 2).is_err());
         assert_eq!(replay_from(dir.path(), 3).unwrap()[0].payload, b"c");
+        fs::remove_file(segment_path(dir.path(), 1)).unwrap();
+        assert!(replay(dir.path()).is_err());
+        assert!(replay_from(dir.path(), 2).is_err());
+        assert_eq!(replay_from(dir.path(), 3).unwrap()[0].payload, b"c");
+    }
+
+    #[test]
+    fn sparse_index_cannot_substitute_a_frame_embedded_in_a_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = JournalWriter::open_with_segment_size(dir.path(), 1).unwrap();
+        let mut nested = Vec::new();
+        encode_frame(65, 0, 0, b"inner", &mut nested);
+        let mut items = vec![b"x".as_slice(); INDEX_STRIDE as usize];
+        items.push(&nested);
+        writer.append_batch(&items).unwrap();
+        writer.append_batch(&[b"seal"]).unwrap();
+        let index = index_path(dir.path(), 1);
+        let mut bytes = fs::read(&index).unwrap();
+        let inside = (HEADER_LEN as u64 + 1) * INDEX_STRIDE + HEADER_LEN as u64;
+        bytes[24..32].copy_from_slice(&inside.to_le_bytes());
+        fs::write(index, bytes).unwrap();
+        assert_eq!(replay_from(dir.path(), 65).unwrap()[0].payload, nested);
     }
 
     #[test]
