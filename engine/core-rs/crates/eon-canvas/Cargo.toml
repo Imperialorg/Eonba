@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-eon-cyber = { path = "../eon-cyber" }
+eon-cyber = { path = "../eon-cyber", default-features = false }
 eon-kernel = { path = "../eon-kernel" }
 eon-primitives = { path = "../eon-primitives" }
 eframe = "0.37.0"

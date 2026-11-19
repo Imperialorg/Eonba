@@ -2,7 +2,9 @@
 #[cfg(feature = "solver")]
 pub mod branches;
 pub mod cpg;
+pub mod function_review;
 pub mod interproc;
+pub mod remediation;
 pub mod sbom;
 #[cfg(feature = "solver")]
 pub mod solver;
