@@ -22,6 +22,7 @@ fn state_name(state: TaskState) -> &'static str {
         TaskState::Failed => "failed",
         TaskState::Compensating => "compensating",
         TaskState::Compensated => "compensated",
+        TaskState::UncertainFailure => "uncertain_failure",
     }
 }
 
@@ -34,6 +35,7 @@ fn parse_state(name: &str) -> EonResult<TaskState> {
         "failed" => TaskState::Failed,
         "compensating" => TaskState::Compensating,
         "compensated" => TaskState::Compensated,
+        "uncertain_failure" => TaskState::UncertainFailure,
         other => return Err(corrupt(format!("unknown state '{other}'"))),
     })
 }
@@ -157,7 +159,8 @@ mod tests {
     use eon_foundation::journal::replay;
 
     use super::*;
-    use crate::events::{complete_recorded, splice_recorded};
+    use crate::events::{complete_recorded, splice_recorded, transition_recorded};
+    use crate::fsm::TaskEvent;
     use crate::workflow::{Task, Workflow};
 
     #[test]
@@ -178,6 +181,58 @@ mod tests {
         ];
         for event in events {
             assert_eq!(decode(&encode(&event)).unwrap(), event);
+        }
+    }
+
+    #[test]
+    fn transition_state_names_and_discriminants_are_stable() {
+        use TaskState::*;
+        for (state, name, discriminant) in [
+            (Pending, "pending", 0),
+            (Ready, "ready", 1),
+            (Running, "running", 2),
+            (Completed, "completed", 3),
+            (Failed, "failed", 4),
+            (Compensating, "compensating", 5),
+            (Compensated, "compensated", 6),
+            (UncertainFailure, "uncertain_failure", 7),
+        ] {
+            assert_eq!(state as usize, discriminant);
+            assert_eq!(state_name(state), name);
+            assert_eq!(parse_state(name).unwrap(), state);
+        }
+
+        // Existing workflow journals use this shortcut rather than the FSM's intermediate states.
+        let task = TaskId::new();
+        let legacy = format!("T\t{task}\tpending\tcompleted");
+        let event = KernelEvent::TaskTransition { task, from: Pending, to: Completed };
+        assert_eq!(decode(legacy.as_bytes()).unwrap(), event);
+        assert_eq!(encode(&event), legacy.as_bytes());
+    }
+
+    #[test]
+    fn durable_replay_stops_at_the_unverified_outcome() {
+        use TaskState::*;
+        let task = TaskId::new();
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let journal = GroupCommitJournal::spawn(dir.path(), 8).unwrap();
+            let mut sink = JournalSink::new(&journal);
+            let mut state = Pending;
+            for event in [TaskEvent::DependenciesMet, TaskEvent::Start, TaskEvent::OutcomeUncertain] {
+                transition_recorded(&mut state, &task, event, &mut sink).unwrap();
+            }
+            assert!(transition_recorded(&mut state, &task, TaskEvent::Start, &mut sink).is_err());
+        }
+
+        let frames = replay(dir.path()).unwrap();
+        let expected = [(Pending, Ready), (Ready, Running), (Running, UncertainFailure)];
+        assert_eq!(frames.len(), expected.len());
+        for (frame, (from, to)) in frames.iter().zip(expected) {
+            assert_eq!(
+                decode(&frame.payload).unwrap(),
+                KernelEvent::TaskTransition { task: task.clone(), from, to }
+            );
         }
     }
 
