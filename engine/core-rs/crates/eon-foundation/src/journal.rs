@@ -51,7 +51,8 @@ pub struct JournalWriter {
 }
 
 impl JournalWriter {
-    /// Opens the journal in `dir`, repairing a torn tail if the last write was interrupted.
+    /// Locks `dir` for writing and repairs an interrupted tail. Readers need no lock.
+    /// Do not move or replace a journal directory (or remove its lock file) while it is open.
     pub fn open(dir: impl AsRef<Path>) -> EonResult<Self> {
         Self::open_with_segment_size(dir, DEFAULT_SEGMENT_BYTES)
     }

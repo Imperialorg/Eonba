@@ -148,16 +148,36 @@ mod tests {
 
     #[test]
     fn scrubbed_appends_never_persist_the_raw_secret() {
+        use crate::journal::HEADER_LEN;
+        use crate::scrubber::redaction_marker;
+
+        let token_body = "paper-deploy-token";
+        let token = format!("ghp_{token_body}");
+        let segments = ["paperheader", "paperclaims", "papersignature"];
+        let bearer = ["Bearer", &segments.join(".")].join(" ");
+        let key_lines = ["paper-key-line-one", "paper-key-line-two"];
+        let label = "PRIVATE KEY";
+        let key = format!("-----BEGIN {label}-----\r\n{}\r\n-----END {label}-----", key_lines.join("\r\n"));
+        let input = format!("deploy {token}\nauth: {bearer}\nkey: {key}\ndone");
+        let expected = format!(
+            "deploy {}\nauth: {}\nkey: {}\ndone",
+            redaction_marker(&token), redaction_marker(&bearer), redaction_marker(&key),
+        );
+
         let dir = tempfile::tempdir().unwrap();
         let journal = GroupCommitJournal::spawn(dir.path(), 8).unwrap();
-        journal
-            .append_scrubbed("deploy with ghp_FIXTURE-not-a-real-token now")
-            .unwrap();
+        let seq = journal.append_scrubbed(&input).unwrap();
         drop(journal);
-        let text: Vec<u8> = replay(dir.path()).unwrap().into_iter().flat_map(|f| f.payload).collect();
-        let text = String::from_utf8(text).unwrap();
-        assert!(!text.contains("16C7e42F"), "raw secret reached the journal: {text}");
-        assert!(text.contains("[REDACTED_SECRET:b3_"));
+
+        let disk = std::fs::read(dir.path().join(format!("seg_{seq:020}.eonj"))).unwrap();
+        for raw in [token_body].into_iter().chain(segments).chain(key_lines) {
+            assert!(!disk.windows(raw.len()).any(|w| w == raw.as_bytes()), "stored fixture: {raw}");
+        }
+        assert_eq!(&disk[HEADER_LEN..], expected.as_bytes());
+        let frames = replay(dir.path()).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].seq_no, seq);
+        assert_eq!(frames[0].payload, expected.as_bytes());
     }
 
     #[test]

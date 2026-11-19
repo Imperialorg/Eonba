@@ -1,7 +1,7 @@
 //! Three-stage journal scrubber (docs/implementation/01, section 3.4).
 //!
-//! Stage 0 strips invisible Unicode steganography. Stage 1 redacts known secret
-//! prefixes in one Aho-Corasick pass. Stage 2 redacts high-entropy tokens that
+//! Stage 0 strips invisible Unicode steganography. Stage 1 redacts PEM private
+//! keys and known secret prefixes. Stage 2 redacts high-entropy tokens that
 //! are not paths, URLs, or hashes. Every redaction is replaced by a keyed-free
 //! BLAKE3 tag so equal secrets still compare equal without being revealed.
 
@@ -9,6 +9,9 @@ use std::sync::OnceLock;
 
 use aho_corasick::AhoCorasick;
 
+const PEM_BEGIN: &str = "-----BEGIN ";
+const JWT_PREFIX: &str = "eyJhbGci";
+const BEARER: &str = "Bearer";
 const KNOWN_PREFIXES: &[&str] = &[
     "ghp_",
     "gho_",
@@ -22,9 +25,8 @@ const KNOWN_PREFIXES: &[&str] = &[
     "AIza",
     "xoxb-",
     "xoxp-",
-    "eyJhbGci",
-    "-----BEGIN ",
-    "Bearer ",
+    JWT_PREFIX,
+    BEARER,
 ];
 
 const BASE64_ENTROPY_BITS: f64 = 4.65;
@@ -46,7 +48,12 @@ fn is_invisible(c: char) -> bool {
 
 fn known_prefixes() -> &'static AhoCorasick {
     static MATCHER: OnceLock<AhoCorasick> = OnceLock::new();
-    MATCHER.get_or_init(|| AhoCorasick::new(KNOWN_PREFIXES).expect("static prefixes are valid"))
+    MATCHER.get_or_init(|| {
+        AhoCorasick::builder()
+            .ascii_case_insensitive(true)
+            .build(KNOWN_PREFIXES)
+            .expect("static prefixes are valid")
+    })
 }
 
 fn is_token_char(c: char) -> bool {
@@ -80,28 +87,81 @@ pub fn redaction_marker(secret: &str) -> String {
 /// Applies all three stages and returns the scrubbed text.
 pub fn scrub(input: &str) -> String {
     let stripped = strip_invisible(input);
-    let after_prefixes = redact_known_prefixes(&stripped);
-    redact_high_entropy(&after_prefixes)
+    let after_credentials = redact_credentials(&stripped);
+    redact_high_entropy(&after_credentials)
 }
 
-fn redact_known_prefixes(input: &str) -> String {
+fn redact_credentials(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
+    let mut cursor = 0;
+    for (start, begin) in input.match_indices(PEM_BEGIN) {
+        if start < cursor {
+            continue;
+        }
+        // Even for a malformed label, this scan stops no later than the next BEGIN's dashes.
+        let Some((label, body)) = input[start + begin.len()..].split_once("-----") else {
+            break;
+        };
+        if !is_private_key_label(label) {
+            continue;
+        }
+        let footer = format!("-----END {label}-----");
+        // A missing or mismatched END leaves the rest of this journal entry sensitive.
+        let end = body
+            .split_once(&footer)
+            .map_or(input.len(), |(_, rest)| input.len() - rest.len());
+        redact_known_prefixes(&input[cursor..start], &mut out);
+        out.push_str(&redaction_marker(&input[start..end]));
+        cursor = end;
+    }
+    redact_known_prefixes(&input[cursor..], &mut out);
+    out
+}
+
+fn is_private_key_label(label: &str) -> bool {
+    matches!(label, "PRIVATE KEY" | "PGP PRIVATE KEY BLOCK")
+        || (label.ends_with(" PRIVATE KEY")
+            && label.bytes().all(|b| {
+                b.is_ascii_uppercase() || b.is_ascii_digit() || matches!(b, b' ' | b'-')
+            }))
+}
+
+fn redact_known_prefixes(input: &str, out: &mut String) {
     let mut cursor = 0;
     for hit in known_prefixes().find_iter(input) {
         if hit.start() < cursor || starts_inside_token(input, hit.start()) {
             continue;
         }
-        let end = input[hit.end()..]
-            .char_indices()
-            .find(|&(_, c)| !is_token_char(c))
-            .map(|(i, _)| hit.end() + i)
-            .unwrap_or(input.len());
+        let prefix = KNOWN_PREFIXES[hit.pattern().as_usize()];
+        let tail = &input[hit.end()..];
+        let value = if prefix == BEARER {
+            let value = tail.trim_start_matches([' ', '\t']);
+            if value.len() == tail.len() || !value.starts_with(is_bearer_char) {
+                continue;
+            }
+            value
+        } else {
+            // Only the HTTP authentication scheme is case-insensitive.
+            if &input[hit.start()..hit.end()] != prefix {
+                continue;
+            }
+            tail
+        };
+        let rest = value.trim_start_matches(|c| match prefix {
+            BEARER => is_bearer_char(c),
+            JWT_PREFIX => is_token_char(c) || c == '.',
+            _ => is_token_char(c),
+        });
+        let end = input.len() - rest.len();
         out.push_str(&input[cursor..hit.start()]);
         out.push_str(&redaction_marker(&input[hit.start()..end]));
         cursor = end;
     }
     out.push_str(&input[cursor..]);
-    out
+}
+
+fn is_bearer_char(c: char) -> bool {
+    is_token_char(c) || matches!(c, '.' | '~')
 }
 
 /// A prefix such as `xoxb-` inside `axoxb--0` is part of a longer word, not the start of a secret.
@@ -199,6 +259,71 @@ mod tests {
         assert!(scrubbed.ends_with(" end"));
     }
 
+    fn pem(label: &str, body: &str, newline: &str) -> String {
+        format!("-----BEGIN {label}-----{newline}{body}{newline}-----END {label}-----")
+    }
+
+    #[test]
+    fn multiline_private_keys_become_one_stable_marker() {
+        for label in [
+            "PRIVATE KEY", "ENCRYPTED PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY",
+            "DSA PRIVATE KEY", "OPENSSH PRIVATE KEY", "PGP PRIVATE KEY BLOCK",
+        ] {
+            for newline in ["\n", "\r\n"] {
+                let body = ["paper", "pretend"].join(newline);
+                let block = pem(label, &body, newline);
+                let expected = format!("before {}{newline}after", redaction_marker(&block));
+                assert_eq!(scrub(&format!("before {block}{newline}after")), expected);
+                assert_eq!(scrub(&expected), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn multiple_blocks_preserve_public_certificate_and_intervening_text() {
+        let cert = pem("CERTIFICATE", "cGFwZXI=", "\r\n");
+        let first = pem("PRIVATE KEY", "paper", "\r\n");
+        let last = pem("EC PRIVATE KEY", "pretend", "\n");
+        let input = format!("{first}\r\n{cert}\nnotes: {MODULE_PATH}\n{last} done");
+        let expected = format!(
+            "{}\r\n{cert}\nnotes: {MODULE_PATH}\n{} done",
+            redaction_marker(&first), redaction_marker(&last),
+        );
+        assert_eq!(scrub(&input), expected);
+        assert_eq!(scrub(&expected), expected);
+    }
+
+    #[test]
+    fn public_certificate_body_uses_the_ordinary_entropy_policy() {
+        let body = ["ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz", "0123456789+/"].concat();
+        let cert = pem("CERTIFICATE", &body, "\n");
+        assert_eq!(scrub(&cert), pem("CERTIFICATE", &redaction_marker(&body), "\n"));
+    }
+
+    #[test]
+    fn private_key_without_matching_footer_redacts_through_end_of_entry() {
+        let label = "RSA PRIVATE KEY";
+        for tail in ["", "\r\n-----END CERTIFICATE-----\r\nmore notes"] {
+            let block = format!("-----BEGIN {label}-----\r\npaper\r\npretend{tail}");
+            assert_eq!(scrub(&format!("keep\n{block}")), format!("keep\n{}", redaction_marker(&block)));
+        }
+    }
+
+    #[test]
+    fn bearer_and_recognized_jwt_consume_all_dotted_segments() {
+        let dotted = ["paper", "claims", "signature"].join(".");
+        let jwt = format!("{JWT_PREFIX}{dotted}");
+        for credential in [format!("{BEARER} {dotted}"), format!("bEaReR\t  {dotted}"), jwt] {
+            let expected = format!("auth: {}, done.", redaction_marker(&credential));
+            assert_eq!(scrub(&format!("auth: {credential}, done.")), expected);
+            assert_eq!(scrub(&expected), expected);
+        }
+        let marker = format!("{BEARER} {}", redaction_marker(&dotted));
+        assert_eq!(scrub(&marker), marker);
+        let plain = "Bearer\nnext line; asia.example; crates/Bearer.rs";
+        assert_eq!(scrub(plain), plain);
+    }
+
     #[test]
     fn module_paths_survive_even_with_high_character_variety() {
         assert!(!scrub(MODULE_PATH).contains("REDACTED"));
@@ -248,4 +373,3 @@ mod tests {
         );
     }
 }
-
