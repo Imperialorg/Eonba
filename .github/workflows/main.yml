@@ -24,6 +24,19 @@ jobs:
       - run: cargo test --locked -p eon-foundation -p eon-primitives -p eon-cli -p eon-daemon --features eon-primitives/serde
       - run: python3 -m unittest discover -s "$GITHUB_WORKSPACE/scripts"
 
+  kernel-and-advisories:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: engine/core-rs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: cargo test --locked -p eon-cyber --no-default-features --lib sbom
+      - run: cargo test --locked -p eon-kernel
+
   lean-backtest:
     runs-on: ubuntu-latest
     timeout-minutes: 30

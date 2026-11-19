@@ -7,11 +7,10 @@ license.workspace = true
 
 [dependencies]
 diffy = "0.4"
-eon-cyber = { path = "../eon-cyber" }
+eon-cyber = { path = "../eon-cyber", default-features = false }
 eon-foundation = { version = "0.1.0", path = "../eon-foundation" }
 eon-primitives = { path = "../eon-primitives" }
 
 [dev-dependencies]
 proptest = "1"
 tempfile = "3"
-
