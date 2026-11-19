@@ -10,6 +10,13 @@ pub const NUM_MEL_BINS: usize = 80;
 /// Computes one 80-dimensional log-mel vector per 10 ms frame of 16 kHz mono audio. Dither is off and edges are not
 /// snipped, so the output is deterministic and matches the reference front end.
 pub fn kaldi_fbank(samples: &[f32]) -> EonResult<Vec<Vec<f32>>> {
+    let mut features = online_fbank()?;
+    features.accept_waveform(SAMPLE_RATE_HZ, samples);
+    features.input_finished();
+    Ok(features.features)
+}
+
+pub(crate) fn online_fbank() -> EonResult<OnlineFeature> {
     let mut opts = FbankOptions::default();
     opts.frame_opts.dither = 0.0;
     opts.frame_opts.snip_edges = false;
@@ -19,15 +26,5 @@ pub fn kaldi_fbank(samples: &[f32]) -> EonResult<Vec<Vec<f32>>> {
         operation: "features.fbank".into(),
         reason: e,
     })?;
-    let mut features = OnlineFeature::new(FeatureComputer::Fbank(computer));
-    features.accept_waveform(SAMPLE_RATE_HZ, samples);
-    features.input_finished();
-    (0..features.num_frames_ready())
-        .map(|i| {
-            features
-                .get_frame(i)
-                .map(<[f32]>::to_vec)
-                .ok_or_else(|| EonError::InternalError(format!("fbank frame {i} missing")))
-        })
-        .collect()
+    Ok(OnlineFeature::new(FeatureComputer::Fbank(computer)))
 }

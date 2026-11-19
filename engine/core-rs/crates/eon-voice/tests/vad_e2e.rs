@@ -20,7 +20,9 @@ fn model_path() -> PathBuf {
 }
 
 fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
 }
 
 fn load_model() -> SileroVad {
@@ -31,6 +33,51 @@ fn load_model() -> SileroVad {
         path.display()
     );
     SileroVad::load(path).expect("pinned Silero model must load")
+}
+
+#[test]
+fn endpoint_runs_on_released_speech_after_post_reply_session_split() {
+    use eon_voice::vad::VadEndpoint;
+    let path = std::env::var_os("EON_ZIPFORMER_TEST_WAV_0")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| fixture("0.wav"));
+    let samples = read_pcm16_mono_16k(&path);
+    let mut endpoint = VadEndpoint::new(load_model());
+    let previous_session = endpoint.session().clone();
+    endpoint.reply_finished();
+    assert_ne!(&previous_session, endpoint.session());
+    let silence = [0.0; VAD_FRAME_SAMPLES];
+    for _ in 0..10 {
+        assert!(endpoint.push(&silence, "").unwrap().is_none());
+    }
+    let mut endpoints = 0;
+    for frame in samples
+        .as_chunks::<VAD_FRAME_SAMPLES>()
+        .0
+        .iter()
+        .chain(std::iter::repeat_n(&silence, 60))
+    {
+        endpoints += usize::from(endpoint.push(frame, "after early nightfall").unwrap().is_some());
+    }
+    assert!(endpoints > 0, "real released speech plus silence never endpointed");
+    let mut vad = load_model();
+    let mut durations = Vec::new();
+    let mut voiced = 0;
+    for frame in samples.as_chunks::<VAD_FRAME_SAMPLES>().0 {
+        let start = std::time::Instant::now();
+        let p = vad.speech_probability(frame).unwrap();
+        durations.push(start.elapsed());
+        voiced += usize::from(p > 0.5);
+    }
+    assert!(voiced > durations.len() / 3, "missing speech in the released clip");
+    durations.sort();
+    eprintln!(
+        "Silero {} frames: p50={:?} p95={:?} max={:?}",
+        durations.len(),
+        durations[durations.len() / 2],
+        durations[durations.len() * 95 / 100],
+        durations.last().unwrap()
+    );
 }
 
 #[test]
@@ -51,7 +98,9 @@ fn wrong_frame_size_is_refused_before_inference() {
 #[test]
 fn reset_makes_inference_repeatable() {
     let mut vad = load_model();
-    let frame: Vec<f32> = (0..VAD_FRAME_SAMPLES).map(|i| ((i as f32) * 0.05).sin() * 0.3).collect();
+    let frame: Vec<f32> = (0..VAD_FRAME_SAMPLES)
+        .map(|i| ((i as f32) * 0.05).sin() * 0.3)
+        .collect();
     let first = vad.speech_probability(&frame).unwrap();
     vad.reset();
     let again = vad.speech_probability(&frame).unwrap();
@@ -72,8 +121,14 @@ fn real_speech_is_detected_and_its_pauses_are_scored_as_silence() {
     let speech = probabilities.iter().filter(|&&p| p > 0.5).count();
     let quiet = probabilities.iter().filter(|&&p| p < 0.2).count();
     let total = probabilities.len();
-    assert!(speech as f32 / total as f32 > 0.3, "only {speech}/{total} frames detected as speech");
-    assert!(quiet > 0, "no frames scored as silence; the VAD cannot tell pauses apart");
+    assert!(
+        speech as f32 / total as f32 > 0.3,
+        "only {speech}/{total} frames detected as speech"
+    );
+    assert!(
+        quiet > 0,
+        "no frames scored as silence; the VAD cannot tell pauses apart"
+    );
 
     let mut endpointer = Endpointer::new();
     let endpoints = probabilities

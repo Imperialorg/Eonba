@@ -45,3 +45,28 @@ fn silence_yields_no_text() {
     let text = asr.transcribe(&vec![0.0; 16_000]).expect("transcription must succeed");
     assert!(text.is_empty(), "silence produced {text:?}");
 }
+
+#[test]
+fn released_recording_emits_partials_before_end_of_input() {
+    // Both the speech and its independent transcript come with the digest-pinned
+    // Zipformer release. Do not silently substitute synthetic speech.
+    let archive_fixture = std::env::var_os("EON_ZIPFORMER_TEST_WAV_0")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/0.wav"));
+    let samples = read_pcm16_mono_16k(&archive_fixture);
+    let mut asr = load_model();
+    let mut stream = asr.start_utterance().unwrap();
+    let mut first_partial = None;
+    for (i, chunk) in samples.chunks(320).enumerate() {
+        if let Some(partial) = stream.push(chunk).unwrap() {
+            assert!(!partial.text.is_empty());
+            first_partial.get_or_insert(i * 320 + chunk.len());
+        }
+    }
+    assert!(first_partial.expect("expected a partial transcript") < samples.len() / 2);
+    let transcript = stream.finish().unwrap();
+    assert_eq!(
+        transcript,
+        "AFTER EARLY NIGHTFALL THE YELLOW LAMPS WOULD LIGHT UP HERE AND THERE THE SQUALID QUARTER OF THE BROTHELS"
+    );
+}

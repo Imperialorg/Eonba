@@ -8,8 +8,16 @@ use std::path::PathBuf;
 use eon_voice::asr::ZipformerAsr;
 use eon_voice::resample::resample_mono;
 use eon_voice::tts::{KokoroTts, SAMPLE_RATE_HZ};
+use eon_voice::{
+    LeaseId,
+    barge_in::BargeIn,
+    commitment::{Bridge, BridgeCache, CommitmentGate},
+};
 
 fn repo_models() -> PathBuf {
+    if let Some(path) = std::env::var_os("EON_VOICE_MODELS") {
+        return path.into();
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../perception/models")
 }
 
@@ -35,7 +43,10 @@ fn synthesized_speech_is_intelligible_to_the_pinned_asr() {
     let at_16k = resample_mono(&speech, SAMPLE_RATE_HZ, 16_000).expect("resampling must succeed");
     let asr_model = models.join("asr");
     let mut asr = ZipformerAsr::load(&asr_model).expect("pinned Zipformer models must load");
-    let transcript = asr.transcribe(&at_16k).expect("transcription must succeed").to_uppercase();
+    let transcript = asr
+        .transcribe(&at_16k)
+        .expect("transcription must succeed")
+        .to_uppercase();
 
     let content_words = ["HELLO", "WORLD", "THIS", "TEST", "VOICE"];
     let found = content_words.iter().filter(|w| transcript.contains(*w)).count();
@@ -46,8 +57,11 @@ fn synthesized_speech_is_intelligible_to_the_pinned_asr() {
 #[test]
 fn streaming_delivers_the_first_clause_before_the_reply_is_finished() {
     let models = repo_models();
-    let mut tts = KokoroTts::load(models.join("tts/kokoro-v1.0-int8.onnx"), models.join("tts/voices/af_heart.bin"))
-        .expect("pinned Kokoro model must load");
+    let mut tts = KokoroTts::load(
+        models.join("tts/kokoro-v1.0-int8.onnx"),
+        models.join("tts/voices/af_heart.bin"),
+    )
+    .expect("pinned Kokoro model must load");
     let mut callbacks = 0usize;
     let mut total_samples = 0usize;
     let timing = tts
@@ -71,4 +85,30 @@ fn streaming_delivers_the_first_clause_before_the_reply_is_finished() {
         timing.first_audio,
         timing.total
     );
+}
+
+#[test]
+fn cached_bridge_and_committed_clause_meet_synthesis_budgets() {
+    let models = repo_models();
+    let mut tts = KokoroTts::load(
+        models.join("tts/kokoro-v1.0-int8.onnx"),
+        models.join("tts/voices/af_heart.bin"),
+    )
+    .unwrap();
+    let cache = BridgeCache::warm(&mut tts, 1.0).unwrap();
+    let start = std::time::Instant::now();
+    let mut gate = CommitmentGate::new(1, BargeIn::new());
+    gate.queue("The test report is ready.");
+    let bridge = gate.bridge(&cache, Bridge::Report).unwrap();
+    let first = start.elapsed();
+    assert!(bridge.iter().any(|s| s.abs() > 0.05));
+    assert!(gate.synthesize_next(&mut tts, 1.0).unwrap().is_none());
+    gate.lease_acquired(1, LeaseId::new());
+    let synthesis = std::time::Instant::now();
+    let clause = gate.synthesize_next(&mut tts, 1.0).unwrap().unwrap();
+    let rtf = synthesis.elapsed().as_secs_f32() / (clause.len() as f32 / SAMPLE_RATE_HZ as f32);
+    eprintln!("Kokoro cached-prefix available={first:?}, uncached clause RTF={rtf:.3}");
+    // Software availability only, not endpoint-to-speaker TTFA.
+    assert!(first < std::time::Duration::from_millis(170));
+    assert!(rtf < 0.15);
 }

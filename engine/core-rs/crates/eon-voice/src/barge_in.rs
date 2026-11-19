@@ -1,15 +1,32 @@
 //! Barge-in signal shared between the speech detector and the playback callback (docs/implementation/04, section 3).
 //!
 //! When the user starts speaking over the assistant, the detector calls `trigger`. The next playback callback sees the
-//! flag, flushes the TTS ring in one index update, and writes silence. The detector never touches the ring itself,
+//! request, flushes the TTS ring and writes silence. The detector never touches the ring itself,
 //! so it never blocks the audio thread.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
+use crate::ring::PcmConsumer;
+
+const IDLE: u8 = 0;
+const PLAYING: u8 = 1;
+const REQUESTED: u8 = 2;
+const MUTED: u8 = 3;
+
+/// One reply's playback signal. A cancelled reply cannot resume (including late producer writes).
+/// Start a fresh ring and signal for the next reply.
 #[derive(Debug, Clone, Default)]
 pub struct BargeIn {
-    flag: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Rendered {
+    pub samples: usize,
+    pub flushed: usize,
+    pub acknowledged: bool,
+    pub muted: bool,
 }
 
 impl BargeIn {
@@ -17,18 +34,66 @@ impl BargeIn {
         Self::default()
     }
 
-    /// Requests a flush. Idempotent until the playback side takes the request.
+    /// Cancels unconditionally. Only the first request needs acknowledgment.
     pub fn trigger(&self) {
-        self.flag.store(true, Ordering::Release);
+        self.state.fetch_max(REQUESTED, Ordering::AcqRel);
     }
 
-    /// Takes a pending request, clearing it. Returns true at most once per trigger.
+    #[cfg(feature = "native")]
+    pub(crate) fn interrupt_playing(&self) -> bool {
+        self.state
+            .compare_exchange(PLAYING, REQUESTED, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Acknowledges the request without unmuting the reply.
     pub fn take(&self) -> bool {
-        self.flag.swap(false, Ordering::AcqRel)
+        self.state
+            .compare_exchange(REQUESTED, MUTED, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 
     pub fn is_pending(&self) -> bool {
-        self.flag.load(Ordering::Acquire)
+        self.state.load(Ordering::Acquire) == REQUESTED
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.state.load(Ordering::Acquire) >= REQUESTED
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.state.load(Ordering::Acquire) == PLAYING
+    }
+
+    #[cfg(feature = "native")]
+    pub(crate) fn playback_stopped(&self) {
+        let _ = self
+            .state
+            .compare_exchange(PLAYING, IDLE, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    /// The mono portion of the real render callback, also usable by non-CPAL drivers.
+    pub fn render(&self, consumer: &mut PcmConsumer, out: &mut [f32]) -> Rendered {
+        let samples = if self.is_muted() { 0 } else { consumer.pop_slice(out) };
+        let (from, to) = if samples > 0 { (IDLE, PLAYING) } else { (PLAYING, IDLE) };
+        // Never overwrite a simultaneous detection. Check again after copying samples.
+        let _ = self
+            .state
+            .compare_exchange(from, to, Ordering::AcqRel, Ordering::Acquire);
+        if self.is_muted() {
+            out.fill(0.0);
+            return Rendered {
+                samples: 0,
+                flushed: samples + consumer.flush(),
+                acknowledged: self.take(),
+                muted: true,
+            };
+        }
+        out[samples..].fill(0.0);
+        Rendered {
+            samples,
+            ..Rendered::default()
+        }
     }
 }
 

@@ -9,7 +9,9 @@ use std::path::Path;
 
 use eon_primitives::{EonError, EonResult};
 
-use crate::features::{kaldi_fbank, NUM_MEL_BINS};
+use crate::endpoint::ReflexHint;
+use crate::features::{NUM_MEL_BINS, SAMPLE_RATE_HZ, online_fbank};
+use kaldi_native_fbank::OnlineFeature;
 use ort::session::{Session, SessionInputValue};
 use ort::value::{Tensor, TensorElementType, ValueType};
 
@@ -86,7 +88,12 @@ fn initial_caches(encoder: &Session) -> EonResult<Vec<CacheTensor>> {
             let data = match ty {
                 TensorElementType::Float32 => CacheData::F32(vec![0.0; len]),
                 TensorElementType::Int64 => CacheData::I64(vec![0; len]),
-                other => return Err(onnx_err("caches", format!("unsupported {other:?} for {}", input.name()))),
+                other => {
+                    return Err(onnx_err(
+                        "caches",
+                        format!("unsupported {other:?} for {}", input.name()),
+                    ));
+                }
             };
             Ok(CacheTensor {
                 name: input.name().to_owned(),
@@ -124,32 +131,81 @@ impl ZipformerAsr {
 
     /// Transcribes one utterance of 16 kHz mono samples in [-1, 1]. Caches are reset on every call.
     pub fn transcribe(&mut self, samples: &[f32]) -> EonResult<String> {
-        self.caches = initial_caches(&self.encoder)?;
-
-        let mut frames = kaldi_fbank(samples)?;
-        frames.extend(std::iter::repeat_with(|| vec![0.0; NUM_MEL_BINS]).take(CHUNK_FRAMES));
-
-        let mut context = [BLANK_ID; CONTEXT_SIZE];
-        let mut decoder_out = self.run_decoder(context)?;
-        let mut hypothesis = Vec::new();
-        let mut start = 0;
-        while start + CHUNK_FRAMES <= frames.len() {
-            let chunk: Vec<f32> = frames[start..start + CHUNK_FRAMES].concat();
-            let (encoder_out, encoder_frames) = self.run_encoder(&chunk)?;
-            let dim = encoder_out.len() / encoder_frames;
-            for t in 0..encoder_frames {
-                let token = self.run_joiner(&encoder_out[t * dim..(t + 1) * dim], &decoder_out)?;
-                if token != BLANK_ID {
-                    hypothesis.push(token);
-                    context = [context[1], token];
-                    decoder_out = self.run_decoder(context)?;
-                }
-            }
-            start += CHUNK_SHIFT;
-        }
-        Ok(self.detokenize(&hypothesis))
+        let mut stream = self.start_utterance()?;
+        stream.push(samples)?;
+        stream.finish()
     }
 
+    pub fn start_utterance(&mut self) -> EonResult<ZipformerStream<'_>> {
+        self.caches = initial_caches(&self.encoder)?;
+        let context = [BLANK_ID; CONTEXT_SIZE];
+        let decoder_out = self.run_decoder(context)?;
+        Ok(ZipformerStream {
+            model: self,
+            features: online_fbank()?,
+            next_frame: 0,
+            context,
+            decoder_out,
+            tokens: Vec::new(),
+        })
+    }
+}
+
+/// One utterance. Both the overlapping fbank windows and the transducer state
+/// survive arbitrary PCM push boundaries. End padding is added only by `finish`.
+pub struct ZipformerStream<'a> {
+    model: &'a mut ZipformerAsr,
+    features: OnlineFeature,
+    next_frame: usize,
+    context: [i64; CONTEXT_SIZE],
+    decoder_out: Vec<f32>,
+    tokens: Vec<i64>,
+}
+
+impl ZipformerStream<'_> {
+    /// Returns the current partial transcript only when new tokens were emitted.
+    pub fn push(&mut self, samples: &[f32]) -> EonResult<Option<PartialTranscript>> {
+        self.features.accept_waveform(SAMPLE_RATE_HZ, samples);
+        let old_len = self.tokens.len();
+        self.decode_ready()?;
+        Ok((self.tokens.len() > old_len).then(|| {
+            let text = self.model.detokenize(&self.tokens);
+            PartialTranscript {
+                hint: ReflexHint::from_partial(&text),
+                text,
+            }
+        }))
+    }
+
+    pub fn finish(mut self) -> EonResult<String> {
+        self.features.input_finished();
+        self.features
+            .features
+            .extend(std::iter::repeat_with(|| vec![0.0; NUM_MEL_BINS]).take(CHUNK_FRAMES));
+        self.decode_ready()?;
+        Ok(self.model.detokenize(&self.tokens))
+    }
+
+    fn decode_ready(&mut self) -> EonResult<()> {
+        while self.next_frame + CHUNK_FRAMES <= self.features.num_frames_ready() {
+            let chunk = self.features.features[self.next_frame..self.next_frame + CHUNK_FRAMES].concat();
+            let (encoded, frames) = self.model.run_encoder(&chunk)?;
+            let dim = encoded.len() / frames;
+            for frame in encoded.chunks_exact(dim) {
+                let token = self.model.run_joiner(frame, &self.decoder_out)?;
+                if token != BLANK_ID {
+                    self.tokens.push(token);
+                    self.context = [self.context[1], token];
+                    self.decoder_out = self.model.run_decoder(self.context)?;
+                }
+            }
+            self.next_frame += CHUNK_SHIFT;
+        }
+        Ok(())
+    }
+}
+
+impl ZipformerAsr {
     /// Returns the flattened encoder output and its frame count, and advances the caches.
     fn run_encoder(&mut self, chunk: &[f32]) -> EonResult<(Vec<f32>, usize)> {
         let mut feed: Vec<(String, SessionInputValue<'static>)> = Vec::with_capacity(self.caches.len() + 1);
@@ -196,7 +252,10 @@ impl ZipformerAsr {
 
     fn run_decoder(&mut self, context: [i64; CONTEXT_SIZE]) -> EonResult<Vec<f32>> {
         let y = Tensor::from_array(([1usize, CONTEXT_SIZE], context.to_vec())).map_err(|e| onnx_err("decoder", e))?;
-        let outputs = self.decoder.run(ort::inputs!["y" => y]).map_err(|e| onnx_err("decoder", e))?;
+        let outputs = self
+            .decoder
+            .run(ort::inputs!["y" => y])
+            .map_err(|e| onnx_err("decoder", e))?;
         let (_, out) = outputs["decoder_out"]
             .try_extract_tensor::<f32>()
             .map_err(|e| onnx_err("decoder_out", e))?;
@@ -227,4 +286,9 @@ impl ZipformerAsr {
             .trim()
             .to_owned()
     }
+}
+
+pub struct PartialTranscript {
+    pub text: String,
+    pub hint: Option<ReflexHint>,
 }
