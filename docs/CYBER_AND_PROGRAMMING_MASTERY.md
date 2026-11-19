@@ -5,6 +5,8 @@
 > **Module:** `engine/core-rs/crates/eon-cyber` & `engine/core-rs/crates/eon-capability`  
 > **Archetype:** Information Particle Manipulation (*Jōhō Ryūshi Sōsa*)
 
+> **Scope update:** [Roadmap Phase 7](./ROADMAP_AND_IMPLEMENTATION_PLAN.md#phase-7-program-analysis-and-defensive-security) supersedes this historical design. Only defensive analysis, containment and remediation are in scope. Offensive research proposals below are not deliverables.
+
 ---
 
 ## 1. Overview & Architectural Role

@@ -132,8 +132,15 @@ In strict adherence to **Invariant 4 (100% Durable Journaling & Crash Resilience
 
 ### 4.2 Journal Invariants:
 1. **Pre-Allocation & Zero Torn Writes**: Frames are flushed with `File::sync_data` prior to invoking external side-effects.
-2. **CRC32 Checksumming**: Every frame validates its payload CRC32 on read. Corrupted tail bytes from power failure are automatically truncated to the last valid frame offset during boot reconciliation.
-3. **Sequential Replay**: The `LocalExecutionRecoveryWorker` replays frames from checkpoint to reconstruct active workflow state in memory.
+2. **CRC32 Checksumming**: Readers reject invalid frames. Opening the writer repairs an incomplete or zero-filled tail but refuses a complete frame with a bad checksum. Explicit operator repair is required in that case.
+3. **Sequential Replay**: `replay` reads from sequence 1. `replay_from` includes the requested sequence and checks continuity in the visited suffix. It is not an integrity audit of segments before the checkpoint.
+4. **Single writer**: Writer and repair operations take a nonblocking, per-directory OS lock. Readers need no lock. Do not remove the lock file or replace the active directory. After an uncertain append, close the writer and inspect the recovered tail before retrying.
+
+### 4.3 Restoring a SQLite projection
+
+`StateStore::commit_snapshot(name, journal_seq, state)` saves serialized state and advances its checkpoint in one transaction. An identical retry is safe. Stale state and conflicting bytes at the same sequence are rejected. SQLite positions are limited to `0..=i64::MAX`; values outside that range are not wrapped.
+
+On restart, read `snapshot(name)` and replay from the sequence *after the snapshot*. A checkpoint advanced independently is not proof that its state was snapshotted. An older database containing only checkpoints remains readable; if no snapshot exists, reconstruct from the journal.
 
 ---
 

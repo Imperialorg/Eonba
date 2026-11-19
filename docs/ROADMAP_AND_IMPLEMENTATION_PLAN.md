@@ -40,39 +40,40 @@
 
 ## Phase 1: Foundation Services & Durable Journaling (Level 1)
 
-- [ ] **Task 1.1: Append-Only Event Journal**
+- [x] **Task 1.1: Append-Only Event Journal**
   - **Crate**: `eon-foundation`
-  - **Files**: `src/journal.rs`, `src/codec.rs`, `src/lib.rs`
+  - **Files**: `src/journal.rs`, `src/group_commit.rs`, `tests/journal_crash.rs`
   - **Requirements**: Append-only binary journal on disk with atomic sequence numbering (`u64`), CRC32 verification, and frame header `0x454F4E4A`. Crash-safe file sync (`flush` / `sync_all`).
-  - **Unit Tests**: `cargo test -p eon-foundation journal_tests` verifying append, sequential reads, corruption detection, and crash simulation.
+  - **Verification**: `cargo test --locked -p eon-foundation` covers exclusive writing, full and checkpoint replay, CRC failure, torn tails, and acknowledged writes surviving a killed writer. Process termination is not a power-loss test.
 
-- [ ] **Task 1.2: Durable State Store**
+- [x] **Task 1.2: Durable State Store**
   - **Crate**: `eon-foundation`
-  - **Files**: `src/state_store.rs`, `src/sqlite_backend.rs`
+  - **Files**: `src/store.rs`, `tests/projection_recovery.rs`
   - **Requirements**: Embedded SQLite / redb store with WAL mode. Atomic transactions for snapshot creation and state commits.
-  - **Unit Tests**: `cargo test -p eon-foundation state_store_tests` testing concurrent reads, transactional writes, and rollback.
+  - **Verification**: `cargo test --locked -p eon-foundation` covers transactional checkpoint and snapshot commits, overlapping WAL reads, rollback on a failed write, upgrading a checkpoint-only database, and replay after reopening.
 
 - [ ] **Task 1.3: Identity, Zero-Knowledge Credential Broker & Journal Scrubber**
   - **Crate**: `eon-foundation`
   - **Files**: `src/identity.rs`, `src/permissions.rs`, `src/credentials.rs`, `src/scrubber.rs`
   - **Requirements**: Ownership identities (System, User, EphemeralAgent). Permission bitflags (`READ_WORKSPACE`, `MUTATE_WORKSPACE`, `EXECUTE_PROCESS`, `CYBER_OPERATIONS`, `NETWORK_ACCESS`, `DEVICE_CONTROL`, `SPAWN_SUBAGENT`). Opaque credential handles (`secret://<vault_key>`) with late-binding memory resolution from hardware OS enclaves (Android Keystore, Windows DPAPI, Linux Keyring). In-flight `JournalScrubber` redacting tokens and high-entropy strings ($\mathcal{H} > 4.5$) before journal disk commitment.
   - **Unit Tests**: `cargo test -p eon-foundation identity_and_credential_tests` verifying zero secret leaks to disk frames and entropy-based redaction.
+  - **Still open**: Text redaction is not a platform keystore. The in-memory broker does not establish hardware-backed secret resolution or enforce identity permissions.
 
 ---
 
 ## Phase 2: Execution Foundations & Resource Management (Level 2)
 
-- [ ] **Task 2.1: Finite State Machine Primitives**
+- [x] **Task 2.1: Finite State Machine Primitives**
   - **Crate**: `eon-kernel`
-  - **Files**: `src/fsm.rs`, `src/transition.rs`
+  - **Files**: `src/fsm.rs`, `src/events.rs`, `src/journal_sink.rs`
   - **Requirements**: Generic deterministic state machine engine validating allowed transitions (`TaskState`), handling `UncertainFailure`, and emitting transition events.
-  - **Unit Tests**: `cargo test -p eon-kernel fsm_tests` verifying transition validation, rejection of illegal states, and listener triggers.
+  - **Verification**: `cargo test --locked -p eon-kernel --lib -- fsm::tests:: events::tests:: journal_sink::tests::` checks all state/event pairs, record-before-transition, failure to persist, and durable replay of uncertain outcomes. This primitive does not implement the boot reconciler.
 
-- [ ] **Task 2.2: Resource Models & Atomic Leases**
+- [x] **Task 2.2: Resource Models & Atomic Leases**
   - **Crate**: `eon-kernel`
-  - **Files**: `src/resource.rs`, `src/lease.rs`, `src/resource_manager.rs`
+  - **Files**: `src/resource.rs`, `tests/resource_model.rs`
   - **Requirements**: Resource accounting for CPU permits, Memory MB, File Lock URIs, and Network slots. Two-phase atomic acquisition algorithm (all-or-nothing). Lease expiration timeouts.
-  - **Unit Tests**: `cargo test -p eon-kernel resource_manager_tests` verifying deadlock prevention, shared vs exclusive locks, and expiration reclamation.
+  - **Verification**: `cargo test --locked -p eon-kernel --lib resource` and `cargo test --locked -p eon-kernel --test resource_model`. The scheduler must call `reap_expired` with a monotonic clock and dispatch the returned grants. No background timer is assumed.
 
 ---
 
@@ -206,7 +207,9 @@
 
 ---
 
-## Phase 7: Information Particle Manipulation & Cyber Warfare Core
+## Phase 7: Program Analysis and Defensive Security
+
+The security work in this roadmap is defensive: inspect authorized code, dependencies and local audit records, contain failures, and verify remediation. Earlier design sketches about autonomous exploitation, payload generation, or targeting systems are not implementation requirements, even in a lab.
 
 - [ ] **Task 7.1: Polyglot AST Analysis, Extreme Code Synthesizer & DAP Bridge**
   - **Crate**: `eon-cyber`
@@ -220,17 +223,16 @@
   - **Requirements**: Detection of CWE-119, CWE-89, CWE-362, timing attacks. Automated constant-time and bounds-checking patch synthesis. Tiered telemetry implementation: Tier A (`aya-rs` eBPF for rooted Linux/Android), Tier B (native ETW consumer for Windows), Tier C (`VpnService` packet sink + `/proc` & `UsageStatsManager` for unrooted Android).
   - **Unit Tests**: `cargo test -p eon-cyber taint_tests`, `patch_tests`.
 
-- [ ] **Task 7.3: Offensive Cyber, Binary Reverse Engineering & Stateful Exploitation**
+- [x] **Task 7.3: Offline dependency and advisory assessment**
   - **Crate**: `eon-cyber`
-  - **Files**: `src/offense/disassembler.rs`, `src/offense/dex_decompiler.rs`, `src/offense/symbolic_exec.rs`, `src/offense/packet_crafter.rs`, `src/offense/pty_session.rs`
-  - **Requirements**: Capstone multi-arch disassembly with CFG recovery. Dalvik DEX decompiler. Z3 symbolic execution solver. Raw network frame crafting in isolated sandboxes. Stateful PTY session orchestration for driving interactive GDB/LLDB sessions and persistent ADB root shells.
-  - **Unit Tests**: `cargo test -p eon-cyber disassembler_tests`, `dex_tests`, `symbolic_tests`, `pty_cyber_tests`.
+  - **File**: `src/sbom.rs`
+  - **Requirements**: Match local component inventories against offline OSV advisories. Distinguish exact affected versions from unresolved ranges, reject malformed input, and emit one verdict per component and advisory. The strongest verdict wins.
+  - **Verification**: `cargo test --locked -p eon-cyber --no-default-features --lib sbom` using synthetic version lists, range-only and mixed records, malformed fields, and duplicate matches. No target execution or network access.
 
-- [ ] **Task 7.4: P-Code IR Lifter, LibAFL Concolic Fuzzer & MicroVM Sandbox**
-  - **Crate**: `eon-cyber`
-  - **Files**: `src/offense/pcode_lifter.rs`, `src/offense/libafl_fuzzer.rs`, `src/sandbox/microvm.rs`
-  - **Requirements**: Sleigh/Ghidra P-Code lifter lifting x86_64, ARM64, and DEX into unified SSA intermediate representation for Z3 constraint solving. LibAFL Rust-native coverage-guided concolic fuzzing. Ephemeral container/microVM sandbox runtime (`youki` / `bubblewrap` / `Firecracker` / Windows AppContainer / WSL2).
-  - **Unit Tests**: `cargo test -p eon-cyber pcode_and_fuzzer_tests`.
+- [ ] **Task 7.4: Verify sandbox and secret-containment boundaries**
+  - **Crates**: `eon-capability`, `eon-foundation`
+  - **Requirements**: Untrusted tools cannot read outside their workspace, open a network socket, or exceed their resource budgets. Verify that audit records contain no raw test credentials and that teardown releases resources even when a tool fails.
+  - **Verification**: Denied access leaves a sentinel file unchanged; an over-budget tool terminates; replayed audit records and on-disk frames contain only redacted fixtures. Run real sandbox tests on a supported host. An unavailable backend is not evidence that isolation passed.
 
 ---
 
@@ -321,10 +323,10 @@
 
 - [ ] **Task 10.6: Deterministic Journal Replay & Benchmark Suite (`tests/eval-harness/`)**
   - **Directory**: `tests/eval-harness/`
-  - **Files**: `src/replay_engine.rs`, `src/swe_bench.rs`, `src/cyber_ctf.rs`, `src/noisy_audio.rs`
+  - **Files**: `src/replay_engine.rs`, `src/swe_bench.rs`, `src/defensive_regressions.rs`, `src/noisy_audio.rs`
   - **Requirements**:
     1. **Time-Travel Replay Engine**: Replays historical binary journal logs (`0x454F4E4A`) through the execution kernel; asserts that identical inputs reproduce identical DAG structures and verified outcomes.
     2. **SWE-Bench-Lite / Polyglot Repair Suite**: 50 automated bug repair scenarios across Rust, Kotlin, Python, and TypeScript; verifies autonomous AST repair with pass@1 rate > 80% using the self-healing compiler loop.
-    3. **Cyber-CTF Automated Exploit & Patch Suite**: 10 real-world binary reversing, buffer overflow, and SQL injection challenges testing autonomous decompilation, symbolic execution, and constant-time patching in ephemeral sandboxes.
+    3. **Defensive regression suite**: Use labeled source-code fixtures and patched counterparts to check detection, false positives, redaction, and remediation without constructing exploits or executing target code.
     4. **Noisy Duplex Audio Suite**: Synthetic audio benchmark with heavy acoustic background noise (coffee shop babble, street traffic, television dialog); asserts zero false barge-ins via WeSpeaker speaker verification and TTFA < 200ms.
   - **Acceptance Criteria**: `cargo test --test eval_harness` executes the complete evaluation suite with 100% pass rate.

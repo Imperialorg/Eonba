@@ -11,7 +11,7 @@
 
 Unlike conventional chatbots that wait passively for commands, demand constant hand-holding, or babble pleasantries, EON functions as an **omnipresent, proactive intellectual partner, world-class programmer, cyber operator, and autonomous execution engine**:
 - **Absolute Autonomy**: When given an intent or encountering an event, EON synthesizes a plan, allocates resources, dispatches worker tasks, and executes multi-step actions across systems **without asking unnecessary questions or waiting for trivial approvals**.
-- **Information Particle Manipulation (Code & Cyber Supremacy)**: Treats the digital substrate—source code, ASTs, intermediate representations, native binaries (ELF/PE/DEX), memory buffers, and network packets—as malleable information particles. Elite capability in **extreme polyglot programming**, **defensive cyber hardening**, and **offensive vulnerability research / penetration simulation**.
+- **Program analysis and defensive security**: Analyze authorized source code, check dependency inventories against advisories, isolate untrusted tools, and verify remediation. Autonomous exploitation is outside the project scope.
 - **Engine Optimized for Networking (Distributed Cognitive Mesh)**: Operates not as an isolated device app, but as a peer-to-peer cognitive mesh spanning mobile edge devices (Android), high-compute workstations, and servers via multiplexed P2P QUIC and CRDT-synchronized memory.
 - **Thought Acceleration (< 150ms Cognitive Routing)**: Tiered neural and deterministic inference paths with **Predictive Pre-Cognition** ensure instantaneous reflex actions, sub-200ms voice responses, and continuous background parallel processing.
 - **Parallel Processing & Epoch Leases**: Decomposes objectives into directed acyclic graphs (DAGs) of tasks, executing capabilities concurrently, handling asynchronous human interruptions with saga rollbacks, and combining atomic primitives into compound skills.
@@ -68,7 +68,7 @@ EON unifies the cutting-edge foundations discovered in **CHRONOS** (persistent m
 │  - Aegis Cyber Defense: Static/Dynamic Taint, eBPF Anomaly Monitor, Auto-Fix│
 │  - eBPF SSL/TLS Uprobes (Cleartext Payload Audit on SSL_read/SSL_write)     │
 │  - Unprivileged Virtual Network Stack (smoltcp in User Space / Android TUN) │
-│  - Cyber Offense & Research: ELF/DEX Decompilation, Symbolic Exec, Fuzzing  │
+│  - Offline dependency advisories, sandbox isolation and verified remediation│
 └──────────────────────────────────────┬──────────────────────────────────────┘
                                        │ Governed Tasks & Epoch Leases
                                        ▼
@@ -118,7 +118,7 @@ In Tensura, Ciel never wastes time asking Rimuru trivial questions like *"Should
 | **Initiative** | Passive: Waits for explicit, micro-managed commands. | **Autonomous**: Executes intent immediately, planning multi-step actions. |
 | **User Approvals** | Interrupts user constantly with confirmation prompts. | **Self-Governing**: Runs read, analyze, and reversible tasks instantly; uses Speculative Shadow Execution with NACK for underspecified tasks. |
 | **Response Style** | Chatty, verbose, filled with conversational filler. | **Concise & Factual**: *"Report: Analysis complete. 4 vulnerabilities patched."* |
-| **Programming & Cyber**| Suggests generic code snippets with bugs. | **Information Particle Manipulation**: Full AST refactoring, self-healing compiler loops, binary decompilation, and automated cyber defense/offense. |
+| **Programming & Cyber**| Suggests generic code snippets with bugs. | AST refactoring, compiler diagnostics, dependency assessment, and verified defensive fixes. |
 | **Execution** | Single-turn, shallow API calls. | **Multi-Step DAGs**: Orchestrates background workers, retries, and saga rollbacks across devices. |
 | **Networking** | Single-device silo or dumb cloud client. | **Engine Optimized for Networking**: Peer-to-peer QUIC mesh across phone, desktop, and server with CRDT state synchronization. |
 | **Voice Latency** | 1.5s - 3.0s latency between speech end and audio response. | **Sub-200ms**: Streaming duplex speech pipeline with live barge-in and predictive pre-cognition. |

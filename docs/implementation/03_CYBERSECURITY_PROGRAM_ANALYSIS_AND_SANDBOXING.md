@@ -3,6 +3,8 @@
 > **Crates:** `eon-cyber` (`eon-cyber`, `eon-cyber-common`, `eon-cyber-ebpf`) and `eon-capability` (sandboxes)  
 > **Companion Specs:** `CYBER_AND_PROGRAMMING_MASTERY.md`, `CAPABILITY_FABRIC_SPECIFICATION.md`, `ADR-0004-INFORMATION-PARTICLE-CYBER-MASTERY.md`
 
+> **Scope update:** Follow the [defensive roadmap](../ROADMAP_AND_IMPLEMENTATION_PLAN.md#phase-7-program-analysis-and-defensive-security) and Manual 06's verification gates. The historical CRS proposals in this document are not instructions to generate exploits or execute targets.
+
 ---
 
 ## 1. Governance Boundary and Operational Scope
