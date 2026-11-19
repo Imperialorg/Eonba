@@ -1,1 +1,36 @@
+name: Verification
 
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  foundation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: engine/core-rs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: cargo clippy --locked -p eon-foundation --all-targets -- -D warnings
+      - run: cargo test --locked -p eon-foundation -p eon-primitives -p eon-cli -p eon-daemon --features eon-primitives/serde
+      - run: python3 -m unittest discover -s "$GITHUB_WORKSPACE/scripts"
+
+  lean-backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+      - name: Run the pinned SPY backtest and verify its result
+        run: python3 "$GITHUB_WORKSPACE/scripts/run_lean_backtest.py" --output "$RUNNER_TEMP/backtests"

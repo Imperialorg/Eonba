@@ -181,3 +181,16 @@ If you are an LLM, AI Agent, or Developer assigned to build EON:
 4. Follow [docs/ROADMAP_AND_IMPLEMENTATION_PLAN.md](./docs/ROADMAP_AND_IMPLEMENTATION_PLAN.md) sequentially.
 5. Verify every implemented module with automated unit and integration tests.
 6. Commit code systematically with structured messages.
+
+## Local trading simulations
+
+QuantConnect [LEAN](https://github.com/QuantConnect/Lean) is an optional, pinned Git submodule. The Rust engine does not depend on it. From the repository root, initialize the submodule and run the sample with Python 3 and the .NET 10 SDK:
+
+```sh
+git submodule update --init -- integrations/lean
+python3 "$(git rev-parse --show-toplevel)/scripts/run_lean_backtest.py"
+```
+
+The first build needs NuGet access. The simulation uses LEAN's bundled SPY minute data for October 7 to 11, 2013. It uses a filesystem data feed and simulated transactions, with no brokerage login, live orders, or QuantConnect account. The runner checks the saved summary for completion, one simulated order, and ending equity of `101691.92`. These are regression expectations for this fixture, not a performance forecast.
+
+Each run prints the path to a fresh results directory under `backtests/`. Use `--algorithm` to select another trusted class from LEAN's C# assembly, `--data` for a local LEAN-format dataset, or `--output` to choose another parent directory. Do not run untrusted strategies: LEAN executes algorithm code locally. Neither historical results nor this runner authorize real trades.

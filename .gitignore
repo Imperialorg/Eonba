@@ -51,3 +51,6 @@ data/cache/
 *.wav
 
 .z3-trace
+
+# Local LEAN simulation results
+/backtests/
