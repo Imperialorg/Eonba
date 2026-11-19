@@ -1,5 +1,6 @@
-//! EON Multimodal Vision: OmniParser-v2 UI element detector, adaptive keyframe sampler,
-//! and 30-second temporal visual ring buffer.
+//! UI geometry and bounded temporal sampling of caller-supplied screen frames.
+
+pub mod keyframes;
 
 pub use eon_primitives::*;
 
@@ -19,7 +20,10 @@ pub struct UiBoundingBox {
 
 impl UiBoundingBox {
     pub fn centroid(&self) -> (f32, f32) {
-        ((self.x_min + self.x_max) / 2.0, (self.y_min + self.y_max) / 2.0)
+        (
+            (self.x_min + self.x_max) / 2.0,
+            (self.y_min + self.y_max) / 2.0,
+        )
     }
 }
 
@@ -56,4 +60,3 @@ mod tests {
         assert!((cy - 0.3).abs() < 1e-5);
     }
 }
-

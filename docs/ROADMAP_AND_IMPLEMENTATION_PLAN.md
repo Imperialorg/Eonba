@@ -204,6 +204,7 @@
   - **Files**: `src/omniparser.rs`, `src/keyframe_sampler.rs`, `src/ring_buffer.rs`, `src/lib.rs`
   - **Requirements**: OmniParser-v2 (< 30ms YOLO element detector + PaddleOCR ONNX) for UI grounding when accessibility trees are obfuscated. Adaptive 1–5 FPS video keyframe sampler and 30-second rolling visual memory in shared memory. Integration with `Qwen2.5-VL-3B-Instruct`.
   - **Unit Tests**: `cargo test -p eon-vision vision_tests`.
+  - **Verified subset**: The in-process keyframe history uses 32x32 luma block SSIM, a one-second heartbeat, a 200 ms sampling floor, and age and byte limits. This does not verify shared-memory capture, OCR, object detection, or VLM inference.
 
 ---
 
@@ -293,7 +294,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
 - [ ] **Task 9.5: Native Digital Assistant Role & OS Survival (`ROLE_ASSISTANT`)**
   - **Directory**: `clients/android/app/`
   - **Files**: `src/main/kotlin/com/eon/assistant/service/EonVoiceInteractionService.kt`, `EonVoiceInteractionSessionService.kt`, `res/xml/voice_interaction_service_config.xml`
-  - **Requirements**: Declares `android.service.voice.VoiceInteractionService` as Android's default Digital Assistant (`ROLE_ASSISTANT`). Implements `AlwaysOnHotwordDetector` for low-power hardware DSP wake-word detection. Bypasses Android 14+ background microphone recording restrictions. Implements `onHandleAssist` to receive deep window view hierarchies and raw screen bitmaps. Grants OEM task-killer immunity with system OOM adjustment (`adj = -800`). Manages `MediaProjection` persistent token lifecycle for `eon-vision`.
+  - **Requirements (stock Android)**: Support the user-selected assistant role and request hotword detection only where the OS and hardware permit it. Respect microphone permission and foreground restrictions. Consume only OS-supplied assist context while the role is active. Require fresh user consent for each screen-capture session; release resources on revocation. Test clean recovery after process death. A regular app cannot choose its OOM adjustment or promise immunity from OEM process management.
   - **Unit Tests**: Android instrumented test verifying assistant binding, assist structure extraction, and background audio streaming.
 
 ---
@@ -309,6 +310,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
 - [ ] **Task 10.2: Sub-170ms Time-To-First-Audio (TTFA) Benchmark**
   - **Directory**: `tests/latency-benchmarks/`
   - **Requirements**: Automated end-to-end benchmark measuring audio input to speaker output. Asserts P50 < 170ms, P99 < 280ms.
+  - **Measurement**: Use `scripts/measure_ttfa.py` on synchronized input and physical speaker recordings as described in Manual 06 §3.3. Generated PCM fixtures test the analyzer, not a device's latency.
 
 - [ ] **Task 10.3: Autonomous Cyber Defense & Patch Verification Test**
   - **Directory**: `tests/cyber-security-tests/`

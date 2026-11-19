@@ -200,7 +200,7 @@ Modern Android releases (API 34/35) enforce aggressive background restrictions:
 1. Third-party apps attempting background microphone recording or screen capture are abruptly killed with `SecurityException` or targeted by OEM battery killers (e.g. Samsung Phantom Process Killer).
 2. Background services attempting to launch activities or show overlays face strict foreground initiation barriers.
 
-EON overcomes these barriers by integrating as Android's **Native Digital Assistant (`ROLE_ASSISTANT`)**:
+On stock Android the user may select EON as the **digital assistant (`ROLE_ASSISTANT`)**. The design must respect restrictions even when the role is active:
 
 ```mermaid
 flowchart TD
@@ -208,29 +208,29 @@ flowchart TD
 
     subgraph AssistantPrivileges["System Assistant Level Privileges"]
         DSPWake["Hardware DSP Low-Power Hotword (AlwaysOnHotwordDetector)"]
-        LegalMic["Legal Background Audio Streaming (Bypasses BG Recording Restrictions)"]
+        LegalMic["Audio only with permission and an OS-permitted capture session"]
         ScreenAssist["Direct AssistStructure & Screenshot Ingestion (onHandleAssist)"]
-        OEMImmunity["OEM Killer Immunity (OOM Adj -800 System Priority)"]
+        Restart["Restore durable state after process death"]
     end
 
     AssistantService --> DSPWake
     AssistantService --> LegalMic
     AssistantService --> ScreenAssist
-    AssistantService --> OEMImmunity
+    AssistantService --> Restart
     
     LegalMic --> NativeCore["Native AAudio NDK Stream (eon-voice)"]
     ScreenAssist --> VisionCore["OmniParser-v2 Keyframe Analysis (eon-vision)"]
 ```
 
 ### 6.1 `EonVoiceInteractionService` Implementation
-By declaring `android.service.voice.VoiceInteractionService`, EON gains assistant role status:
-- **Hardware DSP Hotword Detection**: Integrates with Qualcomm/MediaTek audio DSPs via `AlwaysOnHotwordDetector`, allowing continuous wake-word listening with near-zero battery consumption while the main CPU sleeps.
-- **Immediate Background Mic Capture**: The assistant role holds an explicit system entitlement to activate the microphone from the background without foreground activity preconditions.
-- **Deep Screen Context (`onHandleAssist`)**: When the user triggers an assist gesture (long-press power button or swipe from bottom corner), Android calls `onHandleAssist(AssistStructure, AssistContent, Bundle)`. EON receives the parsed view hierarchy, foreground application package, and full-resolution screenshot without requiring user prompts or UI flickers.
-- **OOM Killer Immunity**: In the `ROLE_ASSISTANT` state, the Android OS assigns EON a privileged OOM score adjustment (`adj = -800`), making it immune to routine OEM background battery pruning.
+Declaring a `VoiceInteractionService` makes the app eligible; it does not select the app for the user.
+- **Hotword detection**: Check OS support, hardware availability, and enrollment. If unavailable, offer an explicit user-initiated interaction.
+- **Microphone**: Require the OS permissions and active capture conditions. Denial or role loss must stop capture, not trigger a fallback recorder.
+- **Assist context**: A `VoiceInteractionSession` can receive assist data and a screenshot in separate callbacks. Treat missing data, disabled sharing and protected windows as normal; do not capture around them.
+- **Process death**: The OS controls process priority. Restore durable work after restart instead of relying on an OOM score or immunity from process management.
 
 ### 6.2 `MediaProjection` Token Lifecycle
 For continuous multimodal perception (`eon-vision` 1-5 FPS adaptive sampling):
-1. `EonCoreService` obtains an initial `MediaProjection` token via `MediaProjectionManager.createScreenCaptureIntent()` during user onboarding.
-2. The service binds the token to `FOREGROUND_SERVICE_MEDIA_PROJECTION`.
-3. In-flight virtual display buffers (`ImageReader`) are shared directly with native Rust `eon-vision` through Android Hardware Buffers (`AHardwareBuffer`), achieving zero-copy GPU-to-model keyframe ingestion.
+1. Request user consent via `MediaProjectionManager.createScreenCaptureIntent()` for each session. Never persist or reuse the consent result.
+2. Start the user-visible media-projection foreground service with the required permissions and service type before acquiring the projection.
+3. Before creating the virtual display, register a [`MediaProjection.Callback`](https://developer.android.com/reference/android/media/projection/MediaProjection). On stop, release the display, surface and readers and stop sending frames to native code. Restoring journaled tasks must not resume a revoked capture.

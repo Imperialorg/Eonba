@@ -36,6 +36,7 @@ jobs:
           persist-credentials: false
       - run: cargo test --locked -p eon-cyber --no-default-features --lib sbom
       - run: cargo test --locked -p eon-kernel
+      - run: cargo test --locked -p eon-vision
 
   wasm-containment:
     runs-on: ubuntu-latest

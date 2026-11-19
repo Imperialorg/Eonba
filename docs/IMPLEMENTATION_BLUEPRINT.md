@@ -256,6 +256,8 @@ Update this table when a phase lands. A row is "done" only when its verification
 
 | Phase (Manual 06 §4) | Scope landed | Verification | Status |
 |---|---|---|---|
+| 6.5 (partial) | Bounded in-process keyframe history. Compare 32x32 luma in 8x8 blocks, retain changed scenes at most every 200 ms and still scenes every second, evict after 30 seconds or earlier under the byte limit. | `cargo test --locked -p eon-vision` and `cargo clippy --locked -p eon-vision --all-targets -- -D warnings` | Sampler and retention verified; not a detector or cross-process buffer |
+| 10.2 (measurement only) | Analyze paired PCM input and speaker captures with a single clock. Reject absent or overlapping replies and apply strict P50 and P99 limits. | `python3 -m unittest discover -s scripts -p test_measure_ttfa.py` | Analyzer verified on fixtures. No physical device result |
 | 0 | `eon-primitives`: CSPRNG monotonic ULIDs, prefix and body validation, `ClaimId`/`SessionId`/`QueryId`/`MacroId`, `serde` feature (Manual 01 §2) | `cargo test -p eon-primitives --features serde` (7 tests) | Done |
 | 1 (partial) | `eon-foundation::journal`: 32-byte CRC32 frames, group-commit `append_batch`, rolling segments, torn-tail repair, mid-file corruption refusal (Manual 01 §3.1) | `cargo test -p eon-foundation --test journal_crash` (proptest truncation at any byte, single-byte corruption, real SIGKILL writer loop) | Done (synchronous) |
 | 1 (partial) | `eon-foundation::store`: WAL + `synchronous=NORMAL` pragmas, `sqlite-vec` auto-extension, forward-only projection checkpoints (Manual 01 §3.2) | `cargo test -p eon-foundation` | Done |

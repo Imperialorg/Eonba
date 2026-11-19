@@ -166,6 +166,10 @@ Run 40 scripted multi-step workflows ingesting hostile external artifacts across
    - Open-speaker simulated echo (`-18 dBFS` at `45 ms` delay) causes `0` self-barge-ins, while owner voice injection flushes the output ring buffer in `< 5.0 ms`
    - End-of-utterance to first Ciel prefix sample (`TTFA`) `< 185 ms` median.
 
+For the stricter roadmap 10.2 device gate, record each turn as a separate stereo 16-bit PCM WAV on **one capture clock**. Feed the input reference into the left channel and the isolated physical speaker measurement into the right. Include at least 50 ms of quiet before the stimulus, use fixed gains, and calibrate the RMS threshold above the noise floor on both channels. Check for input bleed with the speaker muted before collecting runs. Do not mix in synthesized samples, callback timestamps, or digital render queues as a substitute for recorded speaker output.
+
+Collect at least 100 independent turns in a directory containing only the trial WAVs. From the repository root run `python3 scripts/measure_ttfa.py /path/to/captures --threshold <calibrated-PCM-level>`. It measures the end of the last above-threshold input window to the start of the first five consecutive active output windows, including 1 ms window uncertainty. Missing replies, overlap, and truncated captures invalidate the run, rather than disappearing from the percentile calculation. Exit 0 means nearest-rank P50 < 170 ms and P99 < 280 ms; 1 means a threshold failed; 2 means invalid evidence. Preserve the device, route, gains, threshold, and original recordings with the result. The script cannot attest to the physical origin of a WAV file.
+
 ### 3.4 Gate 4: Cyber CRS CWE Discovery & 4-Gate Patch Benchmark (`tests/cyber-security-tests/`)
 Maintain a self-contained corpus of 12 vulnerable micro-projects (`4` C, `4` Rust with `unsafe`/logic flaws, `2` Kotlin/Android Manifest & JNI, `2` Python/TS web handlers):
 - **Pass Criteria**:
