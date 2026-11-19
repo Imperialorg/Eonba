@@ -57,8 +57,8 @@ impl GroupCommitJournal {
         Ok(ack)
     }
 
-    /// Scrubs secrets and invisible characters from `text`, then journals the result durably.
-    /// Raw secrets never reach the log, so the journal stays safe to replicate and to show in a UI.
+    /// Scrubs recognized secret patterns and invisible characters before journaling free text.
+    /// Do not rely on text heuristics to protect arbitrary credentials.
     pub fn append_scrubbed(&self, text: &str) -> EonResult<u64> {
         self.append_durable(crate::scrubber::scrub(text).into_bytes())
     }

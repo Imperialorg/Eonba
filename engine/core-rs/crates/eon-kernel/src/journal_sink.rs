@@ -150,6 +150,14 @@ impl<'a> JournalSink<'a> {
 
 impl EventSink for JournalSink<'_> {
     fn record(&mut self, event: KernelEvent) -> EonResult<()> {
+        // Callers can construct an event without going through SharedState::commit_recorded.
+        if let KernelEvent::EpochCommitted { writes, .. } = &event {
+            for field in writes.keys().chain(writes.values()) {
+                if eon_foundation::scrubber::scrub(field) != *field {
+                    return Err(EonError::SecurityViolation("unscrubbed epoch field".into()));
+                }
+            }
+        }
         self.journal.append_durable(encode(&event)).map(|_| ())
     }
 }
@@ -162,6 +170,23 @@ mod tests {
     use crate::events::{complete_recorded, splice_recorded, transition_recorded};
     use crate::fsm::TaskEvent;
     use crate::workflow::{Task, Workflow};
+
+    #[test]
+    fn direct_epoch_records_cannot_bypass_field_scrubbing() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = GroupCommitJournal::spawn(dir.path(), 8).unwrap();
+        let mut sink = JournalSink::new(&journal);
+        let fixture = ["ghp_", "fixture"].concat();
+        for (key, value) in [(&fixture[..], "value"), ("key", &fixture[..])] {
+            let event = KernelEvent::EpochCommitted {
+                id: 1,
+                writes: BTreeMap::from([(key.to_owned(), value.to_owned())]),
+            };
+            assert!(matches!(sink.record(event), Err(EonError::SecurityViolation(_))));
+        }
+        drop(journal);
+        assert!(replay(dir.path()).unwrap().is_empty());
+    }
 
     #[test]
     fn every_event_kind_round_trips_through_its_encoding() {

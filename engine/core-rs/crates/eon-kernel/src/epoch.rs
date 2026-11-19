@@ -55,8 +55,8 @@ impl SharedState {
     }
 
     /// Commits like `commit`, but records the writes through `sink` before applying them. Keys and values are scrubbed
-    /// first, so the log and the in-memory state agree and neither holds a raw secret. If recording fails, nothing is
-    /// applied and the epoch stays open.
+    /// first, so the log and the in-memory state agree. Ambiguous scrubbed keys or a recording error
+    /// leave the epoch open and apply nothing.
     pub fn commit_recorded(&mut self, epoch: &mut CognitiveEpoch, sink: &mut dyn EventSink) -> EonResult<()> {
         self.ensure_committable(epoch)?;
         let writes: BTreeMap<String, String> = epoch
@@ -64,6 +64,9 @@ impl SharedState {
             .iter()
             .map(|(key, value)| (scrub(key), scrub(value)))
             .collect();
+        if writes.len() != epoch.staged.len() {
+            return Err(EonError::ValidationError("epoch keys collide after scrubbing".into()));
+        }
         sink.record(KernelEvent::EpochCommitted {
             id: epoch.id,
             writes: writes.clone(),
@@ -270,6 +273,23 @@ mod tests {
         assert_eq!(state.fence(), 0);
         state.commit(&mut epoch).unwrap();
         assert_eq!(state.get("plan"), Some("draft"));
+    }
+
+    #[test]
+    fn scrubbing_must_not_silently_overwrite_another_staged_key() {
+        let mut state = SharedState::new();
+        let mut epoch = state.begin(1).unwrap();
+        let mut sink = crate::events::VecSink::default();
+        epoch.stage("label", "one").unwrap();
+        epoch.stage("la\u{200b}bel", "two").unwrap();
+        assert!(matches!(
+            state.commit_recorded(&mut epoch, &mut sink),
+            Err(EonError::ValidationError(_))
+        ));
+        assert!(sink.events.is_empty());
+        assert_eq!(state.fence(), 0);
+        assert_eq!(state.get("label"), None);
+        assert!(epoch.stage("still open", "yes").is_ok());
     }
 
     #[test]
