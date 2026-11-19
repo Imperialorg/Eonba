@@ -8,6 +8,7 @@
   "messaging-handler": "QuantConnect.Messaging.Messaging",
   "log-handler": "QuantConnect.Logging.ConsoleLogHandler",
   "data-provider": "QuantConnect.Lean.Engine.DataFeeds.DefaultDataProvider",
+  "data-monitor-store-succeeded-requests": true,
   "map-file-provider": "QuantConnect.Data.Auxiliary.LocalDiskMapFileProvider",
   "factor-file-provider": "QuantConnect.Data.Auxiliary.LocalDiskFactorFileProvider",
   "object-store": "QuantConnect.Lean.Engine.Storage.LocalObjectStore",

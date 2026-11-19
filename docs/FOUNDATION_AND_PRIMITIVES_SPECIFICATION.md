@@ -140,7 +140,7 @@ In strict adherence to **Invariant 4 (100% Durable Journaling & Crash Resilience
 
 `StateStore::commit_snapshot(name, journal_seq, state)` saves serialized state and advances its checkpoint in one transaction. An identical retry is safe. Stale state and conflicting bytes at the same sequence are rejected. SQLite positions are limited to `0..=i64::MAX`; values outside that range are not wrapped.
 
-On restart, read `snapshot(name)` and replay from the sequence *after the snapshot*. A checkpoint advanced independently is not proof that its state was snapshotted. An older database containing only checkpoints remains readable; if no snapshot exists, reconstruct from the journal.
+On restart, read `snapshot(name)` and replay from the sequence *after the snapshot*. A checkpoint advanced independently is not proof that its state was snapshotted. Apply missing records in memory before committing the caught-up state: a snapshot still behind the checkpoint will be rejected. An older database containing only checkpoints remains readable; if no snapshot exists, reconstruct from the journal.
 
 ---
 

@@ -15,6 +15,22 @@ CONFIG = ROOT / "integrations" / "backtest.json"
 SAMPLE = "BasicTemplateAlgorithm"
 
 
+def verify_sample_sessions(run_dir: Path) -> None:
+    """Missing middle sessions may not change a buy-and-hold strategy's ending equity."""
+    logs = list(run_dir.glob("succeeded-data-requests-*.txt"))
+    if len(logs) != 1:
+        raise ValueError("expected one LEAN successful data request log for the sample")
+    expected = {
+        f"equity/usa/minute/spy/201310{day:02d}_{kind}.zip"
+        for day in range(7, 12) for kind in ("trade", "quote")
+    }
+    with logs[0].open(encoding="utf-8-sig") as requests:
+        for line in requests:
+            expected.discard(line.rstrip("\r\n").replace("\\", "/").lstrip("/"))
+    if expected:
+        raise ValueError(f"sample did not read: {', '.join(sorted(expected))}")
+
+
 def verify_summary(path: Path, check_sample: bool) -> dict:
     """Check LEAN's persisted result, not just its process exit code."""
     result = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -26,6 +42,7 @@ def verify_summary(path: Path, check_sample: bool) -> dict:
         for key, value in expected.items():
             if stats[key] != value:
                 raise ValueError(f"sample {key}: expected {value}, got {stats[key]}")
+        verify_sample_sessions(path.parent)
     return stats
 
 

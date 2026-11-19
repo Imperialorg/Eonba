@@ -191,6 +191,6 @@ git submodule update --init -- integrations/lean
 python3 "$(git rev-parse --show-toplevel)/scripts/run_lean_backtest.py"
 ```
 
-The first build needs NuGet access. The simulation uses LEAN's bundled SPY minute data for October 7 to 11, 2013. It uses a filesystem data feed and simulated transactions, with no brokerage login, live orders, or QuantConnect account. The runner checks the saved summary for completion, one simulated order, and ending equity of `101691.92`. These are regression expectations for this fixture, not a performance forecast.
+The first build needs NuGet access. The simulation uses LEAN's bundled SPY minute data for October 7 to 11, 2013. It uses a filesystem data feed and simulated transactions, with no brokerage login, live orders, or QuantConnect account. The runner checks LEAN's successful data requests for trade and quote files from all five sessions, and its saved summary for completion, one simulated order, and ending equity of `101691.92`. These are regression expectations for this fixture, not a performance forecast.
 
 Each run prints the path to a fresh results directory under `backtests/`. Use `--algorithm` to select another trusted class from LEAN's C# assembly, `--data` for a local LEAN-format dataset, or `--output` to choose another parent directory. Do not run untrusted strategies: LEAN executes algorithm code locally. Neither historical results nor this runner authorize real trades.
