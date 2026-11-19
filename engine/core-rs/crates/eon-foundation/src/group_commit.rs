@@ -151,7 +151,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let journal = GroupCommitJournal::spawn(dir.path(), 8).unwrap();
         journal
-            .append_scrubbed("deploy with ghp_16C7e42F292c6912E7710c838347Ae178B4a now")
+            .append_scrubbed("deploy with ghp_FIXTURE-not-a-real-token now")
             .unwrap();
         drop(journal);
         let text: Vec<u8> = replay(dir.path()).unwrap().into_iter().flat_map(|f| f.payload).collect();

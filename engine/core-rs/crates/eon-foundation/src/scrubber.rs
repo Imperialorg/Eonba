@@ -192,9 +192,9 @@ mod tests {
 
     #[test]
     fn github_token_is_redacted_by_prefix() {
-        let line = "auth=ghp_16C7e42F292c6912E7710c838347Ae178B4a end";
+        let line = "auth=ghp_FIXTURE-not-a-real-token end";
         let scrubbed = scrub(line);
-        assert!(!scrubbed.contains("ghp_16C7"));
+        assert!(!scrubbed.contains("ghp_FIXTURE"));
         assert!(scrubbed.contains("[REDACTED_SECRET:b3_"));
         assert!(scrubbed.ends_with(" end"));
     }
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn equal_secrets_produce_equal_markers() {
-        let secret = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+        let secret = "ghp_FIXTURE-not-a-real-token";
         assert_eq!(scrub(secret), scrub(secret));
         assert_ne!(
             scrub(secret),

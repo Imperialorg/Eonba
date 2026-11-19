@@ -232,7 +232,7 @@ mod tests {
     fn secrets_are_scrubbed_before_reaching_the_log_or_state() {
         use eon_foundation::group_commit::GroupCommitJournal;
 
-        let secret = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+        let secret = "ghp_FIXTURE-not-a-real-token";
         let dir = tempfile::tempdir().unwrap();
         let mut state = SharedState::new();
         {
