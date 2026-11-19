@@ -1,7 +1,7 @@
 use std::ops::Deref;
 
 use eon_primitives::{EonError, IdentityId, ObjectiveId};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Priority {
@@ -24,9 +24,15 @@ pub struct ObjectiveSpec {
     pub epoch: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "ObjectiveSpec")]
 pub struct Objective(ObjectiveSpec);
+
+impl Serialize for Objective {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
 
 impl TryFrom<ObjectiveSpec> for Objective {
     type Error = EonError;

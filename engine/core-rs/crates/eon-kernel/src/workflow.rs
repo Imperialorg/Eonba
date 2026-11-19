@@ -62,18 +62,12 @@ impl Workflow {
                 task.id
             )));
         }
-        // A fresh node depending only on existing nodes cannot close a cycle.
-        if let Some(dep) = task
-            .dependencies
-            .iter()
-            .find(|dep| !self.tasks.contains_key(dep))
-        {
-            return Err(EonError::ValidationError(format!(
-                "task {} depends on unknown task {dep}",
-                task.id
-            )));
+        let id = task.id.clone();
+        self.tasks.insert(id.clone(), task);
+        if let Err(err) = self.validate_topological_order() {
+            self.tasks.remove(&id);
+            return Err(err);
         }
-        self.tasks.insert(task.id.clone(), task);
         Ok(())
     }
 
@@ -318,10 +312,13 @@ mod tests {
     }
 
     #[test]
-    fn insert_rejects_unknown_dependency() {
+    fn rejected_insert_leaves_existing_tasks_untouched() {
         let mut wf = Workflow::new();
+        wf.insert(Task::new(id("1"), [])).unwrap();
         let before = wf.clone();
         assert!(wf.insert(Task::new(id("40"), [id("99")])).is_err());
+        assert_eq!(wf, before);
+        assert!(wf.insert(Task::new(id("40"), [id("40")])).is_err());
         assert_eq!(wf, before);
     }
 }

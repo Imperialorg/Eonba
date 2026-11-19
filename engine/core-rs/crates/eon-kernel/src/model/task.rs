@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, ops::Deref};
 
 use eon_primitives::{EonError, TaskId, WorkflowId};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::resource::{Requirement, merge};
 
@@ -23,6 +23,7 @@ pub struct TaskSpec {
     pub task_type: TaskType,
     pub capability: String,
     pub operation: String,
+    /// Schema validation for this payload belongs to the target capability.
     pub parameters: serde_json::Value,
     pub dependencies: BTreeSet<TaskId>,
     pub resource_requirements: Vec<Requirement>,
@@ -30,9 +31,15 @@ pub struct TaskSpec {
     pub is_idempotent: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "TaskSpec")]
 pub struct Task(TaskSpec);
+
+impl Serialize for Task {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
 
 impl TryFrom<TaskSpec> for Task {
     type Error = EonError;

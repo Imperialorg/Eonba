@@ -7,7 +7,7 @@ use super::Task;
 use crate::workflow::topological_order;
 
 /// A validated submission. On the wire, tasks are a sequence in ID order:
-/// there is only one ID per node, and duplicate nodes cannot be lost to map decoding.
+/// each node declares its own ID, and duplicate nodes cannot be lost to map decoding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "WorkflowSpec")]
 pub struct Workflow {
@@ -50,7 +50,8 @@ impl TryFrom<WorkflowSpec> for Workflow {
 }
 
 impl Workflow {
-    /// Accepts tasks in any order, including forward references.
+    /// Accepts tasks in any order, including forward references. `created_at_ns`
+    /// uses the submitting objective's monotonic clock origin.
     pub fn new(
         id: WorkflowId,
         objective_id: ObjectiveId,

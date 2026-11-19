@@ -79,11 +79,11 @@
 
 ## Phase 3: Vector DAG Execution Engine & Crash Recovery (Level 3)
 
-- [ ] **Task 3.1: Canonical Objective, Workflow & Task Models**
+- [x] **Task 3.1: Canonical Objective, Workflow & Task Models**
   - **Crate**: `eon-kernel`
   - **Files**: `src/model/objective.rs`, `src/model/workflow.rs`, `src/model/task.rs`
   - **Requirements**: Immutable Rust data models with Serde support. Topological acyclic DAG validation in `Workflow` constructor (Kahn's algorithm).
-  - **Unit Tests**: `cargo test -p eon-kernel dag_validation_tests` verifying cycle detection, orphan task detection, and topological ordering.
+  - **Verification**: `cargo test --locked -p eon-kernel --test dag_validation` checks construction and deserialization, including missing dependencies, foreign workflow IDs and a cycle disconnected from a valid root. A validated definition projects into the existing execution graph without changing its task IDs or edges.
 
 - [ ] **Task 3.2: Resource-Aware Task Scheduler with Epoch Leases**
   - **Crate**: `eon-kernel`
