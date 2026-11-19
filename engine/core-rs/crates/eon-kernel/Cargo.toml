@@ -6,6 +6,12 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+diffy = "0.4"
+eon-cyber = { path = "../eon-cyber" }
+eon-foundation = { version = "0.1.0", path = "../eon-foundation" }
 eon-primitives = { path = "../eon-primitives" }
-eon-foundation = { path = "../eon-foundation" }
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
 

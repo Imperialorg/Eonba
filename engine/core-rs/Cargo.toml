@@ -11,6 +11,10 @@ members = [
     "crates/eon-vision",
     "crates/eon-cognition",
     "crates/eon-uniffi",
+    "crates/eon-cli",
+    "crates/eon-daemon",
+    "crates/eon-canvas",
+    "crates/eon-ebpf",
 ]
 
 [workspace.package]

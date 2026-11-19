@@ -6,5 +6,13 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+cpal = "0.18"
 eon-primitives = { path = "../eon-primitives" }
+kaldi-native-fbank = "0.1"
+ort = { version = "=2.0.0-rc.15", features = ["download-binaries"] }
+rtrb = "0.3"
+rubato = "5.1"
+serde_json = "1"
+webrtc-audio-processing = { version = "2.1", features = ["bundled"] }
+webrtc-audio-processing-config = "2.1"
 

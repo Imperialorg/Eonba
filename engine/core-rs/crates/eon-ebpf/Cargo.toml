@@ -1,0 +1,10 @@
+[package]
+name = "eon-ebpf"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+aya = "0.16"
+eon-primitives = { path = "../eon-primitives" }

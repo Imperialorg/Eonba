@@ -1,3 +1,9 @@
-//! EON Information Particle Manipulation: AST Parsing, Cyber Defense & Reverse Engineering.
-pub use eon_primitives::*;
+//! EON Cyber Engine: program analysis, taint slicing, and armor checks.
+pub mod branches;
+pub mod cpg;
+pub mod interproc;
+pub mod sbom;
+pub mod solver;
+pub mod taint;
 
+pub use eon_primitives::*;

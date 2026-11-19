@@ -45,8 +45,9 @@ Thumbs.db
 .vscode/
 
 # Audio & Cache Downloads
-perception/models/downloads/
+perception/models/
 data/cache/
 *.pcm
 *.wav
 
+.z3-trace
