@@ -17,5 +17,13 @@ fun main() {
         e.message.contains("finite")
     }
     check(refused, "NaN memory must raise BridgeException.InvalidInput")
+    val task = generateUlid("task")
+    check(generateUlid("task") > task, "IDs are not monotonic")
+    val first = getMonotonicTimeNanos()
+    check(getMonotonicTimeNanos() >= first, "clock moved backwards")
+    val probe = injectAudioPcmForTesting(List(512) { Short.MIN_VALUE })
+    check(probe.sampleCount == 512u && probe.outputPeak == 0.95f, "limiter did not process synthetic PCM")
+    val outcome = executeTaskSync(task, "diagnostics", "select_model_profile", """{"memory_gb":4}""")
+    check(outcome.taskId == task && outcome.outcomeJson == """{"profile":"p0_mobile_ultralight"}""", "bad task result")
     println("eon-uniffi kotlin smoke: OK")
 }
