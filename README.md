@@ -7,6 +7,8 @@
 
 ## 1. Executive Summary & Vision
 
+The architecture below describes the target, not a released feature set. For what runs today, see the [roadmap checkboxes](./docs/ROADMAP_AND_IMPLEMENTATION_PLAN.md) and the [verification commands and limits](./docs/IMPLEMENTATION_BLUEPRINT.md#8-implementation-status-living-section). In particular, a passing host test does not establish phone microphone latency, WAN performance, or device permissions.
+
 **EON** is an autonomous, ultra-low-latency AI Personal Assistant, Cyber Operator, and Cognitive Operating System inspired by **Ciel** (*Manas: Ciel*, formerly *Great Sage* and *Wisdom King Raphael*) from *That Time I Got Reincarnated as a Slime* (*Tensei Shitara Slime Datta Ken*).
 
 Unlike conventional chatbots that wait passively for commands, demand constant hand-holding, or babble pleasantries, EON functions as an **omnipresent, proactive intellectual partner, world-class programmer, cyber operator, and autonomous execution engine**:
@@ -66,8 +68,7 @@ EON unifies the cutting-edge foundations discovered in **CHRONOS** (persistent m
 │  - Extreme Polyglot Programming: Rust, C/C++, Kotlin, Go, TypeScript, ASM    │
 │  - Self-Healing Compiler Loop: AST Parsing, Diagnostic Taint & Auto-Patch   │
 │  - Aegis Cyber Defense: Static/Dynamic Taint, eBPF Anomaly Monitor, Auto-Fix│
-│  - eBPF SSL/TLS Uprobes (Cleartext Payload Audit on SSL_read/SSL_write)     │
-│  - Unprivileged Virtual Network Stack (smoltcp in User Space / Android TUN) │
+│  - Source-level review and bounded local audit records, not traffic capture │
 │  - Offline dependency advisories, sandbox isolation and verified remediation│
 └──────────────────────────────────────┬──────────────────────────────────────┘
                                        │ Governed Tasks & Epoch Leases

@@ -2,6 +2,7 @@
 """Measure end-of-utterance to speaker onset in paired, single-clock PCM captures."""
 
 import argparse
+import hashlib
 import json
 import sys
 import wave
@@ -13,8 +14,8 @@ P50_LIMIT_MS = 170
 P99_LIMIT_MS = 280
 
 
-def latency_ms(path: Path, threshold: int) -> int:
-    """Return a conservative 1 ms-window estimate, or reject an unusable trial."""
+def _measure(path: Path, threshold: int) -> tuple[int, bytes]:
+    """Return a conservative 1 ms estimate and an identity for the recorded PCM."""
     if not 1 <= threshold <= 32767:
         raise ValueError("RMS threshold must be between 1 and 32767 PCM units")
     with wave.open(str(path), "rb") as wav:
@@ -26,11 +27,13 @@ def latency_ms(path: Path, threshold: int) -> int:
             raise ValueError("expected a capture of at most 30 seconds at 8 to 192 kHz")
         first_input = last_input = first_output = None
         previous_output = output_run = input_windows = pos = 0
+        fingerprint = hashlib.sha256()
         for ms in range((frames * 1000 + rate - 1) // rate):
             end = min(frames, (ms + 1) * rate // 1000)
             samples = wav.readframes(end - pos)
             if len(samples) != 4 * (end - pos):
                 raise ValueError("truncated capture")
+            fingerprint.update(samples)
             left = right = 0
             for a, b in iter_unpack("<hh", samples):
                 left += a * a
@@ -57,7 +60,12 @@ def latency_ms(path: Path, threshold: int) -> int:
             raise ValueError("channels overlap or the response preceded the end of the utterance")
         # Latest possible onset in the first output window minus earliest possible
         # endpoint in the last input window. Do not round a borderline result down.
-        return first_output + 1 - last_input
+        return first_output + 1 - last_input, fingerprint.digest()
+
+
+def latency_ms(path: Path, threshold: int) -> int:
+    """Measure one trial, without claiming a percentile or a physical origin."""
+    return _measure(path, threshold)[0]
 
 
 def summarize(trials: list[int]) -> dict:
@@ -81,15 +89,16 @@ def main(argv=None) -> int:
         values = []
         seen = set()
         for path in paths:
-            stat = path.stat()
-            identity = (stat.st_dev, stat.st_ino)
-            if identity in seen:
-                raise ValueError(f"duplicate recording: {path.name}")
-            seen.add(identity)
+            if not path.is_file():
+                raise ValueError(f"not a regular capture file: {path.name}")
             try:
-                values.append(latency_ms(path, args.threshold))
+                latency, fingerprint = _measure(path, args.threshold)
             except (ValueError, wave.Error, EOFError) as error:
                 raise ValueError(f"{path.name}: {error}") from error
+            if fingerprint in seen:
+                raise ValueError(f"duplicate PCM recording: {path.name}")
+            seen.add(fingerprint)
+            values.append(latency)
         result = summarize(values)
         print(json.dumps(result))
         return 0 if result["passed"] else 1

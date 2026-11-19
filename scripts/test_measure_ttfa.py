@@ -1,10 +1,13 @@
+import contextlib
+import io
+import shutil
 import struct
 import tempfile
 import unittest
 import wave
 from pathlib import Path
 
-from measure_ttfa import latency_ms, summarize
+from measure_ttfa import latency_ms, main, summarize
 
 
 class LatencyTests(unittest.TestCase):
@@ -43,3 +46,10 @@ class LatencyTests(unittest.TestCase):
         self.assertTrue(summarize([169] * 98 + [279, 500])["passed"])
         self.assertFalse(summarize([170] * 100)["passed"])
         self.assertFalse(summarize([20] * 98 + [280, 281])["passed"])
+
+    def test_renamed_copies_cannot_pad_sample_size(self):
+        trial = self.fixture()
+        shutil.copyfile(trial, trial.with_name("another.wav"))
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(main([str(trial.parent), "--threshold", "500"]), 2)
+        self.assertIn("duplicate PCM recording", errors.getvalue())
