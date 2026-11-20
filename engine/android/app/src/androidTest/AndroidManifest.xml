@@ -4,4 +4,6 @@
     <application android:allowBackup="false" android:testOnly="true" />
     <instrumentation android:name="com.eon.assistant.KeystoreAcceptance"
         android:targetPackage="com.eon.assistant" />
+    <instrumentation android:name="com.eon.assistant.DemoActionAcceptance"
+        android:targetPackage="com.eon.assistant" />
 </manifest>

@@ -28,9 +28,17 @@ internal object InspectionAccess {
     private val revoke = Runnable { cancel() }
     var shortcutAvailable = false
         private set
+    // An availability interruption must invalidate even an in-app demo review made before it.
+    var environmentEpoch = Any()
+        private set
+
+    fun interrupt() {
+        environmentEpoch = Any()
+        cancel()
+    }
 
     fun setShortcut(available: Boolean) {
-        cancel()
+        interrupt()
         shortcutAvailable = available
     }
 
@@ -85,7 +93,7 @@ class FocusedControlService : AccessibilityService() {
     private var listening = false
     private val screenOff = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            InspectionAccess.cancel()
+            InspectionAccess.interrupt()
         }
     }
     private val shortcut = object : AccessibilityButtonController.AccessibilityButtonCallback() {
@@ -132,7 +140,7 @@ class FocusedControlService : AccessibilityService() {
 
     // No event types are requested. Never open an event source, even if a platform sends one.
     override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
-    override fun onInterrupt() = InspectionAccess.cancel()
+    override fun onInterrupt() = InspectionAccess.interrupt()
 
     private fun disconnect() {
         InspectionAccess.setShortcut(false)

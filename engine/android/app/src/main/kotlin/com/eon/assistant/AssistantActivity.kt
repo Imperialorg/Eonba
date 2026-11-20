@@ -96,6 +96,10 @@ class AssistantActivity : Activity() {
                 filterTouchesWhenObscured = true
                 setOnClickListener { reviewInspection() }
             })
+            column.addView(Button(this).apply {
+                text = "Open EON accessibility action demo"
+                setOnClickListener { startActivity(Intent(this@AssistantActivity, DemoActionActivity::class.java)) }
+            })
         }
         setContentView(ScrollView(this).apply {
             fitsSystemWindows = true

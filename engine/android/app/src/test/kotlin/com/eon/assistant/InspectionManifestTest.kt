@@ -39,6 +39,17 @@ class InspectionManifestTest {
     }
 
     @Test
+    fun demoIsPrivateAndHasNoIntentActionOrLockscreenEntryPoint() {
+        val demo = root("AndroidManifest.xml").elements("activity").single { it.attr("name") == ".DemoActionActivity" }
+        assertEquals("false", demo.attr("exported"))
+        assertEquals("true", demo.attr("noHistory"))
+        assertEquals("@bool/focused_control_supported", demo.attr("enabled"))
+        assertTrue(demo.elements("intent-filter").isEmpty())
+        assertFalse(demo.hasAttributeNS(android, "showWhenLocked"))
+        assertFalse(demo.hasAttributeNS(android, "turnScreenOn"))
+    }
+
+    @Test
     fun voiceBindingRequiresSystemIdentityAndDoesNotAdvertiseOtherTriggers() {
         val services = root("AndroidManifest.xml").elements("service").associateBy { it.attr("name") }
         val voice = services.getValue(".EonVoiceInteractionService")

@@ -17,6 +17,8 @@
         <activity android:name=".InspectionResultActivity" android:exported="false"
             android:excludeFromRecents="true" android:noHistory="true"
             android:taskAffinity="com.eon.assistant.inspection" />
+        <activity android:name=".DemoActionActivity" android:exported="false"
+            android:enabled="@bool/focused_control_supported" android:noHistory="true" />
         <service android:name=".EonVoiceInteractionService" android:exported="true"
             android:enabled="@bool/voice_hud_supported" android:permission="android.permission.BIND_VOICE_INTERACTION">
             <intent-filter>
