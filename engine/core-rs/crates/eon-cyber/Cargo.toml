@@ -8,6 +8,10 @@ license.workspace = true
 [features]
 default = ["solver"]
 solver = ["dep:z3"]
+self-fsync-ebpf = ["dep:eon-ebpf"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+eon-ebpf = { path = "../eon-ebpf", optional = true, default-features = false, features = ["self-fsync"] }
 
 [dependencies]
 eon-primitives = { path = "../eon-primitives" }

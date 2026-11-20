@@ -144,23 +144,26 @@
 
 ## Phase 5: Low-Latency Duplex Voice Engine (STT & TTS)
 
-- [ ] **Task 5.1: Silero VAD & Audio Ring Buffer**
+- [x] **Task 5.1: Silero VAD & Audio Ring Buffer**
   - **Crate**: `eon-voice`
   - **Files**: `src/vad.rs`, `src/ring_buffer.rs`, `src/audio_device.rs`
   - **Requirements**: Native CPAL / AAudio / WASAPI audio driver loop. 30ms window ONNX evaluation, confidence scoring, 250ms dynamic end-of-utterance detection.
   - **Unit Tests**: `cargo test -p eon-voice vad_tests` verifying speech detection latency < 1ms per frame.
+  - **Verified backend**: Linux CPAL capture on a private 48 kHz monitor. The adapter takes 30 ms device windows; the pinned Silero model takes 512 samples at 16 kHz (32 ms). All 501 measured live model frames took less than 1 ms. The 250 ms quiet threshold was observed at its next frame boundary, 256 ms. No physical microphone, Android AAudio or Windows WASAPI result.
 
-- [ ] **Task 5.2: Streaming Zipformer int8 ASR with Predictive Pre-Cognition**
+- [x] **Task 5.2: Streaming Zipformer int8 ASR with Predictive Pre-Cognition**
   - **Crate**: `eon-voice`
   - **Files**: `src/asr.rs`, `src/pre_cognition.rs`
   - **Requirements**: Streams 16kHz audio chunks to `sherpa-onnx` C++ bindings, emits partial tokens incrementally, runs early-exit intent classifier during user speech.
   - **Unit Tests**: `cargo test -p eon-voice asr_tests`.
+  - **Verified backend**: The optional native Sherpa online recognizer consumed 20 ms pushes of real 16 kHz PCM and produced 16 partials on an upstream recording. The first intent arrived at 2.08 seconds, before the 6.625-second EOF. Partial text and intent are retractable, display-only observations. The independent direct ONNX decoder matched the final reference transcript.
 
-- [ ] **Task 5.3: Kokoro-82M Streaming Neural TTS & Acoustic Commitment Gate**
+- [x] **Task 5.3: Kokoro-82M Streaming Neural TTS & Acoustic Commitment Gate**
   - **Crate**: `eon-voice`
   - **Files**: `src/tts.rs`, `src/chunker.rs`, `src/commitment_gate.rs`
   - **Requirements**: Emits acoustic bridges immediately; gates definitive semantic claims until lease acquisition. TTFA < 170ms, RTF < 0.15.
   - **Unit Tests**: `cargo test -p eon-voice tts_tests`, `commitment_gate_tests`.
+  - **Verified backend**: On Linux, the explicitly selected v1.0 release INT8 graph with the pinned voice rendered a cached bridge and then an authorized clause into CPAL. First non-silent callback reference: 27.8 ms. Uncached clause RTF: 0.124. This is a warmed software/render test, not the physical TTFA gate in Task 10.2. The default profile graph could not be fetched; it was not silently replaced.
 
 - [ ] **Task 5.4: Acoustic Reflex & Full Duplex Barge-In**
   - **Crate**: `eon-voice`

@@ -1,8 +1,11 @@
-//! Storage accounting for this process only. The kernel counters can include waited-for
-//! children and measure bytes charged to storage, not the contents of files or packets.
+//! Self-only telemetry. Procfs storage-byte counters can include waited-for children;
+//! the separately opted-in eBPF sensor counts only this process's libc fsync entries.
 
 use super::{Assessment, Gap};
 use std::time::{Duration, Instant};
+
+mod self_fsync;
+pub use self_fsync::SelfFsyncSensor;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StorageBytes {
