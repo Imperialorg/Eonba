@@ -48,6 +48,11 @@ fn prompt_larger_than_the_context_window_is_refused() {
 #[test]
 fn qwen_public_speech_uses_the_ciel_contract() {
     let model = load();
+    // One output token cannot generate this report: the legacy caller takes the real reflex path.
+    assert_eq!(
+        model.generate_speech(SpeechAct::Report, "router status", 1).unwrap(),
+        "Report: Local tactical backend configured."
+    );
     let request = "The battery sensor reads 84 percent. Report this reading.";
     let speech = model.generate_speech(SpeechAct::Report, request, 96).unwrap();
     assert!(speech.starts_with("Report: "));

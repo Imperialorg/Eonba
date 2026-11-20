@@ -17,7 +17,9 @@ use llama_cpp_2::token::LlamaToken;
 
 use crate::persona::SpeechAct;
 use crate::prompts::{QWEN_VOICE_REPLY, qwen_voice_header};
-use crate::router::SpeechRouter;
+use crate::router::{
+    CognitiveRouter, RouteError, SpeechBackend, SpeechRequest, SpeechTokens, Workload,
+};
 
 const CONTEXT_TOKENS: u32 = 2048;
 
@@ -79,15 +81,31 @@ impl LocalModel {
         self.generate_with(prompt, max_tokens, LlamaSampler::greedy())
     }
 
-    /// Generates one public utterance on a Qwen3.5 ChatML model. Uses the non-thinking
-    /// assistant header. An invalid, truncated or unlabelled answer returns no speech;
-    /// it never falls back to the raw completion.
+    /// Answers an interactive turn locally: an exact reflex needs no inference;
+    /// all other requests use this model's validated Qwen3.5 speech path.
     pub fn generate_speech(
         &self,
         act: SpeechAct,
         request: &str,
         max_tokens: usize,
     ) -> EonResult<String> {
+        let router = CognitiveRouter {
+            tactical_local: Some(self),
+            ..Default::default()
+        };
+        let request = SpeechRequest { act, text: request, max_tokens };
+        router.plan(request, Workload::Interactive)
+            .and_then(|plan| plan.execute())
+            .map(|reply| reply.speech)
+            .map_err(|error| match error {
+                RouteError::InvalidRequest | RouteError::InvalidSpeech(_) => {
+                    EonError::ValidationError(error.to_string())
+                }
+                _ => llm_err("speech", error),
+            })
+    }
+
+    fn stream_speech(&self, request: SpeechRequest<'_>, out: &mut SpeechTokens) -> EonResult<()> {
         let arch = self
             .model
             .meta_val_str("general.architecture")
@@ -98,9 +116,10 @@ impl LocalModel {
             ));
         }
         let vocab = self.model.vocab();
-        let mut tokens = vocab.tokenize(qwen_voice_header(act).as_bytes(), true, true);
-        tokens.extend(vocab.tokenize(request.as_bytes(), false, false));
+        let mut tokens = vocab.tokenize(qwen_voice_header(request.act).as_bytes(), true, true);
+        tokens.extend(vocab.tokenize(request.text.as_bytes(), false, false));
         tokens.extend(vocab.tokenize(QWEN_VOICE_REPLY.as_bytes(), false, true));
+        let max_tokens = request.max_tokens;
         if max_tokens > (CONTEXT_TOKENS as usize).saturating_sub(tokens.len()) || max_tokens == 0 {
             return Err(EonError::ValidationError(
                 "invalid speech generation token budget".into(),
@@ -108,7 +127,6 @@ impl LocalModel {
         }
         let mut ctx = self.new_context()?;
         let logits = Self::decode_from(&mut ctx, &tokens, 0)?;
-        let mut router = SpeechRouter::new(act);
         let complete = self.sample_into(
             &mut ctx,
             LlamaSampler::greedy(),
@@ -116,14 +134,14 @@ impl LocalModel {
             max_tokens,
             logits,
             // Preserve model control tokens for the filter, not for speech.
-            |token| router.push(&vocab.token_to_piece(token, true, None)),
+            |token| out.push_token(&vocab.token_to_piece(token, true, None)),
         )?;
         if !complete {
             return Err(EonError::ValidationError(
                 "verbal turn exceeded its token budget".into(),
             ));
         }
-        router.finish()
+        Ok(())
     }
 
     /// Generates greedily under a GBNF grammar, so every token keeps the output inside the grammar. The grammar's
@@ -258,5 +276,11 @@ impl LocalModel {
             text,
             reused_tokens: reused,
         })
+    }
+}
+
+impl SpeechBackend for LocalModel {
+    fn generate(&self, request: SpeechRequest<'_>, out: &mut SpeechTokens) -> EonResult<()> {
+        self.stream_speech(request, out)
     }
 }
