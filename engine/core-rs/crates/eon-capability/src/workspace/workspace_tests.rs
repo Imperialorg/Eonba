@@ -278,6 +278,22 @@ fn namespace_and_content_changes_during_prepare_do_not_commit_to_moved_targets()
 }
 
 #[test]
+fn directory_lock_lifetime_is_the_edit_not_an_inherited_descriptor() {
+    let f = Fixture::new();
+    let w = f.open();
+    let parent = w.edit_parent(".").unwrap();
+    let other = w.edit_parent(".").unwrap();
+    let lock = EditLock::acquire(&parent).unwrap();
+    // dup and fork both retain the same open file description.
+    let inherited = parent.try_clone().unwrap();
+    assert!(matches!(EditLock::acquire(&other), Err(WorkspaceError::Conflict)));
+    drop(lock);
+    drop(parent);
+    let _next = EditLock::acquire(&other).unwrap();
+    drop(inherited);
+}
+
+#[test]
 fn independent_handles_with_same_expected_digest_have_one_winner() {
     let f = Fixture::new();
     file(&f.root().join("item"), b"old");

@@ -96,6 +96,26 @@ pub struct Workspace {
     root: File,
 }
 
+struct EditLock<'a>(&'a File);
+
+impl<'a> EditLock<'a> {
+    fn acquire(parent: &'a File) -> Result<Self> {
+        match fs::flock(parent, fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => Ok(Self(parent)),
+            Err(Errno::WOULDBLOCK) => Err(WorkspaceError::Conflict),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+impl Drop for EditLock<'_> {
+    fn drop(&mut self) {
+        // A concurrently forked child can still hold this file description
+        // until exec. Closing only our descriptor would leave its flock held.
+        let _ = fs::flock(self.0, fs::FlockOperation::Unlock);
+    }
+}
+
 impl Workspace {
     /// Pin an absolute operator path; even symlinks in its ancestors are rejected.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
@@ -168,10 +188,7 @@ impl Workspace {
         }
         let (parent_path, leaf) = path.rsplit_once('/').unwrap_or((".", path));
         let parent = self.edit_parent(parent_path)?;
-        match fs::flock(&parent, fs::FlockOperation::NonBlockingLockExclusive) {
-            Err(Errno::WOULDBLOCK) => return Err(WorkspaceError::Conflict),
-            lock => lock?,
-        }
+        let _lock = EditLock::acquire(&parent)?;
 
         // RDWR checks actual write authorization without truncating or writing the inode.
         let (file, before) = self.source(path, OFlags::RDWR)?;
