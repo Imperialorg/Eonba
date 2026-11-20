@@ -317,7 +317,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
 
 ## Phase 10: Interactive Terminal, Live Canvas, System Verification & Benchmarks
 
-- [ ] **Task 10.1: Interactive Terminal Client (`ratatui`) & Live Canvas**
+- [x] **Task 10.1: Interactive Terminal Client (`ratatui`) & Live Canvas**
   - **Directory**: `clients/cli/` & `clients/canvas/`
   - **Files**: `src/main.rs`, `src/ui.rs`, `src/terminal.rs`, `clients/canvas/src/main.rs`
   - **Requirements**: Interactive console interface with welcome panel, status dock, live slash commands (`/menu`, `/capabilities`, `/cyber`, `/mesh`, `/vision`), Tab completion, and live audio visualizer. Terminal graphics via `ratatui-image` (Kitty/Sixel). Graphical canvas for live AST diffs, reverse engineering CFGs, and video scrubbing (`wgpu` / Compose).
@@ -325,6 +325,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Verified subset**: Build `eon-cli` with `--features audio-input`, run `eon watch <journal-dir>`, open `/audio` and press F2. Pasted text cannot start capture. F2, `/`, leaving the view or quitting stops it. The meter keeps at most 48 peak readings and no PCM. A dedicated Linux null-sink monitor delivered a 50% peak; its recording stream disappeared on `/` before the process exited. This test did not use a physical microphone.
   - **Terminal graphics**: On Unix, `eon watch <journal-dir> --image <file>` accepts one PNG or JPEG. `/vision` displays that still, not a screen capture. Leaving releases it; re-entry does not reopen the file. Kitty and VT340 xterm both displayed the selected colors after the original file was unlinked and cleared them on exit. The path is visible to shell history and OS process inspection.
   - **Control-flow canvas**: The `cfg` example reads one bounded GCC successor export. Software Vulkan readback verified all seven labels and eight directed edges of a real function, including a back edge and a self-loop.
+  - **Verified Linux workbench**: `/mesh` updates from opt-in completed paired syncs in the selected local journal, not a peer count. The live Rust/Python diff follows in-place edits to two selected files and hides stale results on parse failure. The timeline scrubs selected timestamped JPEGs. Neither client captures a screen.
 
 - [ ] **Task 10.2: Sub-170ms Time-To-First-Audio (TTFA) Benchmark**
   - **Directory**: `tests/latency-benchmarks/`
