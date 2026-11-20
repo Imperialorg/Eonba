@@ -23,7 +23,7 @@ import android.view.WindowManager
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.FutureTask
-import uniffi.eon_uniffi.selectModelProfile
+import uniffi.eon_uniffi.runProfileWorkflow
 
 class EonVoiceSessionService : VoiceInteractionSessionService() {
     override fun onNewSession(args: Bundle?): VoiceInteractionSession = EonVoiceSession(this)
@@ -38,7 +38,7 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
     private val surface = voiceHud.Surface(voiceHud.binding, ::closeHud)
     private val main = Handler(Looper.getMainLooper())
     private var hud: VoiceHudView? = null
-    private var work: FutureTask<String>? = null
+    private var work: FutureTask<ProfileCheck.Complete>? = null
     private var toneStop: CancellationSignal? = null
     private var taskStop: CancellationSignal? = null
     private var microphone: SessionMic? = null
@@ -258,10 +258,11 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
         val request = surface.requestCheck() ?: return
         render()
         val app = context.applicationContext
-        val task = object : FutureTask<String>(Callable {
+        val task = object : FutureTask<ProfileCheck.Complete>(Callable {
             val memory = ActivityManager.MemoryInfo()
             app.getSystemService(ActivityManager::class.java).getMemoryInfo(memory)
-            selectModelProfile(memory.totalMem / 1_000_000_000.0)
+            val receipt = runProfileWorkflow(memory.totalMem / 1_000_000_000.0)
+            ProfileCheck.Complete(receipt.profile, receipt.completedTasks)
         }) {
             override fun done() {
                 if (isCancelled) return
@@ -270,8 +271,8 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
                     work = null
                     if (!requireVisible()) return@post
                     // done() has already run: get() cannot block on the native call here.
-                    val profile = try { get() } catch (_: ExecutionException) { null }
-                    surface.acceptResult(request, profile)
+                    val completion = try { get() } catch (_: ExecutionException) { null }
+                    surface.acceptResult(request, completion)
                     render()
                 }
             }

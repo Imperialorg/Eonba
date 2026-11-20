@@ -1,5 +1,9 @@
 package com.eon.assistant
 
+import java.io.File
+import java.util.Locale
+import javax.xml.parsers.DocumentBuilderFactory
+import org.w3c.dom.Element
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -60,34 +64,69 @@ class VoiceHudPresentationTest {
         hud.toggleDetails()
         // Collapsing the details does not fabricate completion or start another check.
         assertSame(request, hud.frame?.check)
-        hud.acceptResult(request, "p0_mobile_ultralight")
-        assertEquals(VoiceHudFrame(false, ProfileCheck.Result("p0_mobile_ultralight")), hud.frame)
+        val completion = ProfileCheck.Complete("p0_mobile_ultralight", 1u)
+        hud.acceptResult(request, completion)
+        assertEquals(VoiceHudFrame(false, completion), hud.frame)
     }
 
     @Test
     fun aFailedCheckIsNotASuggestionAndOldResultsCannotWinARetry() {
         val first = startCheck()
         hud.acceptResult(first, null)
-        assertEquals(ProfileCheck.Result(null), hud.frame?.check)
+        assertEquals(ProfileCheck.Unavailable, hud.frame?.check)
         val retry = assertNotNull(hud.requestCheck())
-        hud.acceptResult(first, "old")
+        hud.acceptResult(first, ProfileCheck.Complete("old", 2u))
         assertSame(retry, hud.frame?.check)
-        hud.acceptResult(retry, "new")
+        val completion = ProfileCheck.Complete("new", 17u)
+        hud.acceptResult(retry, completion)
         hud.acceptResult(retry, null)
-        assertEquals(ProfileCheck.Result("new"), hud.frame?.check)
+        assertEquals(completion, hud.frame?.check)
+    }
+
+    @Test
+    fun onlyTheSuccessfulCurrentWorkflowSuppliesTheVisibleCountAndProfile() {
+        val resources = DocumentBuilderFactory.newInstance().apply {
+            setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
+        }.newDocumentBuilder().parse(File("src/main/res/values/voice_hud.xml")).getElementsByTagName("string")
+        val english = (0 until resources.length).map { resources.item(it) as Element }.associate {
+            R.string::class.java.getField(it.getAttribute("name")).getInt(null) to it.textContent
+        }
+        fun notice() = profileNotice(hud.frame?.check) { id, args -> english.getValue(id).format(Locale.US, *args) }
+
+        assertEquals(ProfileNotice(null), notice())
+        assertTrue(hud.show(true, true))
+        hud.toggleDetails()
+        hud.finishTasks(assertNotNull(hud.requestTasks()), OwnActivityTasks.Counts(9, 3))
+        assertEquals(ProfileNotice("Session open"), notice())
+
+        val check = assertNotNull(hud.requestCheck())
+        assertEquals(ProfileNotice("Checking model profile…"), notice())
+        // Distinct from either Android task count and outside the positive signed Int range.
+        hud.acceptResult(check, ProfileCheck.Complete("p1_mobile_flagship", UInt.MAX_VALUE))
+        assertEquals(ProfileNotice("Profile workflow complete. Completed tasks: 4294967295",
+            "Suggested profile: p1_mobile_flagship"), notice())
+
+        val retry = assertNotNull(hud.requestCheck())
+        hud.acceptResult(check, ProfileCheck.Complete("late", 1u))
+        assertEquals(ProfileNotice("Checking model profile…"), notice())
+        hud.acceptResult(retry, null)
+        assertEquals(ProfileNotice("Profile check unavailable"), notice())
+        hud.hide()
+        assertEquals(ProfileNotice(null), notice())
     }
 
     @Test
     fun hideAndRepeatedInvocationDropDetailsResultsAndOutstandingRequests() {
         val hidden = startCheck()
         hud.hide()
-        hud.acceptResult(hidden, "late")
+        val late = ProfileCheck.Complete("late", 2u)
+        hud.acceptResult(hidden, late)
         assertNull(hud.frame)
         val firstShowing = startCheck()
         val nextShowing = startCheck() // same OS session object
-        hud.acceptResult(firstShowing, "late")
+        hud.acceptResult(firstShowing, late)
         assertSame(nextShowing, hud.frame?.check)
-        hud.acceptResult(nextShowing, "finished")
+        hud.acceptResult(nextShowing, ProfileCheck.Complete("finished", 3u))
         assertTrue(hud.show(true, true))
         assertEquals(VoiceHudFrame(), hud.frame)
         assertFalse(hud.show(false, true))
@@ -107,11 +146,11 @@ class VoiceHudPresentationTest {
         val oldCheck = assertNotNull(old.requestCheck())
         val current = startCheck()
         assertEquals(1, revoked)
-        old.acceptResult(oldCheck, "stale")
+        old.acceptResult(oldCheck, ProfileCheck.Complete("stale", 8u))
         assertNull(old.frame)
         assertSame(current, hud.frame?.check)
         registry.shutdown(binding)
-        hud.acceptResult(current, "also stale")
+        hud.acceptResult(current, ProfileCheck.Complete("also stale", 1u))
         assertNull(hud.frame)
         assertEquals(2, revoked)
     }
@@ -120,11 +159,12 @@ class VoiceHudPresentationTest {
     fun losingEligibilityOrEndingTheSessionClearsEvenAPendingResult() {
         val denied = startCheck()
         assertFalse(hud.consumeAction(false))
-        hud.acceptResult(denied, "late")
+        val late = ProfileCheck.Complete("late", 2u)
+        hud.acceptResult(denied, late)
         assertNull(hud.frame)
         val ended = startCheck()
         hud.retire()
-        hud.acceptResult(ended, "late")
+        hud.acceptResult(ended, late)
         assertNull(hud.frame)
         assertFalse(hud.show(true, true))
     }

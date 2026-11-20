@@ -6,7 +6,7 @@
     <string name="voice_hud_title">EON · Mic off</string>
     <string name="voice_hud_ready">Session open</string>
     <string name="voice_hud_checking">Checking model profile…</string>
-    <string name="voice_hud_checked">Profile check complete</string>
+    <string name="voice_hud_checked">Profile workflow complete. Completed tasks: %1$d</string>
     <string name="voice_hud_failed">Profile check unavailable</string>
     <string name="voice_hud_recommendation">Suggested profile: %1$s</string>
     <string name="voice_hud_privacy">The mic is optional. Start measures six seconds of local microphone levels. Stop, collapse or dismiss to stop and clear. No audio saved or sent. The built-in tone check does not use the mic.</string>

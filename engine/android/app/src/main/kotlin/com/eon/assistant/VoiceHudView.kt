@@ -15,6 +15,23 @@ import android.widget.ScrollView
 import android.widget.TextView
 import kotlin.math.roundToInt
 
+internal fun interface HudStrings {
+    fun get(id: Int, vararg args: Any): String
+}
+
+internal data class ProfileNotice(val status: String?, val result: String? = null)
+
+internal fun profileNotice(check: ProfileCheck?, strings: HudStrings): ProfileNotice = when (check) {
+    null -> ProfileNotice(null)
+    ProfileCheck.Idle -> ProfileNotice(strings.get(R.string.voice_hud_ready))
+    is ProfileCheck.Requested -> ProfileNotice(strings.get(R.string.voice_hud_checking))
+    ProfileCheck.Unavailable -> ProfileNotice(strings.get(R.string.voice_hud_failed))
+    is ProfileCheck.Complete -> ProfileNotice(
+        strings.get(R.string.voice_hud_checked, check.completedTasks.toLong()),
+        strings.get(R.string.voice_hud_recommendation, check.profile),
+    )
+}
+
 internal class VoiceHudView(
     context: Context,
     toggleDetails: Runnable,
@@ -121,17 +138,10 @@ internal class VoiceHudView(
         }
         taskStatus.visibility = if (sample == null) GONE else VISIBLE
         track.check = frame?.check ?: ProfileCheck.Idle
-        val recommendation = (frame?.check as? ProfileCheck.Result)?.recommendation
-        result.visibility = if (recommendation == null) GONE else VISIBLE
-        result.text = recommendation?.let { context.getString(R.string.voice_hud_recommendation, it) }
-        status.text = when (frame?.check) {
-            null -> null
-            ProfileCheck.Idle -> context.getString(R.string.voice_hud_ready)
-            is ProfileCheck.Requested -> context.getString(R.string.voice_hud_checking)
-            is ProfileCheck.Result -> context.getString(
-                if (recommendation == null) R.string.voice_hud_failed else R.string.voice_hud_checked
-            )
-        }
+        val notice = profileNotice(frame?.check, context::getString)
+        status.text = notice.status
+        result.text = notice.result
+        result.visibility = if (notice.result == null) GONE else VISIBLE
         val tone = frame?.tone ?: ToneScan.Idle
         val levels = when (tone) {
             is ToneScan.Reading -> tone.levels
@@ -196,7 +206,7 @@ internal class VoiceHudTrack(context: Context, attrs: AttributeSet) : View(conte
         val reached = when (phase) {
             ProfileCheck.Idle -> 1
             is ProfileCheck.Requested -> 2
-            is ProfileCheck.Result -> 3
+            is ProfileCheck.Complete, ProfileCheck.Unavailable -> 3
         }
         val y = height / 2f
         val radius = minOf(width / 12f, height / 4f)
@@ -205,7 +215,7 @@ internal class VoiceHudTrack(context: Context, attrs: AttributeSet) : View(conte
             val x = width * (2 * i + 1) / 6f
             pen.color = if (i < reached) 0xff11665e.toInt() else 0xff68787a.toInt()
             if (i != 0) canvas.drawLine(x - width / 3f + radius, y, x - radius, y, pen)
-            if (i == 2 && phase is ProfileCheck.Result && phase.recommendation == null) {
+            if (i == 2 && phase == ProfileCheck.Unavailable) {
                 pen.color = 0xff983b24.toInt()
                 canvas.drawLine(x - radius, y - radius, x + radius, y + radius, pen)
                 canvas.drawLine(x - radius, y + radius, x + radius, y - radius, pen)

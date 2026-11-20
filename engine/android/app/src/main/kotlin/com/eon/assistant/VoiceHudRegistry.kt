@@ -4,7 +4,8 @@ internal sealed interface ProfileCheck {
     data object Idle : ProfileCheck
     // Identity ties a result to one request in one showing of the HUD.
     class Requested : ProfileCheck
-    data class Result(val recommendation: String?) : ProfileCheck
+    data class Complete(val profile: String, val completedTasks: UInt) : ProfileCheck
+    data object Unavailable : ProfileCheck
 }
 
 internal sealed interface ToneScan {
@@ -113,10 +114,10 @@ internal class VoiceHudRegistry {
             return ProfileCheck.Requested().also { frame = current.copy(check = it) }
         }
 
-        fun acceptResult(request: ProfileCheck.Requested, recommendation: String?) {
+        fun acceptResult(request: ProfileCheck.Requested, completion: ProfileCheck.Complete?) {
             val current = frame ?: return
             if (current.check === request) {
-                frame = current.copy(check = ProfileCheck.Result(recommendation))
+                frame = current.copy(check = completion ?: ProfileCheck.Unavailable)
             }
         }
 
