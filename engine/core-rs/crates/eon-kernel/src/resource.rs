@@ -152,7 +152,21 @@ impl ResourceManager {
             return Err(EonError::ValidationError(format!("request {seq} is already queued")));
         }
         let merged = merge(requirements)?;
-        for req in &merged {
+        self.check_capacity(&merged)?;
+
+        let key = (priority, seq);
+        let request = Request { requirements: merged, ttl };
+        let ahead_in_queue = self.waiting.range(..key).next().is_some();
+        if !ahead_in_queue && self.satisfiable(&request.requirements) {
+            return Ok(Acquisition::Granted(self.take(request, now)));
+        }
+        self.waiting.insert(key, request);
+        self.waiting_seqs.insert(seq);
+        Ok(Acquisition::Queued)
+    }
+
+    pub(crate) fn check_capacity(&self, merged: &[Requirement]) -> EonResult<()> {
+        for req in merged {
             if let Demand::Pool(units) = req.demand {
                 let cap = self.capacity.get(&req.key).copied().unwrap_or(0);
                 if units > cap {
@@ -165,15 +179,7 @@ impl ResourceManager {
             }
         }
 
-        let key = (priority, seq);
-        let request = Request { requirements: merged, ttl };
-        let ahead_in_queue = self.waiting.range(..key).next().is_some();
-        if !ahead_in_queue && self.satisfiable(&request.requirements) {
-            return Ok(Acquisition::Granted(self.take(request, now)));
-        }
-        self.waiting.insert(key, request);
-        self.waiting_seqs.insert(seq);
-        Ok(Acquisition::Queued)
+        Ok(())
     }
 
     /// Releases a lease, then grants queued requests in priority order until the first one that does not fit.
@@ -217,6 +223,25 @@ impl ResourceManager {
 
     pub fn waiting_len(&self) -> usize {
         self.waiting.len()
+    }
+
+    pub(crate) fn is_idle(&self) -> bool {
+        self.waiting.is_empty() && self.leases.is_empty()
+    }
+
+    /// A scheduler finishes one result at a time and hands out *all* newly available grants
+    /// on its next dispatch tick. No grant (or TTL) can be lost between these calls.
+    pub(crate) fn relinquish(&mut self, lease: &LeaseId) {
+        let held = self.leases.remove(lease).expect("scheduler owns the lease");
+        held.restore(&mut self.in_use, &mut self.locks);
+    }
+
+    pub(crate) fn revoke_all(&mut self) {
+        self.leases.clear();
+        self.in_use.clear();
+        self.locks.clear();
+        self.waiting.clear();
+        self.waiting_seqs.clear();
     }
 
     fn satisfiable(&self, reqs: &[Requirement]) -> bool {

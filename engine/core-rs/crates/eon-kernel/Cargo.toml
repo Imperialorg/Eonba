@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+blake3 = "1"
 diffy = "0.4"
 eon-cyber = { path = "../eon-cyber", default-features = false }
 eon-foundation = { version = "0.1.0", path = "../eon-foundation" }

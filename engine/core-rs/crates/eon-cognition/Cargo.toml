@@ -5,9 +5,41 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
-[dependencies]
-eon-capability = { version = "0.1.0", path = "../eon-capability" }
-eon-primitives = { path = "../eon-primitives" }
-llama-cpp-2 = "0.1"
-serde_json = "1"
+[features]
+default = ["local-inference", "sqlite-memory", "objective-compiler"]
+llama-backend = ["dep:llama-cpp-2"]
+local-inference = ["llama-backend", "dep:eon-capability", "dep:serde_json"]
+sqlite-memory = ["dep:rusqlite"]
+objective-compiler = ["dep:eon-kernel", "dep:serde_json"]
 
+[dependencies]
+eon-capability = { version = "0.1.0", path = "../eon-capability", optional = true }
+eon-kernel = { path = "../eon-kernel", optional = true }
+eon-primitives = { path = "../eon-primitives" }
+llama-cpp-2 = { version = "0.1", optional = true }
+rusqlite = { version = "0.37", features = ["bundled"], optional = true }
+serde_json = { version = "1", optional = true }
+
+[[test]]
+name = "compiler_tests"
+required-features = ["objective-compiler"]
+
+[[test]]
+name = "grammar_e2e"
+required-features = ["local-inference"]
+
+[[test]]
+name = "kv_cache_e2e"
+required-features = ["llama-backend"]
+
+[[test]]
+name = "llm_e2e"
+required-features = ["llama-backend"]
+
+[[test]]
+name = "melon_e2e"
+required-features = ["local-inference"]
+
+[[test]]
+name = "warm_up_e2e"
+required-features = ["llama-backend"]

@@ -20,6 +20,7 @@ struct Request {
 }
 
 pub struct GroupCommitJournal {
+    directory: std::sync::Arc<crate::owned_dir::OwnedDirectory>,
     tx: Option<SyncSender<Request>>,
     worker: Option<JoinHandle<()>>,
 }
@@ -28,15 +29,21 @@ impl GroupCommitJournal {
     /// Opens the journal in `dir` (repairing a torn tail, as `JournalWriter::open` does) and starts the worker.
     pub fn spawn(dir: impl AsRef<std::path::Path>, queue_depth: usize) -> EonResult<Self> {
         let mut writer = JournalWriter::open(dir)?;
+        let directory = writer.dir.clone();
         let (tx, rx) = mpsc::sync_channel::<Request>(queue_depth.max(1));
         let worker = thread::Builder::new()
             .name("eon-journal".into())
             .spawn(move || run(&mut writer, rx))
             .map_err(|e| EonError::InternalError(format!("cannot start journal worker: {e}")))?;
         Ok(Self {
+            directory,
             tx: Some(tx),
             worker: Some(worker),
         })
+    }
+
+    pub fn directory(&self) -> &crate::owned_dir::OwnedDirectory {
+        &self.directory
     }
 
     /// Enqueues a payload. The receiver yields the assigned sequence number once it is durable.

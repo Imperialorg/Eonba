@@ -157,24 +157,22 @@ enum EonBridgeError {
 ```
 
 ### 4.2 Cross-Compilation for Android with `cargo-ndk`
-To build native `.so` shared libraries for all Android hardware architectures:
-```powershell
-# From engine/core-rs/
-cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../../clients/android/app/src/main/jniLibs build --release -p eon-uniffi
+The Gradle wrapper builds and verifies the debug APK. On Linux, with the Android SDK in `ANDROID_HOME` and a JDK on `PATH`, run from the repository root:
+```sh
+"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;37.0.0" "ndk;27.3.13750724"
+export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.3.13750724"
+rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+cargo install cargo-ndk --version 4.1.2 --locked
+cd engine/android
+./gradlew :core-bindings:verifyTargetBindings :app:test
 ```
+The APK is written to `app/build/outputs/apk/debug/app-debug.apk`. The verifier checks the packaged shared libraries, signature, alignment, and bindings for all three ABIs. These checks do not install the app or verify device permissions.
 
 ---
 
-## 5. Android Client & UI Workspace (`clients/android`)
+## 5. Android Client & UI Workspace (`engine/android`)
 
-The Android application acts as EON's mobile eyes, ears, and hands:
-- **Language**: Kotlin 2.0 with Jetpack Compose.
-- **Root Directory**: `clients/android/`
-- **Modules**:
-  - `app`: Main Android application packaging JNI libraries, settings, and foreground audio permissions.
-  - `accessibility`: Implements `EonAccessibilityService` to inspect `AccessibilityNodeInfo` hierarchies, execute taps, text entry, and window change listeners.
-  - `overlay`: Implements `EonOverlayService` managing the floating visualizer HUD and thought bubbles via Android `WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY`.
-  - `system`: Quick Settings Tile (`EonQuickActionTile`), MediaSession listeners, and WorkManager background reconciliation.
+`core-bindings` generates Kotlin bindings from the Rust library. `app` packages the Android libraries and offers an explicit, one-shot focused-control inspection. It does not expose a general gesture dispatcher, a background microphone, or a screen-capture service. The [roadmap](./ROADMAP_AND_IMPLEMENTATION_PLAN.md) tracks the remaining mobile features separately from the APK build.
 
 ---
 

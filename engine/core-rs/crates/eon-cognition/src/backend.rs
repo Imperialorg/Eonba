@@ -13,6 +13,11 @@ use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::{LlamaModel, params::LlamaModelParams};
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::token::LlamaToken;
+
+use crate::persona::SpeechAct;
+use crate::prompts::{QWEN_VOICE_REPLY, qwen_voice_header};
+use crate::router::SpeechRouter;
 
 const CONTEXT_TOKENS: u32 = 2048;
 
@@ -69,9 +74,56 @@ impl LocalModel {
         Ok(started.elapsed())
     }
 
-    /// Generates up to `max_tokens` tokens greedily after `prompt`, stopping at end-of-generation.
+    /// Generates raw text, not verbal output. For speech use `generate_speech`.
     pub fn generate_greedy(&self, prompt: &str, max_tokens: usize) -> EonResult<String> {
         self.generate_with(prompt, max_tokens, LlamaSampler::greedy())
+    }
+
+    /// Generates one public utterance on a Qwen3.5 ChatML model. Uses the non-thinking
+    /// assistant header. An invalid, truncated or unlabelled answer returns no speech;
+    /// it never falls back to the raw completion.
+    pub fn generate_speech(
+        &self,
+        act: SpeechAct,
+        request: &str,
+        max_tokens: usize,
+    ) -> EonResult<String> {
+        let arch = self
+            .model
+            .meta_val_str("general.architecture")
+            .map_err(|e| llm_err("metadata", e))?;
+        if !matches!(arch.as_str(), "qwen35" | "qwen35moe") {
+            return Err(EonError::ValidationError(
+                "unsupported model for Qwen3.5 speech template".into(),
+            ));
+        }
+        let vocab = self.model.vocab();
+        let mut tokens = vocab.tokenize(qwen_voice_header(act).as_bytes(), true, true);
+        tokens.extend(vocab.tokenize(request.as_bytes(), false, false));
+        tokens.extend(vocab.tokenize(QWEN_VOICE_REPLY.as_bytes(), false, true));
+        if max_tokens > (CONTEXT_TOKENS as usize).saturating_sub(tokens.len()) || max_tokens == 0 {
+            return Err(EonError::ValidationError(
+                "invalid speech generation token budget".into(),
+            ));
+        }
+        let mut ctx = self.new_context()?;
+        let logits = Self::decode_from(&mut ctx, &tokens, 0)?;
+        let mut router = SpeechRouter::new(act);
+        let complete = self.sample_into(
+            &mut ctx,
+            LlamaSampler::greedy(),
+            tokens.len(),
+            max_tokens,
+            logits,
+            // Preserve model control tokens for the filter, not for speech.
+            |token| router.push(&vocab.token_to_piece(token, true, None)),
+        )?;
+        if !complete {
+            return Err(EonError::ValidationError(
+                "verbal turn exceeded its token budget".into(),
+            ));
+        }
+        router.finish()
     }
 
     /// Generates greedily under a GBNF grammar, so every token keeps the output inside the grammar. The grammar's
@@ -109,32 +161,49 @@ impl LocalModel {
     }
 
     /// Samples from the logits at `logits_index` of the last decode, then keeps decoding one token at a time until
-    /// end-of-generation or `max_tokens`. The context must hold `prompt_len` tokens already.
-    fn sample_loop(
+    /// end-of-generation (`true`) or `max_tokens` (`false`). The sink chooses how to interpret each token.
+    fn sample_into(
         &self,
         ctx: &mut llama_cpp_2::context::LlamaContext<'_>,
         mut sampler: LlamaSampler,
         prompt_len: usize,
         max_tokens: usize,
         logits_index: i32,
-    ) -> EonResult<String> {
+        mut emit: impl FnMut(LlamaToken) -> EonResult<()>,
+    ) -> EonResult<bool> {
         let vocab = self.model.vocab();
         let mut batch = LlamaBatch::new(1, 1);
-        let mut output = Vec::new();
         let mut logits_index = logits_index;
         for position in (prompt_len as i32..).take(max_tokens) {
             // `sample` also accepts the token into the sampler chain, so it must not be accepted again.
             let token = sampler.sample(ctx, logits_index);
             if vocab.is_eog(token) {
-                break;
+                return Ok(true);
             }
-            output.extend(vocab.token_to_piece(token, false, None));
+            emit(token)?;
 
             batch.clear();
             batch.add(token, position, &[0], true).map_err(|e| llm_err("batch", e))?;
             ctx.decode(&mut batch).map_err(|e| llm_err("decode", e))?;
             logits_index = 0;
         }
+        Ok(false)
+    }
+
+    fn sample_loop(
+        &self,
+        ctx: &mut llama_cpp_2::context::LlamaContext<'_>,
+        sampler: LlamaSampler,
+        prompt_len: usize,
+        max_tokens: usize,
+        logits_index: i32,
+    ) -> EonResult<String> {
+        let mut output = Vec::new();
+        let vocab = self.model.vocab();
+        self.sample_into(ctx, sampler, prompt_len, max_tokens, logits_index, |token| {
+            output.extend(vocab.token_to_piece(token, false, None));
+            Ok(())
+        })?;
         String::from_utf8(output).map_err(|e| llm_err("utf8", e))
     }
 

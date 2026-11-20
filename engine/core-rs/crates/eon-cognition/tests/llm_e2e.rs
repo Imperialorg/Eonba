@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use eon_cognition::backend::LocalModel;
+use eon_cognition::persona::SpeechAct;
 
 fn model_path() -> PathBuf {
     if let Ok(path) = std::env::var("EON_QWEN_MODEL") {
@@ -26,7 +27,6 @@ fn load() -> LocalModel {
 fn generates_text_for_a_factual_prompt() {
     let model = load();
     let text = model.generate_greedy("The capital of France is", 16).unwrap();
-    println!("OUTPUT: {text:?}");
     assert!(!text.trim().is_empty(), "model produced no text");
 }
 
@@ -43,4 +43,15 @@ fn prompt_larger_than_the_context_window_is_refused() {
     let model = load();
     let huge = "word ".repeat(10_000);
     assert!(model.generate_greedy(&huge, 8).is_err());
+}
+
+#[test]
+fn qwen_public_speech_uses_the_ciel_contract() {
+    let model = load();
+    let request = "The battery sensor reads 84 percent. Report this reading.";
+    let speech = model.generate_speech(SpeechAct::Report, request, 96).unwrap();
+    assert!(speech.starts_with("Report: "));
+    assert_eq!(speech.matches("Report:").count(), 1);
+    assert!(!speech.contains(['<', '>']));
+    assert!(model.generate_speech(SpeechAct::Report, request, 1).is_err());
 }

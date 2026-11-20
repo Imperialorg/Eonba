@@ -1,9 +1,8 @@
 //! Durable kernel events: encodes `KernelEvent` into journal payloads and writes them through the group-commit
 //! journal (docs/implementation/01, sections 3.1 and 4).
 //!
-//! Payload format is one line of tab-separated fields: `T<TAB>task<TAB>from<TAB>to`, or
-//! `S<TAB>parent<TAB>child,child,...`. The format is versioned by its leading tag so future event kinds can be
-//! added without breaking replay.
+//! Tagged tab-separated payloads: task transition (`T`), splice (`S`), epoch writes (`E`),
+//! workflow submission (`W`), and epoch invalidation (`I`).
 
 use std::collections::BTreeMap;
 
@@ -78,6 +77,16 @@ fn unescape(text: &str) -> EonResult<String> {
 
 pub fn encode(event: &KernelEvent) -> Vec<u8> {
     let line = match event {
+        KernelEvent::WorkflowSubmitted { workflow, epoch, digest, tasks } => {
+            let mut fields = vec!["W".to_owned(), workflow.to_string(), epoch.to_string(),
+                blake3::Hash::from_bytes(*digest).to_hex().to_string()];
+            for (id, idempotent) in tasks {
+                fields.push(id.to_string());
+                fields.push(u8::from(*idempotent).to_string());
+            }
+            fields.join("\t")
+        }
+        KernelEvent::EpochInvalidated { workflow, epoch } => format!("I\t{workflow}\t{epoch}"),
         KernelEvent::TaskTransition { task, from, to } => {
             format!("T\t{task}\t{}\t{}", state_name(*from), state_name(*to))
         }
@@ -101,6 +110,38 @@ pub fn decode(bytes: &[u8]) -> EonResult<KernelEvent> {
     let text = std::str::from_utf8(bytes).map_err(|e| corrupt(e.to_string()))?;
     let fields: Vec<&str> = text.split('\t').collect();
     match fields.as_slice() {
+        ["W", workflow, epoch, digest, rest @ ..] => {
+            if digest.bytes().any(|b| b.is_ascii_uppercase()) {
+                return Err(corrupt("non-canonical workflow digest".into()));
+            }
+            let digest = blake3::Hash::from_hex(digest).map_err(|e| corrupt(e.to_string()))?;
+            let (pairs, leftover) = rest.as_chunks::<2>();
+            if !leftover.is_empty() {
+                return Err(corrupt("submission has an unpaired task".into()));
+            }
+            let mut tasks = BTreeMap::new();
+            for pair in pairs {
+                let id = pair[0].parse::<TaskId>().map_err(|e| corrupt(e.to_string()))?;
+                let idempotent = match pair[1] {
+                    "1" => true,
+                    "0" => false,
+                    _ => return Err(corrupt("invalid idempotency flag".into())),
+                };
+                if tasks.insert(id, idempotent).is_some() {
+                    return Err(corrupt("duplicate task in submission".into()));
+                }
+            }
+            Ok(KernelEvent::WorkflowSubmitted {
+                workflow: workflow.parse().map_err(|e: EonError| corrupt(e.to_string()))?,
+                epoch: epoch.parse::<u64>().map_err(|e| corrupt(e.to_string()))?,
+                digest: *digest.as_bytes(),
+                tasks,
+            })
+        }
+        ["I", workflow, epoch] => Ok(KernelEvent::EpochInvalidated {
+            workflow: workflow.parse().map_err(|e: EonError| corrupt(e.to_string()))?,
+            epoch: epoch.parse::<u64>().map_err(|e| corrupt(e.to_string()))?,
+        }),
         ["T", task, from, to] => Ok(KernelEvent::TaskTransition {
             task: task.parse::<TaskId>().map_err(|e| corrupt(e.to_string()))?,
             from: parse_state(from)?,

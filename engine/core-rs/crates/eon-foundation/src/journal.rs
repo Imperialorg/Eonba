@@ -6,12 +6,13 @@
 //! `sync_data` for the whole batch (group commit).
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use eon_primitives::{EonError, EonResult};
+use crate::owned_dir::{OwnedDirectory, open_or_create, open_regular, private_options};
 
 pub const FRAME_MAGIC: u32 = 0x454F_4E4A;
 pub const FRAME_VERSION: u16 = 1;
@@ -39,8 +40,8 @@ pub struct Frame {
 }
 
 pub struct JournalWriter {
-    _writer_lock: File,
-    dir: PathBuf,
+    _writer_lock: WriterLock,
+    pub(crate) dir: Arc<OwnedDirectory>,
     file: File,
     segment_first_seq: u64,
     segment_len: u64,
@@ -61,13 +62,12 @@ impl JournalWriter {
         dir: impl AsRef<Path>,
         max_segment_bytes: u64,
     ) -> EonResult<Self> {
-        fs::create_dir_all(&dir).map_err(|e| io_err("journal.create_dir", e))?;
-        let dir = fs::canonicalize(dir).map_err(|e| io_err("journal.resolve_dir", e))?;
-        let writer_lock = lock_writer(&dir)?;
+        let dir = Arc::new(OwnedDirectory::open(dir.as_ref(), true).map_err(|e| io_err("journal.open_dir", e))?);
+        let writer_lock = lock_writer(dir.path())?;
 
-        let segments = list_segments(&dir)?;
+        let segments = list_segments(dir.path())?;
         let Some((first_seq, path)) = segments.last().cloned() else {
-            let file = create_segment(&dir, 1)?;
+            let file = create_segment(dir.path(), 1)?;
             return Ok(Self {
                 _writer_lock: writer_lock,
                 dir,
@@ -81,12 +81,13 @@ impl JournalWriter {
             });
         };
 
-        let bytes = fs::read(&path).map_err(|e| io_err("journal.read_segment", e))?;
-        let scan = scan_segment(&bytes, first_seq)?;
-        let file = OpenOptions::new()
-            .write(true)
-            .open(&path)
+        for (_, sealed) in &segments[..segments.len() - 1] {
+            open_regular(sealed, OpenOptions::new().read(true)).map_err(|e| io_err("journal.check_sealed", e))?;
+        }
+        let mut file = open_regular(&path, OpenOptions::new().read(true).append(true))
             .map_err(|e| io_err("journal.open_segment", e))?;
+        let bytes = read_fd(&mut file).map_err(|e| io_err("journal.read_segment", e))?;
+        let scan = scan_segment(&bytes, first_seq)?;
         if scan.valid_end < bytes.len() {
             log_torn_tail(&path, scan.valid_end);
             file.set_len(scan.valid_end as u64)
@@ -94,14 +95,8 @@ impl JournalWriter {
             file.sync_all()
                 .map_err(|e| io_err("journal.sync_truncate", e))?;
         }
-        drop(file);
-
-        let file = OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .map_err(|e| io_err("journal.append_segment", e))?;
         // An earlier segment creation may have failed at the directory sync.
-        sync_directory(&dir)?;
+        sync_directory(dir.path())?;
         Ok(Self {
             _writer_lock: writer_lock,
             dir,
@@ -183,11 +178,13 @@ impl JournalWriter {
         self.file
             .sync_all()
             .map_err(|e| io_err("journal.sync_before_roll", e))?;
-        let sealed = fs::read(segment_path(&self.dir, self.segment_first_seq))
+        use std::io::Seek;
+        self.file.rewind().map_err(|e| io_err("journal.rewind_sealed", e))?;
+        let sealed = read_fd(&mut self.file)
             .map_err(|e| io_err("journal.read_sealed", e))?;
-        write_index(&self.dir, self.segment_first_seq, &sealed)?;
+        write_index(self.dir.path(), self.segment_first_seq, &sealed)?;
         self.needs_recovery = true;
-        self.file = create_segment(&self.dir, self.next_seq)?;
+        self.file = create_segment(self.dir.path(), self.next_seq)?;
         self.segment_first_seq = self.next_seq;
         self.segment_len = 0;
         Ok(())
@@ -227,16 +224,15 @@ fn write_index(dir: &Path, first_seq: u64, bytes: &[u8]) -> EonResult<()> {
     }
     let final_path = index_path(dir, first_seq);
     let tmp = final_path.with_extension("idx.tmp");
-    fs::write(&tmp, &out).map_err(|e| io_err("journal.write_index", e))?;
-    File::open(&tmp)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| io_err("journal.sync_index", e))?;
+    let mut file = open_or_create(&tmp).map_err(|e| io_err("journal.open_index", e))?;
+    file.set_len(0).and_then(|()| file.write_all(&out)).and_then(|()| file.sync_all())
+        .map_err(|e| io_err("journal.write_index", e))?;
     fs::rename(&tmp, &final_path).map_err(|e| io_err("journal.rename_index", e))?;
     Ok(())
 }
 
 fn read_index(dir: &Path, first_seq: u64) -> Option<Vec<(u64, u64)>> {
-    let bytes = fs::read(index_path(dir, first_seq)).ok()?;
+    let bytes = read_regular(&index_path(dir, first_seq)).ok()?;
     if !bytes.len().is_multiple_of(16) {
         return None;
     }
@@ -259,7 +255,12 @@ fn read_index(dir: &Path, first_seq: u64) -> Option<Vec<(u64, u64)>> {
 /// and within a segment the sparse index picks the starting offset. An index entry that does not point at a
 /// matching frame is ignored, so a damaged index can slow replay but never change its result.
 pub fn replay_from(dir: impl AsRef<Path>, from_seq: u64) -> EonResult<Vec<Frame>> {
-    let dir = dir.as_ref();
+    let dir = OwnedDirectory::open(dir.as_ref(), false).map_err(|e| io_err("journal.open_dir", e))?;
+    replay_pinned(&dir, from_seq)
+}
+
+pub fn replay_pinned(directory: &OwnedDirectory, from_seq: u64) -> EonResult<Vec<Frame>> {
+    let dir = directory.path();
     let segments = list_segments(dir)?;
     let mut frames = Vec::new();
     let start = segments.partition_point(|(first_seq, _)| *first_seq <= from_seq).saturating_sub(1);
@@ -271,7 +272,7 @@ pub fn replay_from(dir: impl AsRef<Path>, from_seq: u64) -> EonResult<Vec<Frame>
         if *first_seq != expected {
             return Err(EonError::InternalError(format!("expected segment {expected}, found {first_seq}")));
         }
-        let bytes = fs::read(path).map_err(|e| io_err("journal.read_segment", e))?;
+        let bytes = read_regular(path).map_err(|e| io_err("journal.read_segment", e))?;
         let (mut offset, mut seq) = (0usize, *first_seq);
         if from_seq > *first_seq
             && let Some((start, entry_seq)) = indexed_start(dir, *first_seq, from_seq, &bytes)
@@ -379,12 +380,15 @@ fn is_unacknowledged_tail(rest: &[u8]) -> bool {
 /// Explicit operator repair: truncates the newest segment to its last valid frame, whatever the cause.
 /// Returns the number of bytes removed. Use only after the refusal reason has been reviewed.
 pub fn repair_torn_tail(dir: impl AsRef<Path>) -> EonResult<u64> {
-    let dir = dir.as_ref();
+    let held = OwnedDirectory::open(dir.as_ref(), false).map_err(|e| io_err("journal.open_dir", e))?;
+    let dir = held.path();
     let _writer_lock = lock_writer(dir)?;
     let Some((first_seq, path)) = list_segments(dir)?.pop() else {
         return Ok(0);
     };
-    let bytes = fs::read(&path).map_err(|e| io_err("journal.read_segment", e))?;
+    let mut file = open_regular(&path, OpenOptions::new().read(true).write(true))
+        .map_err(|e| io_err("journal.open_segment", e))?;
+    let bytes = read_fd(&mut file).map_err(|e| io_err("journal.read_segment", e))?;
     let mut offset = 0;
     let mut expected = first_seq;
     while let Some((frame, used)) = decode_at(&bytes[offset..]) {
@@ -396,10 +400,6 @@ pub fn repair_torn_tail(dir: impl AsRef<Path>) -> EonResult<u64> {
     }
     let removed = (bytes.len() - offset) as u64;
     if removed > 0 {
-        let file = OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .map_err(|e| io_err("journal.open_segment", e))?;
         file.set_len(offset as u64)
             .map_err(|e| io_err("journal.truncate_tail", e))?;
         file.sync_all().map_err(|e| io_err("journal.sync_truncate", e))?;
@@ -465,13 +465,32 @@ fn segment_path(dir: &Path, first_seq: u64) -> PathBuf {
     dir.join(format!("{SEGMENT_PREFIX}{first_seq:020}{SEGMENT_SUFFIX}"))
 }
 
+fn read_fd(file: &mut File) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn read_regular(path: &Path) -> io::Result<Vec<u8>> {
+    read_fd(&mut open_regular(path, OpenOptions::new().read(true))?)
+}
+
 // Keep the lock on a stable inode across segment rolls. Never unlink the lock file:
 // the OS releases the lock on close (including process death).
-fn lock_writer(dir: &Path) -> EonResult<File> {
-    let lock = OpenOptions::new().create(true).truncate(false).read(true).write(true)
-        .open(dir.join(".writer.lock")).map_err(|e| io_err("journal.open_lock", e))?;
+struct WriterLock(File);
+
+impl Drop for WriterLock {
+    fn drop(&mut self) {
+        // A concurrent fork/exec can briefly retain this open file description.
+        // Do not leave a finished writer's lock held by that unrelated child.
+        let _ = self.0.unlock();
+    }
+}
+
+fn lock_writer(dir: &Path) -> EonResult<WriterLock> {
+    let lock = open_or_create(&dir.join(".writer.lock")).map_err(|e| io_err("journal.open_lock", e))?;
     lock.try_lock().map_err(|e| io_err("journal.lock_writer", e.into()))?;
-    Ok(lock)
+    Ok(WriterLock(lock))
 }
 
 fn sequence_exhausted() -> EonError {
@@ -479,8 +498,9 @@ fn sequence_exhausted() -> EonError {
 }
 
 fn create_segment(dir: &Path, first_seq: u64) -> EonResult<File> {
-    let file = OpenOptions::new()
+    let file = private_options()
         .create_new(true)
+        .read(true)
         .append(true)
         .open(segment_path(dir, first_seq))
         .map_err(|e| io_err("journal.create_segment", e))?;

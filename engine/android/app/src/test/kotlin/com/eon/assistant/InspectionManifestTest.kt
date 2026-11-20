@@ -21,12 +21,13 @@ class InspectionManifestTest {
     private fun Element.attr(name: String) = getAttributeNS(android, name)
 
     @Test
-    fun noCaptureOrOverlayPermissionAndOnlyOneSystemGuardedService() {
+    fun noCaptureOrOverlayPermissionAndOnlySystemGuardedServices() {
         val manifest = root("AndroidManifest.xml")
         assertEquals(listOf("android.permission.HIDE_OVERLAY_WINDOWS"),
             manifest.elements("uses-permission").map { it.attr("name") })
-        val service = manifest.elements("service").single()
-        assertEquals(".FocusedControlService", service.attr("name"))
+        val services = manifest.elements("service").associateBy { it.attr("name") }
+        assertEquals(setOf(".FocusedControlService", ".EonVoiceInteractionService", ".EonVoiceSessionService"), services.keys)
+        val service = services.getValue(".FocusedControlService")
         assertEquals("android.permission.BIND_ACCESSIBILITY_SERVICE", service.attr("permission"))
         assertEquals("@bool/focused_control_supported", service.attr("enabled"))
         assertEquals("@xml/focused_control_service", service.elements("meta-data").single().attr("resource"))
@@ -35,6 +36,34 @@ class InspectionManifestTest {
         assertEquals("true", result.attr("noHistory"))
         assertEquals("true", result.attr("excludeFromRecents"))
         assertTrue(manifest.elements("receiver").isEmpty())
+    }
+
+    @Test
+    fun voiceBindingRequiresSystemIdentityAndDoesNotAdvertiseOtherTriggers() {
+        val services = root("AndroidManifest.xml").elements("service").associateBy { it.attr("name") }
+        val voice = services.getValue(".EonVoiceInteractionService")
+        val session = services.getValue(".EonVoiceSessionService")
+        for (endpoint in listOf(voice, session)) {
+            assertEquals("android.permission.BIND_VOICE_INTERACTION", endpoint.attr("permission"))
+            assertEquals("@bool/voice_hud_supported", endpoint.attr("enabled"))
+        }
+        assertEquals("android.service.voice.VoiceInteractionService", voice.elements("action").single().attr("name"))
+        assertTrue(session.elements("intent-filter").isEmpty())
+        val meta = voice.elements("meta-data").single()
+        assertEquals("android.voice_interaction", meta.attr("name"))
+        assertEquals("@xml/voice_interaction", meta.attr("resource"))
+        val config = root("res/xml/voice_interaction.xml")
+        assertEquals("com.eon.assistant" + session.attr("name"), config.attr("sessionService"))
+        assertTrue(config.attr("recognitionService").isNotBlank())
+        assertEquals("true", config.attr("supportsAssist"))
+        assertEquals("false", config.attr("supportsLocalInteraction"))
+        assertEquals("false", config.attr("supportsLaunchVoiceAssistFromKeyguard"))
+        assertFalse(config.hasAttributeNS(android, "hotwordDetectionService"))
+        assertFalse(config.hasAttributeNS(android, "visualQueryDetectionService"))
+        for ((dir, expected) in listOf("values" to "false", "values-v31" to "true")) {
+            val enabled = root("res/$dir/voice_hud.xml").elements("bool").single { it.getAttribute("name") == "voice_hud_supported" }
+            assertEquals(expected, enabled.textContent.trim())
+        }
     }
 
     @Test

@@ -7,6 +7,18 @@
 
 use std::collections::BTreeMap;
 
+mod appraisal;
+pub use appraisal::{
+    Provenance, ReferenceKind, TaskDiagnostic, UntrustedNote, WorkingEntry, WorkingForm, WorkingLedger,
+};
+
+#[cfg(feature = "sqlite-memory")]
+mod graph;
+#[cfg(feature = "sqlite-memory")]
+mod hybrid;
+#[cfg(feature = "sqlite-memory")]
+pub use hybrid::{AppraisalMemory, Embedding, EmbeddingSpace, RecallHit};
+
 pub const RRF_K: f64 = 60.0;
 
 /// Fuses ranked lists. `rankings[i]` is ordered best first. Ties break on the id for stable output.

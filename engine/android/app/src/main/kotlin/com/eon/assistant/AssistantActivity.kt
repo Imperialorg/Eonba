@@ -74,6 +74,9 @@ class AssistantActivity : Activity() {
         }
         column.addView(roleStatus)
         column.addView(requestRole)
+        if (Build.VERSION.SDK_INT >= 31) {
+            column.addView(TextView(this).apply { setText(R.string.voice_hud_help) })
+        }
         column.addView(Button(this).apply {
             text = "Manage default apps in Settings"
             setOnClickListener { openSettings(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS) }

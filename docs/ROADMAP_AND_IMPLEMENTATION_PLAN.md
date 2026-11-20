@@ -85,25 +85,25 @@
   - **Requirements**: Immutable Rust data models with Serde support. Topological acyclic DAG validation in `Workflow` constructor (Kahn's algorithm).
   - **Verification**: `cargo test --locked -p eon-kernel --test dag_validation` checks construction and deserialization, including missing dependencies, foreign workflow IDs and a cycle disconnected from a valid root. A validated definition projects into the existing execution graph without changing its task IDs or edges.
 
-- [ ] **Task 3.2: Resource-Aware Task Scheduler with Epoch Leases**
+- [x] **Task 3.2: Resource-Aware Task Scheduler with Epoch Leases**
   - **Crate**: `eon-kernel`
   - **Files**: `src/scheduler.rs`, `src/epoch.rs`
   - **Requirements**: Analyzes DAG task dependencies; dispatches tasks with verified epoch tokens and resource leases.
   - **Unit Tests**: `cargo test -p eon-kernel scheduler_tests` testing parallel multi-branch execution and dependency gating.
 
-- [ ] **Task 3.3: Deterministic Task Dispatcher & Saga Reconciler**
+- [x] **Task 3.3: Deterministic Task Dispatcher & Saga Reconciler**
   - **Crate**: `eon-kernel`
   - **Files**: `src/dispatcher.rs`, `src/saga.rs`, `src/engine.rs`
   - **Requirements**: Coordinates task dispatch. Emits `EPOCH_INVALIDATED` interrupts on user countermands, executing reverse-order compensating rollbacks.
   - **Unit Tests**: `cargo test -p eon-kernel saga_compensation_tests`.
 
-- [ ] **Task 3.4: Crash Recovery Reconciler (`LocalExecutionRecoveryWorker`)**
+- [x] **Task 3.4: Crash Recovery Reconciler (`LocalExecutionRecoveryWorker`)**
   - **Crate**: `eon-kernel`
   - **Files**: `src/recovery.rs`
   - **Requirements**: Scans event journal on boot. Identifies interrupted tasks. Releases stale leases. Re-queues idempotent tasks or transitions to `UncertainFailure` with safe rollback.
   - **Unit Tests**: `cargo test -p eon-kernel recovery_tests` simulating mid-execution termination and verifying reconciliation.
 
-- [ ] **Task 3.5: Dynamic DAG Expansion (`ExpandableTaskNode`)**
+- [x] **Task 3.5: Dynamic DAG Expansion (`ExpandableTaskNode`)**
   - **Crate**: `eon-kernel`
   - **Files**: `src/model/continuation.rs`, `src/dynamic_dag.rs`
   - **Requirements**: Replaces static upfront DAGs with Dynamic Hierarchical DAGs. Implements `TaskType::CognitiveContinuation` checkpoints that take discovery outputs (`workspace.read`, `dev.lsp`) and call `Workflow::splice_subgraph` to dynamically splice mutation tasks (`workspace.patch`, `dev.test`) at runtime. Integrates mid-task context auto-compaction.
@@ -118,6 +118,7 @@
   - **Files**: `src/capability.rs`, `src/registry.rs`, `src/sandbox.rs`, `src/taint.rs`
   - **Requirements**: Dynamic capability registration, schema verification, bounded memory output wrappers, execution timeouts. Information Flow Control (IFC) tagging `CognitiveTaint` (`TrustedOperator` vs `UntrustedExternal`) and Invariant 8 privilege escalation enforcement.
   - **Unit Tests**: `cargo test -p eon-capability registry_tests`, `taint_enforcement_tests`.
+  - **Verified subset**: Local import-free Wasm calls require an approved descriptor and module digest. The registry checks JSON, taint, fuel, guest memory, and output bounds. These are not host compilation deadlines or guarantees for native processes.
 
 - [ ] **Task 4.2: Local Workspace, Process & Persistent PTY Multiplexer Providers**
   - **Crate**: `eon-capability`
@@ -125,7 +126,7 @@
   - **Requirements**: Range reads, atomic temp-file writes, SHA-256 digest validation, pre-write journal snapshots. Persistent bidirectional PTY session multiplexer (`portable-pty`) exposing `process.pty_open`, `process.pty_write`, `process.pty_read_ring`, and `process.pty_signal` with in-memory 10,000-line circular ring buffer and 300s idle watchdog.
   - **Unit Tests**: `cargo test -p eon-capability workspace_tests`, `process_tests`, `pty_tests`.
 
-- [ ] **Task 4.3: Network & Web Research Providers**
+- [x] **Task 4.3: Network & Web Research Providers**
   - **Crate**: `eon-capability`
   - **Files**: `src/providers/http.rs`, `src/providers/download.rs`, `src/providers/scraper.rs`
   - **Requirements**: Bounded HTTP downloads, readability text extraction, zero external cloud model dependence.
@@ -193,7 +194,7 @@
   - **Requirements**: Translates natural language intent into verified `Workflow` DAGs. Spawns CoW shadow worktrees for ambiguous goals with attention-gated 5-second NACK confirmation.
   - **Unit Tests**: `cargo test -p eon-cognition compiler_tests`.
 
-- [ ] **Task 6.4: Ciel Persona & Verbal Output Formatter**
+- [x] **Task 6.4: Ciel Persona & Verbal Output Formatter**
   - **Crate**: `eon-cognition`
   - **Files**: `src/persona.rs`, `src/prompts.rs`
   - **Requirements**: Strict enforcement of Ciel voice conventions (`Report:`, `Affirmative.`, `Notice:`, `Negative.`), zero pleasantries/fluff.
@@ -252,7 +253,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Requirements**: Dynamically streams speech tokens from mobile edge to workstation compute node, streaming verified results back to edge audio driver. Seamless offline fallback.
   - **Unit Tests**: `cargo test -p eon-mesh split_inference_tests`.
 
-- [ ] **Task 8.3: CRDT State Synchronizer**
+- [x] **Task 8.3: CRDT State Synchronizer**
   - **Crate**: `eon-mesh`
   - **Files**: `src/crdt/sync.rs`, `src/crdt/ledger_crdt.rs`, `src/crdt/graph_crdt.rs`
   - **Requirements**: Conflict-free replication of working context and knowledge graph (via Loro) across paired devices without central database locks.
@@ -274,8 +275,8 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Requirements**: Exposes kernel primitives, test audio injection, and task execution endpoints to Kotlin and Swift without manual JNI.
   - **Unit Tests**: `cargo test -p eon-uniffi codegen_tests`.
 
-- [ ] **Task 9.2: Android Gradle Workspace & NDK Integration**
-  - **Directory**: `clients/android/`
+- [x] **Task 9.2: Android Gradle Workspace & NDK Integration**
+  - **Directory**: `engine/android/`
   - **Files**: `settings.gradle.kts`, `build.gradle.kts`, `app/build.gradle.kts`
   - **Requirements**: Cargo-ndk configuration bundling `libeon_uniffi.so` for `arm64-v8a`, `armeabi-v7a`, `x86_64`.
   - **Acceptance Criteria**: `./gradlew assembleDebug` compiles and packages native Rust binaries into APK.
@@ -312,7 +313,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Requirements**: Automated end-to-end benchmark measuring audio input to speaker output. Asserts P50 < 170ms, P99 < 280ms.
   - **Measurement**: Use `scripts/measure_ttfa.py` on synchronized input and physical speaker recordings as described in Manual 06 §3.3. Generated PCM fixtures test the analyzer, not a device's latency.
 
-- [ ] **Task 10.3: Autonomous Cyber Defense & Patch Verification Test**
+- [x] **Task 10.3: Autonomous Cyber Defense & Patch Verification Test**
   - **Directory**: `tests/cyber-security-tests/`
   - **Requirements**: Injects an insecure code pattern; asserts EON detects taint, synthesizes constant-time patch, and passes unit test suite with zero user intervention.
 
@@ -320,7 +321,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Directory**: `tests/mesh-network-tests/`
   - **Requirements**: Verifies peer-to-peer offloading between simulated edge phone and workstation; asserts graceful offline fallback upon simulated network partition.
 
-- [ ] **Task 10.5: Full Process Crash Recovery & Reconciliation Test**
+- [x] **Task 10.5: Full Process Crash Recovery & Reconciliation Test**
   - **Directory**: `tests/crash-recovery-tests/`
   - **Requirements**: Force-kills engine at Task 4 of 8. Reboots engine. Verifies state reconciliation, lease cleanup, and safe continuation.
 

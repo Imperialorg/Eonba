@@ -17,6 +17,15 @@
         <activity android:name=".InspectionResultActivity" android:exported="false"
             android:excludeFromRecents="true" android:noHistory="true"
             android:taskAffinity="com.eon.assistant.inspection" />
+        <service android:name=".EonVoiceInteractionService" android:exported="true"
+            android:enabled="@bool/voice_hud_supported" android:permission="android.permission.BIND_VOICE_INTERACTION">
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+            <meta-data android:name="android.voice_interaction" android:resource="@xml/voice_interaction" />
+        </service>
+        <service android:name=".EonVoiceSessionService" android:exported="true"
+            android:enabled="@bool/voice_hud_supported" android:permission="android.permission.BIND_VOICE_INTERACTION" />
         <service android:name=".FocusedControlService" android:exported="true"
             android:enabled="@bool/focused_control_supported" android:label="@string/inspector_name"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">

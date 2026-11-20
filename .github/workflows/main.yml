@@ -21,7 +21,9 @@ jobs:
         with:
           persist-credentials: false
       - run: cargo clippy --locked -p eon-foundation --all-targets -- -D warnings
-      - run: cargo test --locked -p eon-foundation -p eon-primitives -p eon-cli -p eon-daemon --features eon-primitives/serde
+      - run: |
+          umask 077
+          TMPDIR=/tmp cargo test --locked -p eon-foundation -p eon-primitives -p eon-cli -p eon-daemon --features eon-primitives/serde
       - run: python3 -m unittest discover -s "$GITHUB_WORKSPACE/scripts"
 
   kernel-and-advisories:
@@ -34,13 +36,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: cargo test --locked -p eon-cyber --no-default-features --lib sbom
-      - run: cargo test --locked -p eon-kernel
+      - run: cargo test --locked -p eon-cyber --no-default-features
+      - run: |
+          umask 077
+          TMPDIR=/tmp cargo test --locked -p eon-kernel
       - run: cargo test --locked -p eon-vision
 
-  wasm-containment:
+  portable-voice-and-cognition:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: engine/core-rs
@@ -48,8 +52,54 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: cargo test --locked -p eon-capability --lib wasm_tool
-      - run: cargo test --locked -p eon-capability --test wasm_containment
+      # This exercises the portable paths, not model inference or device drivers.
+      - run: cargo test --locked --no-default-features -p eon-voice -p eon-cognition -p eon-uniffi --features eon-cognition/sqlite-memory,eon-cognition/objective-compiler
+
+  mesh-loopback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    defaults:
+      run:
+        working-directory: engine/core-rs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: cargo test --locked -p eon-mesh
+
+  wasm-containment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    defaults:
+      run:
+        working-directory: engine/core-rs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: cargo test --locked -p eon-capability
+
+  android-debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: engine/android
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Android cross-build prerequisites
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;37.0.0" "ndk;27.3.13750724"
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+          cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Build signed debug APK, compare ABI bindings and run host tests
+        run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.3.13750724" ./gradlew :core-bindings:verifyTargetBindings :app:test
 
   lean-backtest:
     runs-on: ubuntu-latest

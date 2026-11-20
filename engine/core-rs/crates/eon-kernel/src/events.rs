@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use eon_primitives::{EonResult, TaskId};
+use eon_primitives::{EonResult, TaskId, WorkflowId};
 
 use crate::fsm::{TaskEvent, TaskState, next_state};
 use crate::workflow::{self, Task, Workflow};
@@ -17,6 +17,10 @@ fn fsm_state(state: workflow::TaskState) -> TaskState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KernelEvent {
+    /// Binds task identities and retry policy without persisting capability parameters.
+    WorkflowSubmitted { workflow: WorkflowId, epoch: u64, digest: [u8; 32], tasks: BTreeMap<TaskId, bool> },
+    /// Permanently withdraws the authority of this workflow at this epoch.
+    EpochInvalidated { workflow: WorkflowId, epoch: u64 },
     TaskTransition { task: TaskId, from: TaskState, to: TaskState },
     SubgraphSpliced { parent: TaskId, added: Vec<TaskId> },
     /// A cognitive epoch committed these writes. Keys and values are already scrubbed when recorded.
