@@ -4,7 +4,10 @@ use std::io::{self, IsTerminal};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use eon_primitives::{EonError, EonResult};
 use ratatui::backend::CrosstermBackend;
@@ -18,6 +21,7 @@ use crate::{JournalStatus, read_journal};
 mod meter;
 #[cfg(test)]
 mod terminal_tests;
+mod vision;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Page {
@@ -41,7 +45,7 @@ const COMMANDS: &[(Page, &str, &str)] = &[
     ),
     (Page::Cyber, "/cyber", "Journal integrity (read-only)"),
     (Page::Mesh, "/mesh", "Mesh telemetry availability"),
-    (Page::Vision, "/vision", "Vision telemetry availability"),
+    (Page::Vision, "/vision", "Selected local image (one still)"),
     (Page::Audio, "/audio", "Local microphone level (opt-in)"),
     (Page::Menu, "/menu", "Command menu"),
 ];
@@ -93,6 +97,7 @@ pub struct WatchState {
     prompt: Option<Prompt>,
     feedback: Option<String>,
     meter: meter::Meter,
+    image: vision::Selection,
 }
 
 impl WatchState {
@@ -117,6 +122,9 @@ impl WatchState {
     }
 
     fn open(&mut self, page: Page) {
+        if self.page == Page::Vision && page != Page::Vision {
+            self.image.release();
+        }
         if page != Page::Audio {
             self.meter.stop();
         }
@@ -132,11 +140,19 @@ impl WatchState {
         self.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
     }
 
+    fn handle_event(&mut self, event: Event) {
+        // Never reinterpret a paste (even one containing an F2 escape sequence) as keys.
+        if let Event::Key(key) = event {
+            self.handle_key(key);
+        }
+    }
+
     fn handle_key(&mut self, key: KeyEvent) {
         if key.kind != KeyEventKind::Press {
             return;
         }
         if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+            self.image.release();
             self.meter.stop();
             self.quit = true;
             return;
@@ -184,11 +200,15 @@ impl WatchState {
         } else {
             match key.code {
                 KeyCode::Char('q' | 'Q') => {
+                    self.image.release();
                     self.meter.stop();
                     self.quit = true;
                 }
-                KeyCode::Char('m') if self.page == Page::Audio => self.meter.toggle(),
+                KeyCode::F(2) if self.page == Page::Audio && key.modifiers.is_empty() => {
+                    self.meter.toggle();
+                }
                 KeyCode::Char('/') => {
+                    self.meter.stop();
                     self.prompt = Some(Prompt {
                         text: "/".into(),
                         prefix: None,
@@ -224,7 +244,7 @@ impl WatchState {
         }
     }
 
-    fn draw(&self, frame: &mut Frame) {
+    fn draw(&self, frame: &mut Frame, painter: Option<&mut vision::Painter>) {
         let [body, dock, message, input] = Layout::vertical([
             Constraint::Min(0),
             Constraint::Length(1),
@@ -267,7 +287,7 @@ impl WatchState {
                     .join("\n")
             }),
             Page::Capabilities => Some(format!(
-                "Read-only local journal: {}\n/status: frame metadata\n/cyber: replay checksums and sequence\n/audio: local opt-in input meter\nNo peer or video feed is attached to this client.",
+                "Read-only local journal: {}\n/status: frame metadata\n/cyber: replay checksums and sequence\n/audio: local opt-in input meter\n/vision: one explicitly selected still; no live capture\nNo peer or video feed is attached to this client.",
                 if self.error.is_some() {
                     "read failed"
                 } else if self.status.is_some() {
@@ -292,7 +312,25 @@ impl WatchState {
                 "No replay result yet.".into()
             }),
             Page::Mesh => Some("No mesh peer feed is attached. Peer count is unknown.".into()),
-            Page::Vision => Some("No vision frame source is attached. Nothing to preview.".into()),
+            Page::Vision => {
+                let border = block();
+                let inner = border.inner(body);
+                frame.render_widget(border, body);
+                if let vision::Selection::Frame(image) = &self.image {
+                    let [label, canvas] =
+                        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
+                    frame.render_widget(Paragraph::new(self.image.status()), label);
+                    if let Some(painter) = painter {
+                        painter.draw(image, canvas, frame);
+                    }
+                } else {
+                    frame.render_widget(
+                        Paragraph::new(self.image.status()).wrap(Wrap { trim: false }),
+                        inner,
+                    );
+                }
+                None
+            }
             Page::Audio => {
                 let border = block();
                 let inner = border.inner(body);
@@ -304,7 +342,9 @@ impl WatchState {
                     status,
                 );
                 frame.render_widget(
-                    Sparkline::default().data(self.meter.peaks()).max(100),
+                    Sparkline::default()
+                        .data(self.meter.visible_peaks(graph.width))
+                        .max(100),
                     graph,
                 );
                 None
@@ -345,7 +385,8 @@ impl WatchState {
 }
 
 pub fn render_watch_snapshot(state: &WatchState, width: u16, height: u16) -> EonResult<String> {
-    crate::snapshot(width, height, |frame| state.draw(frame))
+    // Text snapshots never export protocol payloads or private pixels.
+    crate::snapshot(width, height, |frame| state.draw(frame, None))
 }
 
 struct TerminalGuard;
@@ -353,12 +394,18 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(io::stdout(), DisableBracketedPaste);
         let _ = crossterm::execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
     }
 }
 
 /// Polls the journal on a timer independent of typing; keys only operate the local UI.
 pub fn run_watch(dir: &Path, interval: Duration) -> EonResult<()> {
+    run_watch_with_image(dir, interval, None)
+}
+
+/// Optionally load one operator-selected PNG or JPEG. The path is never retained.
+pub fn run_watch_with_image(dir: &Path, interval: Duration, image: Option<&Path>) -> EonResult<()> {
     let io_err = |context: &str, e: io::Error| EonError::OperationFailed {
         operation: format!("watch.{context}"),
         reason: e.to_string(),
@@ -370,27 +417,46 @@ pub fn run_watch(dir: &Path, interval: Duration) -> EonResult<()> {
         ));
     }
 
+    let selection = image
+        .map(vision::Selection::load)
+        .transpose()
+        .map_err(|reason| EonError::ValidationError(reason.into()))?
+        .unwrap_or_default();
     crossterm::terminal::enable_raw_mode().map_err(|e| io_err("raw_mode", e))?;
     let _guard = TerminalGuard;
     crossterm::execute!(io::stdout(), EnterAlternateScreen)
         .map_err(|e| io_err("alternate_screen", e))?;
+    crossterm::execute!(io::stdout(), EnableBracketedPaste).map_err(|e| io_err("paste", e))?;
     let mut terminal =
         Terminal::new(CrosstermBackend::new(io::stdout())).map_err(|e| io_err("terminal", e))?;
-    let mut state = WatchState::default();
+    let mut state = WatchState {
+        image: selection,
+        ..WatchState::default()
+    };
+    let mut painter = vision::Painter::new();
     state.refresh(dir);
     let mut refreshed = Instant::now();
     loop {
         terminal
-            .draw(|frame| state.draw(frame))
+            .draw(|frame| state.draw(frame, Some(&mut painter)))
             .map_err(|e| io_err("draw", e))?;
+        let mut resized = false;
         if event::poll(interval.saturating_sub(refreshed.elapsed()))
             .map_err(|e| io_err("poll", e))?
-            && let Event::Key(key) = event::read().map_err(|e| io_err("read", e))?
         {
-            state.handle_key(key);
+            let event = event::read().map_err(|e| io_err("read", e))?;
+            resized = matches!(event, Event::Resize(..));
+            state.handle_event(event);
         }
         if state.quit {
             return Ok(());
+        }
+        if (state.page != Page::Vision || resized)
+            && painter
+                .clear(io::stdout())
+                .map_err(|e| io_err("image", e))?
+        {
+            terminal.clear().map_err(|e| io_err("clear", e))?;
         }
         if refreshed.elapsed() >= interval {
             state.meter.poll(Instant::now());

@@ -14,7 +14,7 @@ use ratatui::layout::Rect;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 mod watch;
-pub use watch::{WatchState, render_watch_snapshot, run_watch};
+pub use watch::{WatchState, render_watch_snapshot, run_watch, run_watch_with_image};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalStatus {

@@ -319,6 +319,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Requirements**: Interactive console interface with welcome panel, status dock, live slash commands (`/menu`, `/capabilities`, `/cyber`, `/mesh`, `/vision`), Tab completion, and live audio visualizer. Terminal graphics via `ratatui-image` (Kitty/Sixel). Graphical canvas for live AST diffs, reverse engineering CFGs, and video scrubbing (`wgpu` / Compose).
   - **Unit Tests**: `cargo test -p eon-cli terminal_tests`.
   - **Verified subset**: Build `eon-cli` with `--features audio-input`, run `eon watch <journal-dir>`, open `/audio` and press F2. Pasted text cannot start capture. F2, `/`, leaving the view or quitting stops it. The meter keeps at most 48 peak readings and no PCM. A dedicated Linux null-sink monitor delivered a 50% peak; its recording stream disappeared on `/` before the process exited. This test did not use a physical microphone.
+  - **Terminal graphics**: On Unix, `eon watch <journal-dir> --image <file>` accepts one PNG or JPEG. `/vision` displays that still, not a screen capture. Leaving releases it; re-entry does not reopen the file. Kitty and VT340 xterm both displayed the selected colors after the original file was unlinked and cleared them on exit. The path is visible to shell history and OS process inspection.
 
 - [ ] **Task 10.2: Sub-170ms Time-To-First-Audio (TTFA) Benchmark**
   - **Directory**: `tests/latency-benchmarks/`
