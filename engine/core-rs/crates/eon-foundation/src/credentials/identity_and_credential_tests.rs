@@ -18,10 +18,10 @@ impl Store for FixtureStore {
         Ok(())
     }
 
-    fn load(&self, slot: &Slot) -> EonResult<EphemeralSecret> {
+    fn bind(&self, slot: &Slot, stdin: ChildStdin) -> EonResult<()> {
         self.loads.fetch_add(1, Ordering::Relaxed);
         let secret = self.slots.get(slot).ok_or_else(unavailable)?;
-        Ok(EphemeralSecret::new(secret.0.clone()))
+        write_to_stdin(stdin, &secret.0)
     }
 
     fn remove(&mut self, slot: &Slot) -> EonResult<()> {
@@ -111,24 +111,33 @@ fn opaque_handle_and_argv_checks_never_echo_rejected_input() {
     assert!(!format!("{err:?} {err}").contains("private-alias"));
 }
 
+#[cfg(any(unix, windows))]
+fn child_stdin(writer: std::io::PipeWriter) -> ChildStdin {
+    #[cfg(unix)]
+    use std::os::fd::OwnedFd as OwnedPipe;
+    #[cfg(windows)]
+    use std::os::windows::io::OwnedHandle as OwnedPipe;
+    OwnedPipe::from(writer).into()
+}
+
 // Check the public pipe operation (including EOF), comparing only synthetic fixtures in memory.
-#[cfg(unix)]
-fn check_binding(
+#[cfg(any(unix, windows))]
+pub(super) fn check_binding(
     broker: &CredentialBroker,
     caller: &Identity,
     handle: &CredentialHandle,
     expected: &[u8],
 ) -> EonResult<()> {
-    use std::{io::Read, os::fd::OwnedFd};
+    use std::io::Read;
     let (mut reader, writer) = std::io::pipe().unwrap();
-    let result = broker.bind_to_stdin(caller, handle, OwnedFd::from(writer).into());
+    let result = broker.bind_to_stdin(caller, handle, child_stdin(writer));
     let mut actual = zeroize::Zeroizing::new(Vec::new());
     reader.read_to_end(&mut actual).unwrap();
     assert!(actual.as_slice() == expected);
     result
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(super) fn exercise_owner_contract(authority: &IdentityAuthority, mut broker: CredentialBroker) {
     let bind = P::USE_CREDENTIALS | P::EXECUTE_PROCESS;
     let grants = P::MANAGE_CREDENTIALS | P::SPAWN_SUBAGENT | bind;
@@ -161,14 +170,14 @@ pub(super) fn exercise_owner_contract(authority: &IdentityAuthority, mut broker:
     check_binding(&broker, &other, &handle, b"paper-two").unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn owner_scoped_put_rotate_bind_remove() {
     let authority = IdentityAuthority::new();
     exercise_owner_contract(&authority, fixture_broker(&authority).0);
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn no_resolution_before_authorized_use() {
     let authority = IdentityAuthority::new();
@@ -200,7 +209,7 @@ fn no_resolution_before_authorized_use() {
     assert_eq!(loads.load(Ordering::Relaxed), 1);
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn closed_pipe_error_contains_no_alias_or_material() {
     let authority = IdentityAuthority::new();
@@ -214,7 +223,7 @@ fn closed_pipe_error_contains_no_alias_or_material() {
     let (reader, writer) = std::io::pipe().unwrap();
     drop(reader);
     let err = broker
-        .bind_to_stdin(&owner, &handle, std::os::fd::OwnedFd::from(writer).into())
+        .bind_to_stdin(&owner, &handle, child_stdin(writer))
         .unwrap_err();
     assert_eq!(err, failed("cannot bind to child stdin"));
     check_binding(&broker, &owner, &handle, fixture).unwrap();

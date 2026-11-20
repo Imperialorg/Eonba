@@ -22,13 +22,20 @@ use crate::permissions::Permissions;
 #[path = "credentials/linux.rs"]
 mod platform;
 
-#[cfg(not(all(
-    target_os = "linux",
-    target_pointer_width = "64",
-    any(
-        target_arch = "x86_64",
-        target_arch = "aarch64",
-        target_arch = "riscv64"
+#[cfg(windows)]
+#[path = "credentials/windows.rs"]
+mod platform;
+
+#[cfg(not(any(
+    windows,
+    all(
+        target_os = "linux",
+        target_pointer_width = "64",
+        any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            target_arch = "riscv64"
+        )
     )
 )))]
 mod platform {
@@ -87,11 +94,17 @@ impl EphemeralSecret {
 #[derive(PartialEq, Eq, Hash)]
 struct Slot(IdentityId, CredentialHandle);
 
-// Private: callers cannot inject a plaintext store or use its raw resolution interface.
+// Private: callers cannot inject a plaintext store. Even the store only binds to child stdin.
 trait Store: Send + Sync {
     fn put(&mut self, slot: Slot, secret: EphemeralSecret) -> EonResult<()>;
-    fn load(&self, slot: &Slot) -> EonResult<EphemeralSecret>;
+    fn bind(&self, slot: &Slot, stdin: ChildStdin) -> EonResult<()>;
     fn remove(&mut self, slot: &Slot) -> EonResult<()>;
+}
+
+fn write_to_stdin(mut stdin: ChildStdin, secret: &[u8]) -> EonResult<()> {
+    stdin
+        .write_all(secret)
+        .map_err(|_| failed("cannot bind to child stdin"))
 }
 
 fn unavailable() -> EonError {
@@ -156,17 +169,14 @@ impl CredentialBroker {
         &self,
         caller: &Identity,
         handle: &CredentialHandle,
-        mut stdin: ChildStdin,
+        stdin: ChildStdin,
     ) -> EonResult<()> {
         let slot = self.slot(
             caller,
             Permissions::USE_CREDENTIALS | Permissions::EXECUTE_PROCESS,
             handle,
         )?;
-        let secret = self.store.load(&slot)?;
-        stdin
-            .write_all(&secret.0)
-            .map_err(|_| failed("cannot bind to child stdin"))
+        self.store.bind(&slot, stdin)
     }
 
     /// Rejects any argv entry that names a secret; never echo a rejected argument.

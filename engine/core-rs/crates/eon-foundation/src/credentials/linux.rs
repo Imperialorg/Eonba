@@ -4,8 +4,9 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::ffi::{CString, c_long};
 use std::io;
+use std::process::ChildStdin;
 
-use super::{EphemeralSecret, Slot, Store, failed, unavailable};
+use super::{EphemeralSecret, Slot, Store, failed, unavailable, write_to_stdin};
 use eon_primitives::{EonResult, IdentityId};
 
 // Linux UAPI: asm/unistd_64.h on x86_64, asm-generic/unistd.h on aarch64/riscv64.
@@ -157,8 +158,9 @@ impl Store for LinuxKeyring {
         Ok(())
     }
 
-    fn load(&self, slot: &Slot) -> EonResult<EphemeralSecret> {
-        self.0.get(slot).ok_or_else(unavailable)?.load()
+    fn bind(&self, slot: &Slot, stdin: ChildStdin) -> EonResult<()> {
+        let secret = self.0.get(slot).ok_or_else(unavailable)?.load()?;
+        write_to_stdin(stdin, &secret.0)
     }
 
     fn remove(&mut self, slot: &Slot) -> EonResult<()> {
