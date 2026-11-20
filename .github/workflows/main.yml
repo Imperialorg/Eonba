@@ -31,6 +31,7 @@ jobs:
           cargo test --locked -p eon-foundation --lib "$case_name" -- --ignored --exact --color never | tee "$RUNNER_TEMP/keyring-result"
           grep -Fx "test $case_name ... ok" "$RUNNER_TEMP/keyring-result"
       - run: python3 -m unittest discover -s "$GITHUB_WORKSPACE/scripts"
+      - run: python3 -m unittest discover -s "$GITHUB_WORKSPACE/scripts/eval"
 
   kernel-and-advisories:
     runs-on: ubuntu-latest

@@ -214,6 +214,22 @@ Each baseline must have a subject diagnostic; for Python the original must also 
 
 Compilation and execution use fresh mode-0700 work areas under `engine/core-rs/target`, fixed argument vectors, bounded files/logs, CPU limits, 45-second child deadlines and a 15-minute suite deadline. No source path, compiler flags, command, debugger, network service or model is accepted from a submitter. This trusts the checkout and installed tools; it is **not** an untrusted-code sandbox or a general SWE-bench score. It does not extend the CPG or LSP dialect sets, exercise a DAP bridge, or modify historical kernel fixtures.
 
+### 3.7 Recorded speaker decisions in synthetic noise (task 10.6)
+
+With the native voice build and ONNX Runtime installed, provision `voice-test-sensevoice-en`, `voice-test-zipformer-0`, `silero-vad-v5` and `wespeaker-resnet34` from the model lock. Keep the digest-verified SenseVoice archive in the downloader cache: its Japanese, Korean and Chinese test recordings supply the background speech, not the enrolled or tested utterances.
+
+Run `python3 scripts/eval/noisy_duplex.py`. Each JSON line records one condition, both input WAV digests and the measured whole-clip input SNR. The harness keeps the clean enrollment half separate from the 3.576 s owner query. Each negative interval uses the same 6.625 s non-owner clip. For the mixtures, foreground and background have equal energy before playback echo is added. Synthetic babble overlaps three speech clips; synthetic traffic models passing engines and tire noise; synthetic TV alternates two filtered clips. These are not field recordings.
+
+| Condition | Non-owner embeddings rejected | Non-owner interruptions | Held-out owner interrupted |
+|---|---:|---:|---|
+| Clean control | 11 | 0 | At 800 ms |
+| Rumble control (0 dB) | 11 | 0 | At 1,310 ms |
+| Competing babble (0 dB) | 12 | 0 | No |
+| Street traffic (0 dB) | 11 | 0 | No |
+| TV dialogue (0 dB) | 12 | 0 | No |
+
+These are five runs, one per condition, not five population samples. The native test required a positive owner decision at the original 0.35 threshold. All three scene mixtures missed it, so the suite exited 1. Times count fixture audio up to the speaker decision; no first output sample or physical speaker latency was measured.
+
 ## 4. Master Phased Execution Playbook (Order of Implementation)
 
 Follow this dependency-ordered sequence. Do **not** skip ahead to higher-level crates until the lower-level crate compiles cleanly (`cargo clippy -- -D warnings`) and passes its gate tests:
