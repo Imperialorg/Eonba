@@ -159,17 +159,19 @@ Two **distinct** instrumentation gates are available after building the APK:
 
 * **Clean stock device:** On a **new disposable** `system-images;android-35;google_apis;x86_64`
   AVD, verify `adb -s "$SERIAL" emu avd name` matches the AVD you just created.
-  Run `python3 app/keystore_device_test.py --serial "$SERIAL" --demo-denied --stock-hud`.
-  Expect `PASS: issue`, `PASS: restart`, `demo=PASS-denied`, `voiceHud=PASS-stock`, and
+  Run `python3 app/keystore_device_test.py --serial "$SERIAL" --demo-denied --stock-hud --stock-assistant`.
+  Expect `PASS: issue`, `PASS: restart`, `demo=PASS-denied`, `voiceHud=PASS-stock`, `assistantActivity=PASS-picker-canceled`, and
   `nativeVault=PASS`. The HUD gate checks EON is not selected, reads and cancels the real
   built-in tone, and renders measured levels in an **unattached** production view. It
-  does not invoke a voice session.
+  does not invoke a voice session. The separate role-picker check opens Android's picker
+  and cancels without selecting EON.
 * **Selected-role session:** On a separate disposable, unlocked API 34+ AVD, an operator
   must have installed the matching target APK and already chosen EON through Android's UI.
   No accessibility service is needed. Leave the test APK uninstalled and run
   `python3 app/keystore_device_test.py --preconfigured-hud-serial "$SERIAL"`. Follow its
-  prompt: invoke EON, expand, analyze, wait for completion, close, pause, and invoke again.
-  The observer must see a real completed graph, dismissal and a clean new card for
+  prompt: invoke EON, expand, analyze, wait for completion, tap Stop and clear, pause,
+  close the card, wait a second, and invoke again. The observer must see a real completed
+  graph, its cleared state, dismissal and a clean new card for
   `voiceHud=PASS-session`. It never injects gestures, changes roles or grants permissions.
 
 **Optional process CPU measurement:** In EON, check **Measure EON process CPU during the next profile check**, then tap **Check model profile**. The box clears after one use or when leaving the activity. `SelfProcessCpu.measure` brackets that synchronous action with two `android.os.Process.getElapsedCpuTime()` reads only when requested. The result is a delta in **CPU milliseconds across all threads of the current app process**, not action latency, CPU percentage, or time attributable solely to that code. Equal positive counters can yield a genuine 0 ms at the counter's resolution. Missing/nonpositive, decreasing or out-of-order samples and intervals exceeding 10 seconds are unavailable. Neither sample leaves the call stack as a resumable baseline, so a process restart or reboot cannot produce a delta against old data. No listener, permission, persistent record or network access is needed.

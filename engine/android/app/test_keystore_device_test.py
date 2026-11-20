@@ -2,9 +2,11 @@
 
 import contextlib
 import io
+from pathlib import Path
 import unittest
+from unittest.mock import patch
 
-from keystore_device_test import TARGET, TEST, check_packages, check_result, parse_args, require_stock_emulator
+from keystore_device_test import TARGET, TEST, check_packages, check_result, parse_args, require_stock_emulator, run
 
 
 class InstrumentationResults(unittest.TestCase):
@@ -33,6 +35,32 @@ class InstrumentationResults(unittest.TestCase):
 
 
 class DeviceModes(unittest.TestCase):
+    def test_operator_observer_has_time_for_all_eight_checkpoints(self):
+        calls = []
+
+        def response(cmd, **kwargs):
+            args = cmd[3:]
+            calls.append((args, kwargs["timeout"]))
+            if args[:2] == ["emu", "avd"]:
+                return "test\nOK\n"
+            if args[:2] == ["shell", "getprop"]:
+                return "35\n"
+            if args[:3] == ["shell", "pm", "list"]:
+                return f"package:android\npackage:{TARGET}\n"
+            if args[:3] == ["shell", "am", "instrument"]:
+                return "INSTRUMENTATION_RESULT: demo=PASS-allowed\nINSTRUMENTATION_CODE: -1\n"
+            self.assertIn(args[0], ("install", "uninstall"))
+            return "Success\n"
+
+        with (patch("keystore_device_test.subprocess.check_output", side_effect=response),
+              patch("keystore_device_test.require_preconfigured_apk"),
+              contextlib.redirect_stdout(io.StringIO())):
+            run(Path("/sdk"), "emulator-5554", Path("/test.apk"), preconfigured_allowed=True)
+        observation = [limit for args, limit in calls if args[:3] == ["shell", "am", "instrument"]]
+        self.assertEqual(len(observation), 1)
+        self.assertGreater(observation[0], 8 * 30)
+        self.assertTrue(all(limit == 120 for args, limit in calls if args[:3] != ["shell", "am", "instrument"]))
+
     def test_device_selection_rejects_physical_or_unverified_targets_before_install(self):
         def unexpected(*args):
             self.fail(f"unexpected adb command: {args}")

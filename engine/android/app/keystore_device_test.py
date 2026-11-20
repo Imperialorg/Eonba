@@ -102,12 +102,15 @@ def check_packages(inventory, preconfigured_allowed):
 
 def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, stock_assistant=False, preconfigured_allowed=False,
         preconfigured_hud=False):
-    def adb(*args):
+    def adb(*args, timeout=120):
         return subprocess.check_output([sdk / "platform-tools/adb", "-s", serial, *args],
-                                       text=True, stderr=subprocess.STDOUT, timeout=120)
+                                       text=True, stderr=subprocess.STDOUT, timeout=timeout)
 
     def instrument(component, key, expected, *args):
-        output = adb("shell", "am", "instrument", "-w", "-r", *args, f"{TEST}/{TARGET}.{component}")
+        # The operator observer allows up to 30 seconds for each of eight visible checkpoints.
+        timeout = 270 if component == "OperatorWindowAcceptance" else 120
+        output = adb("shell", "am", "instrument", "-w", "-r", *args, f"{TEST}/{TARGET}.{component}",
+                     timeout=timeout)
         check_result(output, key, expected)
         name = expected.removeprefix("PASS-") if key == "keystore" else f"{key}={expected}"
         print(f"PASS: {name}", flush=True)
