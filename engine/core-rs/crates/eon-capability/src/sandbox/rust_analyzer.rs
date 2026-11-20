@@ -21,6 +21,10 @@ use super::{EonResult, sandbox_err};
 const MAX_TASKS: u32 = 24;
 const LOADER: &str = "/lib64/ld-linux-x86-64.so.2";
 
+pub(crate) fn check_abi() -> io::Result<()> {
+    Ok(())
+}
+
 pub(super) fn executable_grant(
     path: &Path,
     program: &Path,
@@ -74,15 +78,8 @@ fn limit(resource: Resource, cap: u64) -> io::Result<()> {
 }
 
 pub(super) fn prepare(cmd: &mut Command, group: &Path) -> io::Result<()> {
-    if !cfg!(all(
-        target_os = "linux",
-        target_arch = "x86_64",
-        target_env = "gnu"
-    )) || !group.is_absolute()
-    {
-        return Err(io::Error::other(
-            "expected x86-64 glibc and absolute task cgroup",
-        ));
+    if !group.is_absolute() {
+        return Err(io::Error::other("expected absolute task cgroup"));
     }
     let dir = fs::openat2(
         fs::CWD,
@@ -129,14 +126,6 @@ pub(super) fn prepare(cmd: &mut Command, group: &Path) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(all(
-    target_pointer_width = "64",
-    any(
-        target_arch = "x86_64",
-        target_arch = "aarch64",
-        target_arch = "riscv64"
-    )
-))]
 pub(super) fn thread_filter(
     rules: &mut BTreeMap<i64, Vec<SeccompRule>>,
     arch: TargetArch,
@@ -182,7 +171,7 @@ pub(super) fn thread_filter(
     Ok(special)
 }
 
-#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::sandbox::{ConfinementPolicy, WorkerIo, confine_command};

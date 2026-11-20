@@ -16,7 +16,62 @@ use landlock::{
 };
 use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, TargetArch};
 
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_env = "gnu",
+    target_pointer_width = "64"
+))]
 mod rust_analyzer;
+
+#[cfg(not(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_env = "gnu",
+    target_pointer_width = "64"
+)))]
+mod rust_analyzer {
+    use super::*;
+
+    pub(crate) fn check_abi() -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "rust-analyzer requires x86-64 glibc Linux",
+        ))
+    }
+
+    pub(super) fn prepare(_: &mut Command, _: &Path) -> io::Result<()> {
+        check_abi()
+    }
+
+    pub(super) fn executable_grant(
+        _: &Path,
+        _: &Path,
+        _: &PathFd,
+        _: &std::fs::Metadata,
+    ) -> io::Result<bool> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    #[cfg(all(
+        target_pointer_width = "64",
+        any(
+            target_arch = "aarch64",
+            target_arch = "riscv64",
+            target_arch = "x86_64"
+        )
+    ))]
+    pub(super) fn thread_filter(
+        _: &mut BTreeMap<i64, Vec<seccompiler::SeccompRule>>,
+        _: TargetArch,
+    ) -> EonResult<BpfProgram> {
+        Err(EonError::SecurityViolation(
+            "unsupported rust-analyzer worker ABI".into(),
+        ))
+    }
+}
+
+pub(crate) use rust_analyzer::check_abi as check_rust_analyzer_abi;
 
 /// Read/execute grants for a trusted worker. Socket access is not a supported
 /// launch mode: explicitly requesting `deny_network: false` fails admission.
@@ -109,7 +164,10 @@ fn worker_filters(io: WorkerIo<'_>) -> EonResult<Vec<BpfProgram>> {
         SYS_writev,
         SYS_close,
         SYS_openat,
+        // Do not guess missing bionic syscall numbers; leave them denied.
+        #[cfg(not(all(target_os = "android", not(target_arch = "x86_64"))))]
         SYS_fstat,
+        #[cfg(not(all(target_os = "android", not(target_arch = "x86_64"))))]
         SYS_newfstatat,
         SYS_statx,
         SYS_faccessat,
@@ -130,6 +188,7 @@ fn worker_filters(io: WorkerIo<'_>) -> EonResult<Vec<BpfProgram>> {
         SYS_set_tid_address,
         SYS_set_robust_list,
         SYS_futex,
+        #[cfg(not(target_os = "android"))]
         SYS_rseq,
         SYS_getpid,
         SYS_gettid,
@@ -247,13 +306,12 @@ pub(crate) fn confine_command(
             let denied = || io::Error::from_raw_os_error(libc::EPERM);
             // Preserve the spawn error pipe until exec. No ambient descriptor
             // survives a successful exec; an unsupported close_range aborts it.
-            if libc::syscall(
-                libc::SYS_close_range,
-                3u32,
-                u32::MAX,
-                libc::CLOSE_RANGE_CLOEXEC,
-            ) < 0
-            {
+            // Linux UAPI <linux/close_range.h>; bionic libc does not export the flag.
+            #[cfg(target_os = "android")]
+            const CLOEXEC: u32 = 1 << 2;
+            #[cfg(not(target_os = "android"))]
+            const CLOEXEC: u32 = libc::CLOSE_RANGE_CLOEXEC;
+            if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, CLOEXEC) < 0 {
                 return Err(io::Error::last_os_error());
             }
             let created = ruleset.take().ok_or_else(denied)?;

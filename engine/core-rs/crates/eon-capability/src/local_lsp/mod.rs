@@ -116,6 +116,9 @@ pub struct OperatorServer {
 
 impl OperatorServer {
     pub fn new(kind: ServerKind, executable: &Path, runtime: &[PathBuf], deadline: Duration) -> io::Result<Self> {
+        if kind == ServerKind::RustAnalyzer {
+            crate::sandbox::check_rust_analyzer_abi()?;
+        }
         if !executable.is_absolute() || runtime.len() > 24 || deadline.is_zero() || deadline > Duration::from_secs(30) {
             return Err(invalid("invalid server configuration"));
         }

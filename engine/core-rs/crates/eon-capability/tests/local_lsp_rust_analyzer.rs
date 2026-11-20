@@ -1,5 +1,10 @@
 //! Real server gate; see “Provisioning the confined Rust LSP” in the capability fabric specification.
-#![cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#![cfg(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_env = "gnu",
+    target_pointer_width = "64"
+))]
 
 use std::fs;
 use std::path::{Path, PathBuf};
