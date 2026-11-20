@@ -18,6 +18,21 @@ fn pid(p: &PtyProvider, id: &SessionId) -> u32 {
     p.shared.lock().sessions[id].terminal.pid()
 }
 
+fn dimensions(master: &fs::File) -> (u16, u16) {
+    let mut size = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: TIOCGWINSZ writes to this winsize for the live master.
+    assert_eq!(
+        unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCGWINSZ, &mut size) },
+        0
+    );
+    (size.ws_row, size.ws_col)
+}
+
 pub(super) fn assert_child_image(proc: &Path, split: &str, classic: &str) {
     let expected = match fs::symlink_metadata(split) {
         Err(e) if e.kind() == ErrorKind::NotFound => fs::symlink_metadata(classic).unwrap(),
@@ -219,6 +234,19 @@ fn bidirectional_real_pty_owner_checks_paging_and_inert_display() {
         p.pty_signal(&owner, &id, PtySignal::Resize { rows: 0, cols: 1 })
             .is_err()
     );
+    {
+        let state = p.shared.lock();
+        for (session, child) in [(&id, pid1), (&id2, pid2)] {
+            let master = &state.sessions[session].terminal.master;
+            assert_eq!(dimensions(master), (24, 80));
+            // SAFETY: read-only queries on our live master. Being a session
+            // leader alone does not establish that it owns this terminal.
+            unsafe {
+                assert_eq!(libc::tcgetsid(master.as_raw_fd()), child as i32);
+                assert_eq!(libc::tcgetpgrp(master.as_raw_fd()), child as i32);
+            }
+        }
+    }
     p.pty_signal(
         &owner,
         &id,
@@ -230,16 +258,10 @@ fn bidirectional_real_pty_owner_checks_paging_and_inert_display() {
     .unwrap();
     {
         let state = p.shared.lock();
-        let fd = state.sessions[&id].terminal.master.as_raw_fd();
-        let mut size = libc::winsize {
-            ws_row: 0,
-            ws_col: 0,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        // SAFETY: fd is a live master and TIOCGWINSZ writes to this winsize.
-        assert_eq!(unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut size) }, 0);
-        assert_eq!((size.ws_row, size.ws_col), (35, 110));
+        let master = &state.sessions[&id].terminal.master;
+        assert_eq!(dimensions(master), (35, 110));
+        assert_eq!(dimensions(&state.sessions[&id2].terminal.master), (24, 80));
+        let fd = master.as_raw_fd();
         let mut locked: libc::c_int = 0;
         // SAFETY: TIOCGPTLCK writes an integer for this live master.
         assert_eq!(unsafe { libc::ioctl(fd, libc::TIOCGPTLCK, &mut locked) }, 0);

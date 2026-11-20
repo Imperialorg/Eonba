@@ -319,6 +319,8 @@ fn peer(master: &File, flags: i32) -> io::Result<File> {
 }
 
 pub(super) fn private_locked_pair() -> io::Result<(File, File)> {
+    // portable-pty 0.9's Unix openpty returns an already-unlocked slave and
+    // sets CLOEXEC afterwards. Neither is safe to repair after acquisition.
     // SAFETY: posix_openpt returns an owned master; the two query ioctls
     // initialize the supplied integers without changing the new slave's lock.
     let (master, number) = unsafe {
@@ -367,20 +369,29 @@ pub(super) fn private_locked_pair() -> io::Result<(File, File)> {
     Ok((master, pin))
 }
 
-fn pair() -> io::Result<(File, File)> {
-    let (master, pin) = private_locked_pair()?;
-    // SAFETY: only open this verified peer. Re-lock against future data opens;
-    // the already-open slave can be configured and passed directly to the worker.
+fn open_private_slave(master: &File) -> io::Result<File> {
+    // SAFETY: the live master is ours; TIOCSPTLCK reads a single integer.
     unsafe {
         let fd = master.as_raw_fd();
         cvt(libc::unlockpt(fd))?;
-        let slave = peer(&master, TERMINAL_FLAGS)?;
+        let opened = peer(master, TERMINAL_FLAGS);
+        // Even a failed open (e.g. EMFILE) must re-lock before returning:
+        // an in-flight host fork can still hold a copy of the master.
         cvt(libc::ioctl(fd, libc::TIOCSPTLCK, &1_i32))?;
-        let expected = pin.metadata()?;
-        let actual = slave.metadata()?;
-        if (actual.dev(), actual.ino()) != (expected.dev(), expected.ino()) {
-            return Err(io::Error::from(ErrorKind::PermissionDenied));
-        }
+        opened
+    }
+}
+
+fn pair() -> io::Result<(File, File)> {
+    let (master, pin) = private_locked_pair()?;
+    let slave = open_private_slave(&master)?;
+    let expected = pin.metadata()?;
+    let actual = slave.metadata()?;
+    if (actual.dev(), actual.ino()) != (expected.dev(), expected.ino()) {
+        return Err(io::Error::from(ErrorKind::PermissionDenied));
+    }
+    // SAFETY: peer is still open; successful tcgetattr initializes attr.
+    unsafe {
         let peer = slave.as_raw_fd();
         let mut attr = MaybeUninit::uninit();
         cvt(libc::tcgetattr(peer, attr.as_mut_ptr()))?;
@@ -390,6 +401,45 @@ fn pair() -> io::Result<(File, File)> {
         resize(peer, 24, 80)?;
         Ok((master, slave))
     }
+}
+
+#[cfg(test)]
+#[test]
+fn peer_acquisition_relocks_on_fd_exhaustion_and_uses_cloexec() {
+    let (master, pin) = private_locked_pair().unwrap();
+    let child_master = master.try_clone().unwrap();
+    // Lower the descriptor limit only in the forked child. Its error goes
+    // through Command's existing error pipe; nothing is executed.
+    let mut child = Command::new("/");
+    // SAFETY: child-only rlimit and PTY syscalls on an owned descriptor.
+    unsafe {
+        child.pre_exec(move || {
+            limit(Resource::Nofile, 0)?;
+            open_private_slave(&child_master)?;
+            Err(io::Error::from_raw_os_error(libc::EINVAL))
+        });
+    }
+    assert_eq!(
+        child.spawn().unwrap_err().raw_os_error(),
+        Some(libc::EMFILE)
+    );
+    let mut locked: libc::c_int = 0;
+    // SAFETY: TIOCGPTLCK writes an integer for this same live master.
+    assert_eq!(
+        unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCGPTLCK, &mut locked) },
+        0
+    );
+    assert_eq!(locked, 1);
+    let slave = open_private_slave(&master).unwrap();
+    for fd in [&master, &pin, &slave] {
+        assert!(
+            rustix::io::fcntl_getfd(fd)
+                .unwrap()
+                .contains(rustix::io::FdFlags::CLOEXEC)
+        );
+    }
+    assert!(fs::fcntl_getfl(&master).unwrap().contains(OFlags::NONBLOCK));
+    assert!(fs::fcntl_getfl(&pin).unwrap().contains(OFlags::PATH));
 }
 
 fn resize(fd: i32, rows: u16, cols: u16) -> io::Result<()> {
