@@ -196,7 +196,7 @@
   - **Files**: `src/compiler.rs`, `src/shadow_sandbox.rs`
   - **Requirements**: Translates natural language intent into verified `Workflow` DAGs. Spawns CoW shadow worktrees for ambiguous goals with attention-gated 5-second NACK confirmation.
   - **Unit Tests**: `cargo test -p eon-cognition compiler_tests`.
-  - **Verified subset**: On Linux, `read file A or B` creates two read-only previews from sealed private copies of the approved ranges. Selecting one requires fresh attention and explicit confirmation within five seconds. This does not materialize writable worktrees or compile open-ended goals.
+  - **Verified subset**: On Linux, two approved read ranges, or two variants of one range, can have isolated copy-on-write edits. The host can stage one bounded literal overwrite per alternative. Presentation freezes both; only an explicit selection with fresh attention within five seconds releases the chosen bytes. There is no workspace writeback, arbitrary goal compilation or executable working directory.
 
 - [x] **Task 6.4: Ciel Persona & Verbal Output Formatter**
   - **Crate**: `eon-cognition`
@@ -209,7 +209,7 @@
   - **Files**: `src/omniparser.rs`, `src/keyframe_sampler.rs`, `src/ring_buffer.rs`, `src/lib.rs`
   - **Requirements**: OmniParser-v2 (< 30ms YOLO element detector + PaddleOCR ONNX) for UI grounding when accessibility trees are obfuscated. Adaptive 1–5 FPS video keyframe sampler and 30-second rolling visual memory in shared memory. Integration with `Qwen2.5-VL-3B-Instruct`.
   - **Unit Tests**: `cargo test -p eon-vision vision_tests`.
-  - **Verified subset**: The same sampler drives the portable history and a Linux shared-memory history. Each accepted frame in the latter gets a sealed anonymous file; an explicitly selected local reader can map that frame without seeing the rest of the ring. Age and byte limits evict producer references, not copies already shared. Screen capture, OCR, object detection and VLM inference are not verified.
+  - **Verified subset**: Each accepted Linux shared frame gets a separate sealed anonymous file. Live histories expire producer descriptors while idle and join their worker on stop; the timestamp-driven history remains available for offline use. A selected descriptor contains one frame, but does not sandbox a same-user reader or revoke copies already delivered. Screen capture, OCR, object detection and VLM inference are not verified.
 
 ---
 
