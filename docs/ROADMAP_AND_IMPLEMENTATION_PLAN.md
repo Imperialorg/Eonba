@@ -113,12 +113,12 @@
 
 ## Phase 4: Capability Fabric & Sandboxed Tool Runtime (Level 4)
 
-- [ ] **Task 4.1: Capability Registry, Sandboxing & Cognitive Taint Enforcement**
+- [x] **Task 4.1: Capability Registry, Sandboxing & Cognitive Taint Enforcement**
   - **Crate**: `eon-capability`
   - **Files**: `src/capability.rs`, `src/registry.rs`, `src/sandbox.rs`, `src/taint.rs`
   - **Requirements**: Dynamic capability registration, schema verification, bounded memory output wrappers, execution timeouts. Information Flow Control (IFC) tagging `CognitiveTaint` (`TrustedOperator` vs `UntrustedExternal`) and Invariant 8 privilege escalation enforcement.
   - **Unit Tests**: `cargo test -p eon-capability registry_tests`, `taint_enforcement_tests`.
-  - **Verified subset**: Registration and both dispatch APIs use a host-provisioned Linux worker for import-free Wasm. They check the approved descriptor and module digest, JSON schema, taint, guest fuel, memory and output. Compilation and execution in the worker share wall, CPU and address-space limits. These limits do not cover approval storage, the host's masked review callback or general native processes.
+  - **Verified backend**: Registered import-free Wasm on Linux. Both dispatch APIs require durable redacted attempt and outcome records. The registry checks the descriptor, module digest, schema and taint; the worker limits fuel, memory, output and execution time. Its deadline includes compilation but does not cover host journal I/O, approval storage or masked review.
 
 - [ ] **Task 4.2: Local Workspace, Process & Persistent PTY Multiplexer Providers**
   - **Crate**: `eon-capability`
@@ -138,6 +138,7 @@
   - **Files**: `src/providers/lsp.rs`, `src/patch/ast_patcher.rs`
   - **Requirements**: Embedded JSON-RPC LSP client multiplexer for `rust-analyzer`, `clangd`, `kotlin-language-server`, `pyright`, and `vtsls` providing sub-50ms diagnostic queries (`goto_definition`, `find_references`, `hover_type`, `diagnostics`). Symbol-scoped AST search/replace block patcher replacing fragile line-number diffs.
   - **Unit Tests**: `cargo test -p eon-capability lsp_and_patcher_tests`.
+  - **Verified subset**: On a two-file C project, confined clangd 18 and 21 answered cross-file definitions, references, hover and fresh diagnostics. Warm diagnostic p95 was below 3 ms, but cold queries exceeded 50 ms. The other four production servers have not passed this gate.
 
 ---
 
@@ -188,6 +189,7 @@
   - **Files**: `src/appraisal.rs`, `src/context_ledger.rs`, `src/graph_memory.rs`, `src/vector_store.rs`
   - **Requirements**: Working Context Ledger (bounded to 4k tokens with auto-compactor), Loro CRDT source-of-truth projected into local SQLite entity/relation tables, local vector embedding search (`bge-micro-v2` ONNX).
   - **Unit Tests**: `cargo test -p eon-cognition appraisal_tests`.
+  - **Verified subset**: A local encoder can attach vectors to visible Loro graph records without writing to the paired document or working context. Hybrid recall combines these vectors with lexical matches; corrections and deletions reject late encoder results. The index tests use controlled vectors, not BGE inference.
 
 - [ ] **Task 6.3: Objective Workflow Compiler & Speculative Shadow Sandbox**
   - **Crate**: `eon-cognition`
@@ -233,11 +235,11 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Requirements**: Match local component inventories against offline OSV advisories. Distinguish exact affected versions from unresolved ranges, reject malformed input, and emit one verdict per component and advisory. The strongest verdict wins.
   - **Verification**: `cargo test --locked -p eon-cyber --no-default-features --lib sbom` using synthetic version lists, range-only and mixed records, malformed fields, and duplicate matches. No target execution or network access.
 
-- [ ] **Task 7.4: Verify sandbox and secret-containment boundaries**
+- [x] **Task 7.4: Verify sandbox and secret-containment boundaries**
   - **Crates**: `eon-capability`, `eon-foundation`
   - **Requirements**: Untrusted tools cannot read outside their workspace, open a network socket, or exceed their resource budgets. Verify that audit records contain no raw test credentials and that teardown releases resources even when a tool fails.
   - **Verification**: Denied access leaves a sentinel file unchanged; an over-budget tool terminates; replayed audit records and on-disk frames contain only redacted fixtures. Run real sandbox tests on a supported host. An unavailable backend is not evidence that isolation passed.
-  - **Verified on Linux**: The Wasmtime backend denies filesystem and socket imports, caps guest linear memory at 64 MiB, and releases resources after fuel exhaustion. Registered tools also have worker wall, CPU and address-space limits, including during compilation. The journal tests check recognized secret fixtures on disk and after replay. This does not prove containment for every native backend.
+  - **Verified on Linux**: Registered Wasm tools cannot acquire filesystem or socket imports. The sentinel remained unchanged, failed guests left no child or host descriptor behind, and the next invocation started with clean memory. Raw journal frames and replay contained only redacted metadata, not the fixture names, arguments or outputs. No claim for unrestricted native processes or Firecracker/KVM.
 
 ---
 
@@ -294,6 +296,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Directory**: `clients/android/overlay/`
   - **Files**: `src/main/kotlin/com/eon/android/ui/EonOverlayManager.kt`, `AudioVisualizerView.kt`
   - **Requirements**: Persistent unobtrusive floating presence. Visualizes thought state, active listening wave, and task completion notices.
+  - **Verified subset**: The user-invoked assistant session shows a collapsible card for an optional local model-profile check. Dismissal or revocation invalidates outstanding results. Host tests verify the state transitions, not device presentation. There is no live task feed or microphone waveform.
 
 - [ ] **Task 9.5: Native Digital Assistant Role & OS Survival (`ROLE_ASSISTANT`)**
   - **Directory**: `clients/android/app/`
