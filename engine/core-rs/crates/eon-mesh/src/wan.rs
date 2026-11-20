@@ -3,6 +3,8 @@
 //! While open, iroh maintains its connection to the configured relay. The
 //! relay sees endpoint IDs, sizes and timing, not the end-to-end QUIC payload.
 
+#[cfg(all(test, target_os = "linux"))]
+mod netns;
 #[cfg(test)]
 mod tests;
 mod wire;
@@ -15,8 +17,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use eon_primitives::{EonError, EonResult};
 use iroh::endpoint::{
-    Connection, IncomingAddr, NetReportConfig, PortmapperConfig, QuicTransportConfig,
-    presets::Minimal,
+    Builder, Connection, IncomingAddr, NetReportConfig, PathList, PortmapperConfig,
+    QuicTransportConfig, presets::Minimal,
 };
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayConfig, RelayMode, RelayUrl, SecretKey};
 use prost::Message;
@@ -90,20 +92,66 @@ impl WanEndpoint {
         bytes_per_sec: NonZeroU32,
         wait: Duration,
     ) -> EonResult<Self> {
+        Self::open_configured(
+            secret,
+            pinned,
+            RelayConfig::new(relay, None),
+            bytes_per_sec,
+            wait,
+            Endpoint::builder(Minimal).clear_ip_transports(),
+        )
+        .await
+    }
+
+    /// Like [`Self::open`], but verify the HTTPS relay against only this
+    /// operator-provisioned DER trust anchor. No change to peer authentication,
+    /// OS trust stores, address lookup, or the relay-only transport policy.
+    pub async fn open_with_relay_root(
+        secret: SecretKey,
+        pinned: EndpointId,
+        relay: RelayUrl,
+        root_der: Vec<u8>,
+        bytes_per_sec: NonZeroU32,
+        wait: Duration,
+    ) -> EonResult<Self> {
+        if relay.scheme() != "https" {
+            return Err(invalid("private relay trust anchor requires HTTPS"));
+        }
+        let builder = Endpoint::builder(Minimal)
+            .clear_ip_transports()
+            .ca_tls_config(iroh::tls::CaTlsConfig::custom_roots([root_der.into()]));
+        Self::open_configured(
+            secret,
+            pinned,
+            RelayConfig::new(relay, None),
+            bytes_per_sec,
+            wait,
+            builder,
+        )
+        .await
+    }
+
+    async fn open_configured(
+        secret: SecretKey,
+        pinned: EndpointId,
+        config: RelayConfig,
+        bytes_per_sec: NonZeroU32,
+        wait: Duration,
+        builder: Builder,
+    ) -> EonResult<Self> {
+        let relay = config.url.clone();
         validate_relay(&relay)?;
         if secret.public() == pinned {
             return Err(EonError::SecurityViolation(
                 "WAN peer must have a distinct key".into(),
             ));
         }
-        let config = RelayConfig::new(relay.clone(), None); // no QUIC address discovery
         let transport = QuicTransportConfig::builder()
             .max_concurrent_uni_streams(0u8.into())
             .max_concurrent_bidi_streams(8u8.into())
             .build();
         timeout(wait, async {
-            let ep = Endpoint::builder(Minimal)
-                .clear_ip_transports()
+            let ep = builder
                 .clear_address_lookup()
                 .portmapper_config(PortmapperConfig::Disabled)
                 .net_report_config(NetReportConfig::minimal())
@@ -129,6 +177,12 @@ impl WanEndpoint {
     /// Identity authenticated by the current QUIC handshake.
     pub fn peer_id(&self) -> EndpointId {
         self.conn.remote_id()
+    }
+
+    /// Passive per-path transport counters for this authenticated connection.
+    /// An advertised address or selected path alone is not delivery evidence.
+    pub fn paths(&self) -> PathList<'_> {
+        self.conn.paths()
     }
 
     /// Abandon a stalled session and rendezvous once more on the *same* relay.

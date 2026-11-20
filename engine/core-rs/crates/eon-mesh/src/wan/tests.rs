@@ -1,5 +1,19 @@
 use super::*;
 
+#[tokio::test]
+async fn iroh_and_qos_tests_private_root_refuses_even_loopback_http() {
+    let result = WanEndpoint::open_with_relay_root(
+        SecretKey::generate(),
+        SecretKey::generate().public(),
+        "http://127.0.0.1:8080".parse().unwrap(),
+        vec![],
+        NonZeroU32::MIN,
+        Duration::ZERO,
+    )
+    .await;
+    assert!(matches!(result, Err(EonError::ValidationError(_))));
+}
+
 #[test]
 fn iroh_and_qos_tests_only_an_explicit_relay_origin_is_valid() {
     for origin in [

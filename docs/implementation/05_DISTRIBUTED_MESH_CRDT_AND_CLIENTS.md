@@ -86,6 +86,14 @@ Eon/
 | **Class 2 (CRDT Deltas / Keyframes)** | Bidirectional stream, `send.set_priority(50)` | Cap `4 MiB` per frame | Coalesced in `25 ms` batches during active voice turns. |
 | **Class 3 (Model Weights / Build Blobs)** | `iroh-blobs` verified BLAKE3 Bao tree streams, `send.set_priority(0)` | Chunked resumable | Application-level `Semaphore` throttles chunk reads to `25%` link rate whenever Class 0 datagrams or Class 1 streams were active in the past `200 ms`. |
 
+#### Private WAN path-change test (Linux)
+
+`WanEndpoint::open_with_relay_root` trusts only the supplied DER CA for the provisioned HTTPS relay. Both public WAN constructors remain **relay-only** and check reciprocal Ed25519 pins. `paths()` reads counters without sending traffic. Pinning a peer does not constrain the IP candidates it can advertise: the direct transport used below is compiled only into the Linux test binary.
+
+Run `scripts/test_wan_nat.sh` as the build user on a machine that permits `sudo ip netns`, veth, bridge, conntrack/SNAT and private UDP/TCP. The script creates five namespaces with no uplink or default route. Two peers bootstrap through one privately certified relay behind independent stateful NATs without port forwarding. The relay also provides iroh 1.4's QUIC address discovery (QAD, **not** RFC STUN). After verifying relay transit the fixture opens the private peer route, notifies iroh of the network change, and verifies a 64 KiB transfer on the translated peer sockets. It then drops only the direct routes. It requires the same connection to carry the four typed classes after returning to the relay, with peer path byte deltas and independent forwarding counters. This is not a physical 5G/Wi-Fi handoff.
+
+Class 0 sends numbered 640-byte PCM datagrams every 20 ms, even while the reliable streams stall. `cut` spans route impairment through confirmed relay selection and the start of post-cut counter collection. The deadline is **one-way, application send to peer decode, strictly under 5 ms for every attempt during the cut**. A missing datagram misses the deadline. The roles share Linux `CLOCK_MONOTONIC`; echo RTT is measured and reported separately. Percentiles use received samples only; counts include all attempts. The default exit code gates connectivity, not latency. Add `--require-voice-deadline` to gate both. Raw per-sequence logs, stream receipts and packet counters persist in the printed `target/wan-nat-*` directory on success or failure; ephemeral keys are removed.
+
 ### 2.3 Schema Reconciliation and Clock-Skew-Immune 15ms Spatial Election (`src/spatial.rs`)
 
 **Protobuf Reconciliation**: Update `SensoryClaim` in `proto/eon.proto` with two optional fields so it matches `DISTRIBUTED_NETWORKING_MESH.md` §8.1 without breaking existing field numbers `1..8`:
