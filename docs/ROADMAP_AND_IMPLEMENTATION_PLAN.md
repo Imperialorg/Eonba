@@ -57,7 +57,7 @@
   - **Files**: `src/identity.rs`, `src/permissions.rs`, `src/credentials.rs`, `src/scrubber.rs`
   - **Requirements**: Ownership identities (System, User, EphemeralAgent). Permission bitflags (`READ_WORKSPACE`, `MUTATE_WORKSPACE`, `EXECUTE_PROCESS`, `CYBER_OPERATIONS`, `NETWORK_ACCESS`, `DEVICE_CONTROL`, `SPAWN_SUBAGENT`). Opaque credential handles (`secret://<vault_key>`) with late-binding memory resolution from hardware OS enclaves (Android Keystore, Windows DPAPI, Linux Keyring). In-flight `JournalScrubber` redacting tokens and high-entropy strings ($\mathcal{H} > 4.5$) before journal disk commitment.
   - **Unit Tests**: `cargo test -p eon-foundation identity_and_credential_tests` verifying zero secret leaks to disk frames and entropy-based redaction.
-  - **Verified on Linux**: The process keyring binds owner-scoped handles to child stdin after checking the caller's grants. Delegation cannot add grants; unsupported backends fail closed. Process-lifetime software storage is not a hardware enclave. Android Keystore and Windows DPAPI remain open.
+  - **Platform status**: The Linux process keyring binds owner-scoped handles to child stdin after checking grants. The corresponding Windows DPAPI test binary cross-linked; native Windows execution remains unverified. The Android app has a separate Keystore-backed one-shot inspection proof, not a general Rust credential sink. Its device acceptance gate and hardware attestation remain open.
 
 ---
 
@@ -118,13 +118,14 @@
   - **Files**: `src/capability.rs`, `src/registry.rs`, `src/sandbox.rs`, `src/taint.rs`
   - **Requirements**: Dynamic capability registration, schema verification, bounded memory output wrappers, execution timeouts. Information Flow Control (IFC) tagging `CognitiveTaint` (`TrustedOperator` vs `UntrustedExternal`) and Invariant 8 privilege escalation enforcement.
   - **Unit Tests**: `cargo test -p eon-capability registry_tests`, `taint_enforcement_tests`.
-  - **Verified subset**: Local import-free Wasm calls require an approved descriptor and module digest. The registry checks JSON, taint, fuel, guest memory, and output bounds. These are not host compilation deadlines or guarantees for native processes.
+  - **Verified subset**: Registration and both dispatch APIs use a host-provisioned Linux worker for import-free Wasm. They check the approved descriptor and module digest, JSON schema, taint, guest fuel, memory and output. Compilation and execution in the worker share wall, CPU and address-space limits. These limits do not cover approval storage, the host's masked review callback or general native processes.
 
 - [ ] **Task 4.2: Local Workspace, Process & Persistent PTY Multiplexer Providers**
   - **Crate**: `eon-capability`
   - **Files**: `src/providers/workspace.rs`, `src/providers/process.rs`, `src/providers/pty.rs`
   - **Requirements**: Range reads, atomic temp-file writes, SHA-256 digest validation, pre-write journal snapshots. Persistent bidirectional PTY session multiplexer (`portable-pty`) exposing `process.pty_open`, `process.pty_write`, `process.pty_read_ring`, and `process.pty_signal` with in-memory 10,000-line circular ring buffer and 300s idle watchdog.
   - **Unit Tests**: `cargo test -p eon-capability workspace_tests`, `process_tests`, `pty_tests`.
+  - **Verified subset**: Linux has workflow-owned PTY sessions with bounded reads, writes, signals, and idle cleanup. The single allowed program is a confined byte loopback, not a command interpreter. Workspace writes retain private file preimages, not directory snapshots.
 
 - [x] **Task 4.3: Network & Web Research Providers**
   - **Crate**: `eon-capability`
@@ -193,6 +194,7 @@
   - **Files**: `src/compiler.rs`, `src/shadow_sandbox.rs`
   - **Requirements**: Translates natural language intent into verified `Workflow` DAGs. Spawns CoW shadow worktrees for ambiguous goals with attention-gated 5-second NACK confirmation.
   - **Unit Tests**: `cargo test -p eon-cognition compiler_tests`.
+  - **Verified subset**: On Linux, `read file A or B` creates two read-only previews from sealed private copies of the approved ranges. Selecting one requires fresh attention and explicit confirmation within five seconds. This does not materialize writable worktrees or compile open-ended goals.
 
 - [x] **Task 6.4: Ciel Persona & Verbal Output Formatter**
   - **Crate**: `eon-cognition`
@@ -235,7 +237,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Crates**: `eon-capability`, `eon-foundation`
   - **Requirements**: Untrusted tools cannot read outside their workspace, open a network socket, or exceed their resource budgets. Verify that audit records contain no raw test credentials and that teardown releases resources even when a tool fails.
   - **Verification**: Denied access leaves a sentinel file unchanged; an over-budget tool terminates; replayed audit records and on-disk frames contain only redacted fixtures. Run real sandbox tests on a supported host. An unavailable backend is not evidence that isolation passed.
-  - **Verified on Linux**: The Wasmtime backend denies filesystem and socket imports, caps a guest's linear memory at 64 MiB, and releases its instance and memory after fuel exhaustion. The journal tests check recognized secret fixtures on disk and after replay. Wasm guest limits do not bound host-side compilation or native processes; containment for all backends is still open.
+  - **Verified on Linux**: The Wasmtime backend denies filesystem and socket imports, caps guest linear memory at 64 MiB, and releases resources after fuel exhaustion. Registered tools also have worker wall, CPU and address-space limits, including during compilation. The journal tests check recognized secret fixtures on disk and after replay. This does not prove containment for every native backend.
 
 ---
 
@@ -252,6 +254,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/split_inference.rs`
   - **Requirements**: Dynamically streams speech tokens from mobile edge to workstation compute node, streaming verified results back to edge audio driver. Seamless offline fallback.
   - **Unit Tests**: `cargo test -p eon-mesh split_inference_tests`.
+  - **Verified subset**: A paired worker can transcribe a bounded recording after the caller opts in for that utterance. When the channel fails, the edge transcribes locally. This path sends PCM, not a live token stream, and does not play audio.
 
 - [x] **Task 8.3: CRDT State Synchronizer**
   - **Crate**: `eon-mesh`
@@ -269,7 +272,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
 
 ## Phase 9: Cross-Language Bridge (UniFFI) & Android Client Workspace
 
-- [ ] **Task 9.1: Mozilla UniFFI Bridge Definition & CodeGen**
+- [x] **Task 9.1: Mozilla UniFFI Bridge Definition & CodeGen**
   - **Crate**: `eon-uniffi`
   - **Files**: `src/eon_core.udl`, `src/lib.rs`, `build.rs`
   - **Requirements**: Exposes kernel primitives, test audio injection, and task execution endpoints to Kotlin and Swift without manual JNI.
@@ -317,9 +320,10 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Directory**: `tests/cyber-security-tests/`
   - **Requirements**: Injects an insecure code pattern; asserts EON detects taint, synthesizes constant-time patch, and passes unit test suite with zero user intervention.
 
-- [ ] **Task 10.4: Distributed Mesh Split-Inference & Partition Test**
+- [x] **Task 10.4: Distributed Mesh Split-Inference & Partition Test**
   - **Directory**: `tests/mesh-network-tests/`
   - **Requirements**: Verifies peer-to-peer offloading between simulated edge phone and workstation; asserts graceful offline fallback upon simulated network partition.
+  - **Verification**: `cargo test --locked -p eon-mesh --features native-zipformer --test split_zipformer` on two mutually pinned loopback endpoints. Both the worker-only run and independent local inference after closing the worker endpoint matched the upstream recording's reference transcript.
 
 - [x] **Task 10.5: Full Process Crash Recovery & Reconciliation Test**
   - **Directory**: `tests/crash-recovery-tests/`

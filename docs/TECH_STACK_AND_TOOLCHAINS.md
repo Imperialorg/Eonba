@@ -130,6 +130,19 @@ The APK is written to `app/build/outputs/apk/debug/app-debug.apk`. The verifier 
 
 `core-bindings` generates Kotlin bindings from the Rust library. `app` packages the Android libraries and offers an explicit, one-shot focused-control inspection. It does not expose a general gesture dispatcher, a background microphone, or a screen-capture service. The [roadmap](./ROADMAP_AND_IMPLEMENTATION_PLAN.md) tracks the remaining mobile features separately from the APK build.
 
+The Android **app host**, not the Rust foundation broker or UniFFI dispatcher, issues owner-bound manage/use grants. Foreground consent seals and verifies a one-use nonce with a non-exportable AndroidKeyStore AES-256-GCM key before arming the shortcut. A tap consumes the in-memory permit and reads focus synchronously. One fixed key alias survives restart; grants, opaque handles and encrypted records do not. No plaintext fallback or hardware attestation.
+
+From `engine/android`, using the SDK/NDK setup above:
+
+```sh
+CARGO_TARGET_DIR="$PWD/../core-rs/target" ./gradlew --offline :app:test :app:assembleDebug
+python3 app/keystore_device_test.py --build-only
+"$ANDROID_HOME/platform-tools/adb" devices -l
+python3 app/keystore_device_test.py --serial emulator-5554  # substitute a clean disposable API 28+ device
+```
+
+JVM policy tests and the signed APK builds passed. The last command installs same-signer instrumentation, exercises authorization, key rejection/invalidation and release, force-stops the target, and checks restart isolation and alias count. Require both `PASS: issue` and `PASS: restart`. Device acceptance remains **unverified** here: no attached device, emulator or system image, and `/dev/kvm` is inaccessible to the runner. JVM tests do not verify AndroidKeyStore; instrumentation does not verify hardware backing or the system shortcut UI.
+
 ---
 
 ## 6. Desktop & CLI Workspace (`clients/cli`, `clients/canvas` & `clients/daemon`)
@@ -174,6 +187,8 @@ python3 scripts/download_models.py --ids voice-test-sensevoice-en voice-test-zip
   zipformer-en-2023-06-26-joiner-int8 zipformer-en-2023-06-26-tokens
 cargo test --locked --manifest-path engine/core-rs/Cargo.toml -p eon-voice \
   --no-default-features --features onnx-speech --test asr_e2e --test vad_e2e
+cargo test --locked --manifest-path engine/core-rs/Cargo.toml -p eon-mesh \
+  --features native-zipformer --test split_zipformer
 ```
 
 The fetcher checks the release archives and the extracted WAV files. `onnx-speech` builds Zipformer and Silero without CPAL, WebRTC AEC, ALSA, Kokoro or WeSpeaker. The default `native` feature still includes the full audio stack. The `recorded-speech` CI job shows how to supply a digest-verified ONNX Runtime CPU library on x86-64 Linux. These tests measure inference on recorded input, not microphone-to-speaker latency.
@@ -188,5 +203,5 @@ The fetcher checks the release archives and the extracted WAV files. `onnx-speec
 | **`x86_64-pc-windows-msvc`** | Tactical SLM (GGUF) | NVIDIA CUDA 12.4 / DirectML | AVX2 / AVX-512 FMA SIMD | `-DGGML_CUDA=ON` or `-DGGML_DIRECTML=ON` |
 | **`x86_64-unknown-linux-gnu`**| VAD, ASR, TTS, SLM| CUDA 12.x / ROCm HIP | Vulkan Compute / oneDNN | `-DGGML_CUDA=ON` or `-DGGML_HIP_BLAS=ON` |
 
-### 7.2 Zero-JNI Mobile Hardware Ingestion
-On Android, hardware execution providers are linked **directly** into the native Rust shared library (`libeon_core.so`). The NDK AAudio microphone stream feeds directly into the native Sherpa/ONNX C++ runtime without crossing the JVM JNI boundary, avoiding thread context switches and eliminating garbage collection spikes.
+### 7.2 Mobile audio boundary
+The packaged `libeon_uniffi.so` uses the portable voice features. Its test input is one PCM frame supplied by the caller. The acceleration matrix above describes target backends, not a verified Android microphone connection to AAudio, Sherpa or a hardware execution provider.
