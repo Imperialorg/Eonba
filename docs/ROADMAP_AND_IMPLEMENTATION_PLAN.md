@@ -212,12 +212,12 @@
   - **Requirements**: Strict enforcement of Ciel voice conventions (`Report:`, `Affirmative.`, `Notice:`, `Negative.`), zero pleasantries/fluff.
   - **Unit Tests**: `cargo test -p eon-cognition persona_tests`.
 
-- [ ] **Task 6.5: Multimodal Vision Pipeline (`eon-vision`)**
+- [x] **Task 6.5: Multimodal Vision Pipeline (`eon-vision`)**
   - **Crate**: `eon-vision`
   - **Files**: `src/omniparser.rs`, `src/keyframe_sampler.rs`, `src/ring_buffer.rs`, `src/lib.rs`
   - **Requirements**: OmniParser-v2 (< 30ms YOLO element detector + PaddleOCR ONNX) for UI grounding when accessibility trees are obfuscated. Adaptive 1–5 FPS video keyframe sampler and 30-second rolling visual memory in shared memory. Integration with `Qwen2.5-VL-3B-Instruct`.
   - **Unit Tests**: `cargo test -p eon-vision vision_tests`.
-  - **Verified subset**: PaddleOCR reads text and OmniParser locates unlabeled icons on one selected, sealed JPEG without access to its history. The opt-in local Qwen2.5-VL-3B model independently transcribed five labels across two selections and returned `NONE` on a blank. The full CPU icon detector still missed its 30 ms gate (96.39 ms p95 on this runner).
+  - **Verified on the Linux workstation**: PaddleOCR reads text and OmniParser locates unlabeled icons on one selected, sealed JPEG without access to its history. The local Qwen2.5-VL-3B model independently transcribed five labels across two selections and returned `NONE` on a blank. On the AMD EPYC 9V45, the opt-in OpenVINO CPU backend ran the original 640×640 detector at 16.40 and 18.42 ms warm p95 in two processes (30 complete calls each). The default ORT path measured 96.39 ms. The 30 ms target is for icon detection, not OCR, VLM or model loading.
 
 ---
 

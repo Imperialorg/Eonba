@@ -11,6 +11,13 @@ use sha2::{Digest, Sha256};
 use crate::still::{self, check_time, deadline};
 use crate::{EonError, EonResult, PixelBounds};
 
+#[cfg(all(
+    feature = "omniparser-openvino",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
+mod openvino_cpu;
+
 const MODEL_BYTES: usize = 80_305_670;
 const MODEL_SHA256: &str = "c0d3d261e3368a5e51fe0d632c5d62e4bd4da489ac4b95fbbee450eb640e36fe";
 const SIDE: u32 = 640;
@@ -41,19 +48,45 @@ fn failed(reason: impl std::fmt::Display) -> EonError {
     }
 }
 
-/// One verified ONNX graph and a reusable CPU session. No plugins, pickle,
+/// One verified ONNX graph and a reusable local CPU backend. No pickle,
 /// external model data, remote model code or network lookup.
 pub struct IconDetector {
-    session: Session,
+    backend: Backend,
+}
+
+enum Backend {
+    Ort(Session),
+    #[cfg(all(
+        feature = "omniparser-openvino",
+        target_os = "linux",
+        target_arch = "x86_64"
+    ))]
+    OpenVino(openvino_cpu::CpuDetector),
 }
 
 impl IconDetector {
     /// Accepts only the `omniparser-v2-icon-detect-onnx` artifact from the model lock.
+    /// ORT is the default. `EON_ICON_BACKEND=openvino-cpu` explicitly requires the
+    /// opt-in `omniparser-openvino` feature and the pinned native CPU runtime.
     pub fn from_model(graph: &[u8]) -> EonResult<Self> {
         if graph.len() != MODEL_BYTES || format!("{:x}", Sha256::digest(graph)) != MODEL_SHA256 {
             return Err(EonError::ValidationError(
                 "icon model digest mismatch".into(),
             ));
+        }
+        match std::env::var("EON_ICON_BACKEND").as_deref() {
+            Ok("ort-cpu") | Err(std::env::VarError::NotPresent) => {}
+            #[cfg(all(
+                feature = "omniparser-openvino",
+                target_os = "linux",
+                target_arch = "x86_64"
+            ))]
+            Ok("openvino-cpu") => {
+                return Ok(Self {
+                    backend: Backend::OpenVino(openvino_cpu::CpuDetector::load(graph)?),
+                });
+            }
+            _ => return Err(failed("unsupported EON_ICON_BACKEND")),
         }
         let session = Session::builder(eon_primitives::onnx::environment()?)
             .map_err(failed)?
@@ -65,7 +98,22 @@ impl IconDetector {
             .map_err(failed)?
             .commit_from_memory(graph)
             .map_err(failed)?;
-        Ok(Self { session })
+        Ok(Self {
+            backend: Backend::Ort(session),
+        })
+    }
+
+    /// The backend actually constructed, for diagnostics.
+    pub fn backend_name(&self) -> &'static str {
+        match self.backend {
+            Backend::Ort(_) => "ORT CPU (8 intra-op threads)",
+            #[cfg(all(
+                feature = "omniparser-openvino",
+                target_os = "linux",
+                target_arch = "x86_64"
+            ))]
+            Backend::OpenVino(_) => "OpenVINO CPU (BF16, 1 stream, up to 32 threads)",
+        }
     }
 
     /// Detect icons on these JPEG bytes (stored orientation). The budget is for
@@ -93,12 +141,30 @@ impl IconDetector {
         expected: Option<(u32, u32)>,
         end: Instant,
     ) -> EonResult<IconPage> {
+        let session = match &mut self.backend {
+            Backend::Ort(session) => session,
+            #[cfg(all(
+                feature = "omniparser-openvino",
+                target_os = "linux",
+                target_arch = "x86_64"
+            ))]
+            Backend::OpenVino(cpu) => {
+                check_time(end)?;
+                let image = still::decode(bytes, expected)?;
+                check_time(end)?;
+                let page = cpu.detect(&image, end)?;
+                check_time(end)?;
+                return Ok(page);
+            }
+        };
         still::run(bytes, expected, end, |image, opts| {
             let fit = Letterbox::new(image.width(), image.height());
-            let input = fit.tensor(image)?;
+            let mut data = vec![0.0; 3 * SIDE as usize * SIDE as usize];
+            fit.fill_tensor(image, &mut data);
+            let input = Tensor::from_array(([1usize, 3, SIDE as usize, SIDE as usize], data))
+                .map_err(failed)?;
             check_time(end)?;
-            let out = self
-                .session
+            let out = session
                 .run_with_options(ort::inputs![input], opts)
                 .map_err(failed)?;
             let (shape, channels) = out["output0"].try_extract_tensor::<f32>().map_err(failed)?;
@@ -138,17 +204,16 @@ impl Letterbox {
         }
     }
 
-    fn tensor(&self, image: &RgbImage) -> EonResult<Tensor<f32>> {
+    fn fill_tensor(&self, image: &RgbImage, data: &mut [f32]) {
         let resized = imageops::resize(image, self.w, self.h, imageops::FilterType::Triangle);
         let plane = (SIDE * SIDE) as usize;
-        let mut data = vec![114.0 / 255.0; 3 * plane];
+        data.fill(114.0 / 255.0);
         for (x, y, rgb) in resized.enumerate_pixels() {
             let off = ((self.pad_y + y) * SIDE + self.pad_x + x) as usize;
             for ch in 0..3 {
                 data[ch * plane + off] = f32::from(rgb[ch]) / 255.0;
             }
         }
-        Tensor::from_array(([1usize, 3, SIDE as usize, SIDE as usize], data)).map_err(failed)
     }
 
     fn detections(&self, channels: &[f32]) -> EonResult<Vec<IconDetection>> {

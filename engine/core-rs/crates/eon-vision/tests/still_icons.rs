@@ -115,6 +115,21 @@ fn refuses_substituted_graph_before_native_load() {
     ));
 }
 
+#[test]
+fn responds_to_translated_icons_on_a_different_canvas() {
+    let mut detector = IconDetector::from_model(&model()).unwrap();
+    let image = toolbar(true);
+    for (dx, dy) in [(21, 78), (94, 13)] {
+        let mut shifted = RgbImage::from_pixel(911, 417, Rgb([245, 246, 248]));
+        image::imageops::replace(&mut shifted, &image, dx.into(), dy.into());
+        check(
+            &detector.detect_jpeg(&jpeg(&shifted), BUDGET).unwrap(),
+            shifted.dimensions(),
+            TILES.map(|[l, t, r, b]| [l + dx, t + dy, r + dx, b + dy]),
+        );
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn detects_only_the_selected_sealed_still() {
@@ -187,8 +202,10 @@ fn selected_still_cpu_latency() {
     warm.sort_unstable();
     let p95 = warm[28];
     eprintln!(
-        "801x317 selected JPEG, ORT CPU, 8 intra-op threads: load={load:?}, first={first:?}; n=30 warm p50={:?} p95={p95:?} max={:?}",
-        warm[14], warm[29]
+        "801x317 selected JPEG, {}: load={load:?}, first={first:?}; n=30 warm p50={:?} p95={p95:?} max={:?}",
+        detector.backend_name(),
+        warm[14],
+        warm[29]
     );
     assert!(
         p95 < Duration::from_millis(30),
