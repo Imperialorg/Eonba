@@ -282,6 +282,7 @@ mod scheduler_tests {
         assert_eq!(s.state(&a.id), Some(TaskState::Pending));
     }
 
+    #[cfg(feature = "host")]
     #[test]
     fn malformed_submission_cannot_downgrade_the_digest_or_override_retry_policy() {
         use eon_kernel::journal_sink::{decode, encode};
@@ -391,6 +392,7 @@ mod scheduler_tests {
     }
 }
 
+#[cfg(feature = "host")]
 mod saga_compensation_tests {
     use super::*;
     use eon_foundation::group_commit::GroupCommitJournal;

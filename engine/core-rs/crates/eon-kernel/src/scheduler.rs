@@ -15,7 +15,9 @@ use eon_primitives::{EonError, EonResult, LeaseId, TaskId};
 
 use crate::events::{EventSink, KernelEvent, transition_recorded};
 use crate::fsm::{TaskEvent, TaskState};
+use crate::model::workflow::workflow_digest;
 use crate::model::{Task, Workflow};
+#[cfg(feature = "host")]
 use crate::recovery::RecoveryState;
 use crate::resource::{Acquisition, ResourceManager};
 
@@ -119,7 +121,7 @@ pub struct TaskScheduler<S> {
 
 impl<S: EventSink> TaskScheduler<S> {
     /// Fresh submission only. The caller owns epoch authority and must not submit an
-    /// existing workflow twice. On restart use [`Self::restore`], not this constructor.
+    /// existing workflow twice. Hosts restoring a journal must use `restore`, not this constructor.
     pub fn new(
         definition: Workflow,
         current_epoch: u64,
@@ -143,7 +145,7 @@ impl<S: EventSink> TaskScheduler<S> {
         scheduler.sink.record(KernelEvent::WorkflowSubmitted {
             workflow: scheduler.definition.id().clone(),
             epoch: current_epoch,
-            digest: crate::recovery::workflow_digest(&scheduler.definition)?,
+            digest: workflow_digest(&scheduler.definition)?,
             tasks: scheduler
                 .definition
                 .tasks()
@@ -156,6 +158,7 @@ impl<S: EventSink> TaskScheduler<S> {
 
     /// Rejoin the original, trusted definition after exclusive journal replay/reconciliation.
     /// Only reconciled Ready tasks can restart. Running state or revoked authority is refused.
+    #[cfg(feature = "host")]
     pub fn restore(
         definition: Workflow,
         current_epoch: u64,

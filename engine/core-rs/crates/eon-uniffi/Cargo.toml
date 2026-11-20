@@ -12,6 +12,7 @@ profile-mobile-edge = []
 bindgen-cli = ["uniffi/cli", "uniffi/cargo-metadata"]
 
 [dependencies]
+eon-kernel = { path = "../eon-kernel", default-features = false }
 eon-primitives = { path = "../eon-primitives" }
 eon-voice = { path = "../eon-voice", default-features = false }
 eon-cognition = { path = "../eon-cognition", default-features = false }

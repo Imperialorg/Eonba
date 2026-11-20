@@ -15,17 +15,9 @@ use crate::events::{EventSink, KernelEvent, transition_recorded};
 use crate::fsm::{ALL_EVENTS, TaskEvent, TaskState, next_state};
 use crate::journal_sink::{JournalSink, decode};
 use crate::model::Workflow;
+pub use crate::model::workflow::workflow_digest;
 
 type Submission = (WorkflowId, u64);
-
-/// Identity of the complete validated definition (including normalized requirements,
-/// sorted task IDs, dependencies and parameter object keys); never log the serialized bytes.
-pub fn workflow_digest(workflow: &Workflow) -> EonResult<[u8; 32]> {
-    let mut hasher = blake3::Hasher::new_derive_key("eon.kernel.workflow.v1");
-    serde_json::to_writer(&mut hasher, workflow)
-        .map_err(|e| invalid(format!("cannot identify workflow: {e}")))?;
-    Ok(*hasher.finalize().as_bytes())
-}
 
 fn invalid(reason: impl Into<String>) -> EonError {
     EonError::ValidationError(reason.into())

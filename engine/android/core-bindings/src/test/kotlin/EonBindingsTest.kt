@@ -6,6 +6,7 @@ import uniffi.eon_uniffi.executeTaskSync
 import uniffi.eon_uniffi.generateUlid
 import uniffi.eon_uniffi.getMonotonicTimeNanos
 import uniffi.eon_uniffi.injectAudioPcmForTesting
+import uniffi.eon_uniffi.runProfileWorkflow
 import uniffi.eon_uniffi.selectModelProfile
 import uniffi.eon_uniffi.validateTaskDag
 import kotlin.test.Test
@@ -14,6 +15,18 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class EonBindingsTest {
+    @Test
+    fun profileWorkflowReturnsOnlyThisRunsCompletionOrThrows() {
+        val first = runProfileWorkflow(4.0)
+        assertEquals("p0_mobile_ultralight", first.profile)
+        assertEquals(1u, first.completedTasks)
+        assertFailsWith<BridgeException.InvalidInput> { runProfileWorkflow(-1.0) }
+        assertFailsWith<BridgeException.InvalidInput> { runProfileWorkflow(Double.NaN) }
+        val next = runProfileWorkflow(8.0)
+        assertEquals("p1_mobile_flagship", next.profile)
+        assertEquals(1u, next.completedTasks)
+    }
+
     @Test
     fun deviceMemorySelectsTheMatchingModelProfile() {
         assertEquals("p3_workstation_heavy", selectModelProfile(16.0))

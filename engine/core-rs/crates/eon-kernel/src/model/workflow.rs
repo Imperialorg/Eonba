@@ -7,6 +7,15 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use super::Task;
 
+/// Identity of the complete validated definition (including normalized requirements,
+/// sorted task IDs, dependencies and parameter object keys); never log the serialized bytes.
+pub fn workflow_digest(workflow: &Workflow) -> EonResult<[u8; 32]> {
+    let mut hasher = blake3::Hasher::new_derive_key("eon.kernel.workflow.v1");
+    serde_json::to_writer(&mut hasher, workflow)
+        .map_err(|e| EonError::ValidationError(format!("cannot identify workflow: {e}")))?;
+    Ok(*hasher.finalize().as_bytes())
+}
+
 /// A validated submission. On the wire, tasks are a sequence in ID order:
 /// each node declares its own ID, and duplicate nodes cannot be lost to map decoding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

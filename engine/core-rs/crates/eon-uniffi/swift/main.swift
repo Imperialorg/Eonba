@@ -3,6 +3,12 @@ import Foundation
 func smoke() throws {
     let mobile = try selectModelProfile(memoryGb: 4)
     precondition(mobile == "p0_mobile_ultralight")
+    let receipt = try runProfileWorkflow(memoryGb: 8)
+    precondition(receipt.profile == "p1_mobile_flagship" && receipt.completedTasks == 1)
+    do {
+        _ = try runProfileWorkflow(memoryGb: -1)
+        fatalError("received a completion for invalid memory")
+    } catch BridgeError.InvalidInput(_) {}
     do {
         _ = try selectModelProfile(memoryGb: .nan)
         fatalError("accepted NaN")

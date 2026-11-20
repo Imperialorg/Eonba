@@ -11,7 +11,7 @@ from zipfile import ZIP_STORED, ZipFile
 ABIS = {"arm64-v8a": (2, 183), "armeabi-v7a": (1, 40), "x86_64": (2, 62)}
 FUNCTIONS = {
     "generate_ulid", "get_monotonic_time_nanos", "select_model_profile", "endpoint_silence_ms",
-    "inject_audio_pcm_for_testing", "execute_task_sync", "validate_task_dag",
+    "inject_audio_pcm_for_testing", "execute_task_sync", "validate_task_dag", "run_profile_workflow",
 }
 
 
