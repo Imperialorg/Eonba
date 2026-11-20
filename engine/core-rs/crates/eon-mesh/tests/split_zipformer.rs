@@ -9,9 +9,13 @@ use std::time::Duration;
 
 use eon_mesh::EonError;
 use eon_mesh::split_inference::zipformer::{MAX_SAMPLES, PinnedZipformer, Source, SpeechPeer, Utterance};
-use iroh::{EndpointAddr, SecretKey};
+use iroh::endpoint::{Endpoint, presets::Minimal};
+use iroh::{EndpointAddr, RelayMode, SecretKey};
 use sha2::{Digest, Sha256};
+use tokio::sync::oneshot;
 use tokio::time::timeout;
+
+const V2: &[u8] = b"eon/asr/zipformer-en-2023-06-26/2";
 
 fn asset(env: &str, default: &str) -> PathBuf {
     std::env::var_os(env)
@@ -68,9 +72,16 @@ async fn split_inference_tests_release_speech_offloads_then_runs_locally_after_d
     let addr = worker.addr();
     assert!(addr.ip_addrs().any(|a| a.ip().is_loopback()));
 
+    let mut previous = String::new();
+    let mut previous_samples = 0;
     let (remote, served) = timeout(Duration::from_secs(12), async {
         tokio::join!(
-            allow(&pcm, &edge, &addr).transcribe(None), // no edge model exists yet
+            allow(&pcm, &edge, &addr).transcribe_with_previews(None, |p| {
+                assert!(previous_samples < p.samples && p.samples < pcm.len());
+                assert!(p.text.starts_with(&previous) && p.text.len() > previous.len());
+                previous = p.text.to_owned();
+                previous_samples = p.samples;
+            }), // no edge model exists yet
             worker.serve_one(Some(&workstation))
         )
     })
@@ -79,6 +90,7 @@ async fn split_inference_tests_release_speech_offloads_then_runs_locally_after_d
     served.unwrap();
     let remote = remote.unwrap();
     assert_eq!(remote.source, Source::PairedWorker);
+    assert!(!previous.is_empty() && remote.text.starts_with(&previous));
     assert!(
         matches_reference(&remote.text),
         "worker ASR disagrees with release transcript"
@@ -121,6 +133,165 @@ async fn split_inference_tests_release_speech_offloads_then_runs_locally_after_d
     let private = Utterance::LocalOnly(&silence).transcribe(Some(&local)).await.unwrap();
     assert_eq!(private.source, Source::LocalOnly);
     assert!(private.text.is_empty());
+    edge.close().await;
+}
+
+#[tokio::test]
+async fn split_inference_tests_partition_after_first_preview_restarts_from_original_pcm() {
+    let dir = asset("EON_ZIPFORMER_DIR", "../../../../perception/models/asr");
+    let workstation = PinnedZipformer::load(&dir).unwrap();
+    let local = PinnedZipformer::load(&dir).unwrap();
+    let pcm = release_pcm();
+    let (a, b) = (SecretKey::generate(), SecretKey::generate());
+    let edge = bind(a.clone(), &b).await;
+    let mut worker = bind(b, &a).await;
+    let addr = worker.addr();
+
+    let (cut, preview_seen) = oneshot::channel();
+    let mut cut = Some(cut);
+    let mut first = None;
+    let (result, ()) = timeout(Duration::from_secs(12), async {
+        tokio::join!(
+            allow(&pcm, &edge, &addr).transcribe_with_previews(Some(&local), |p| {
+                if let Some(cut) = cut.take() {
+                    assert!(!p.text.is_empty() && p.samples < pcm.len() / 2);
+                    first = Some(p.text.to_owned());
+                    cut.send(()).unwrap();
+                }
+            }),
+            async {
+                tokio::select! {
+                    biased;
+                    observed = preview_seen => observed.unwrap(),
+                    _ = worker.serve_one(Some(&workstation)) => panic!("worker ended before partition"),
+                }
+                worker.close().await;
+            }
+        )
+    })
+    .await
+    .expect("mid-utterance fallback deadline");
+    let final_result = result.unwrap();
+    assert!(matches!(
+        final_result.source,
+        Source::LocalOnChannelError | Source::LocalOnTimeout
+    ));
+    assert!(matches_reference(&final_result.text));
+    assert!(first.unwrap().len() < final_result.text.len());
+    edge.close().await;
+}
+
+async fn wire_endpoint(key: SecretKey) -> Endpoint {
+    Endpoint::builder(Minimal)
+        .secret_key(key)
+        .alpns(vec![V2.to_vec()])
+        .relay_mode(RelayMode::Disabled)
+        .clear_ip_transports()
+        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .bind()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn split_inference_tests_real_worker_emits_text_with_request_suffix_withheld() {
+    let model = PinnedZipformer::load(&asset("EON_ZIPFORMER_DIR", "../../../../perception/models/asr")).unwrap();
+    let pcm = release_pcm();
+    let (a, b) = (SecretKey::generate(), SecretKey::generate());
+    let mut worker = bind(b.clone(), &a).await;
+    let addr = worker.addr();
+    let edge = wire_endpoint(a).await;
+    let ((), served) = timeout(Duration::from_secs(12), async {
+        tokio::join!(
+            async {
+                let conn = edge.connect(addr, V2).await.unwrap();
+                assert_eq!(conn.remote_id(), b.public());
+                let (mut send, mut recv) = conn.open_bi().await.unwrap();
+                send.write_all(&(pcm.len() as u32).to_be_bytes()).await.unwrap();
+                let mut hash = blake3::Hasher::new();
+                let mut got_words = false;
+                // This independent wire client NEVER sends the second half or
+                // FIN before reading real nonempty text. Buffered post-FIN
+                // callbacks could not pass this test.
+                for chunk in pcm[..pcm.len() / 2].as_chunks::<8_000>().0 {
+                    let bytes: Vec<_> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
+                    send.write_all(&bytes).await.unwrap();
+                    hash.update(&bytes);
+                    let mut header = [0; 35];
+                    recv.read_exact(&mut header).await.unwrap();
+                    assert_eq!(header[0], 1); // step, not final
+                    assert_eq!(&header[1..33], hash.finalize().as_bytes());
+                    let len = u16::from_be_bytes([header[33], header[34]]) as usize;
+                    assert!(len <= 2048);
+                    let mut text = vec![0; len];
+                    recv.read_exact(&mut text).await.unwrap();
+                    if !text.is_empty() {
+                        assert!("AFTER EARLY NIGHTFALL".starts_with(std::str::from_utf8(&text).unwrap()));
+                        got_words = true;
+                        break;
+                    }
+                }
+                conn.close(0u32.into(), b"partition");
+                assert!(got_words, "no upstream speech prefix before the suffix was sent");
+            },
+            worker.serve_one(Some(&model))
+        )
+    })
+    .await
+    .expect("worker waited for withheld input instead of streaming a partial");
+    assert!(served.is_err()); // no final for a truncated request
+    worker.close().await;
+    edge.close().await;
+}
+
+#[tokio::test]
+async fn split_inference_tests_invalid_authenticated_replies_are_not_results() {
+    let local = PinnedZipformer::load(&asset("EON_ZIPFORMER_DIR", "../../../../perception/models/asr")).unwrap();
+    let (a, b) = (SecretKey::generate(), SecretKey::generate());
+    let edge = bind(a.clone(), &b).await;
+    let worker = wire_endpoint(b).await;
+    let addr = worker.addr();
+    let silence = [0; 8_001];
+    let short = &silence[..1];
+    let digest = blake3::hash(&[0, 0]);
+    let frame = |kind, hash: blake3::Hash, length: u16, body: &[u8]| {
+        [[kind].as_slice(), hash.as_bytes(), &length.to_be_bytes(), body].concat()
+    };
+    for (pcm, bad) in [
+        (short, frame(2, blake3::hash(&[1, 0]), 5, b"HELLO")), // valid text, wrong utterance
+        (short, frame(1, digest, 5, b"HELLO")),                // preview in place of final
+        (short, frame(2, digest, 1, &[0xff])),                 // malformed UTF-8
+        (short, frame(2, digest, 5, b"OPEN\n")),
+        (short, frame(2, digest, 2049, b"")),
+        (short, frame(2, digest, 0, &[0])),            // extra data after final
+        (&silence[..], frame(1, digest, 5, b"HELLO")), // wrong prefix digest
+        (&silence[..], frame(2, blake3::hash(&[0; 16_000]), 5, b"HELLO")), // premature final
+    ] {
+        let (result, ()) = timeout(Duration::from_secs(12), async {
+            tokio::join!(
+                allow(pcm, &edge, &addr).transcribe_with_previews(Some(&local), |_| panic!("unexpected preview")),
+                async {
+                    let conn = worker.accept().await.unwrap().await.unwrap();
+                    assert_eq!(conn.remote_id(), a.public());
+                    let (mut send, mut recv) = conn.accept_bi().await.unwrap();
+                    let mut request = vec![0; 4 + 2 * pcm.len().min(8_000)];
+                    recv.read_exact(&mut request).await.unwrap();
+                    assert_eq!(&request[..4], &(pcm.len() as u32).to_be_bytes());
+                    assert!(request[4..].iter().all(|&b| b == 0));
+                    send.write_all(&bad).await.unwrap();
+                    send.finish().unwrap();
+                    conn.closed().await;
+                }
+            )
+        })
+        .await
+        .expect("invalid reply fallback deadline");
+        let result = result.unwrap();
+        assert_eq!(result.source, Source::LocalOnInvalidReply);
+        assert!(result.text.is_empty());
+    }
+    worker.close().await;
     edge.close().await;
 }
 

@@ -1,21 +1,22 @@
-//! One endpointed utterance per authenticated QUIC stream, not live microphone
-//! streaming. This ALPN fixes the model and the only request type: mono 16 kHz
-//! PCM16LE. The reply is the input's BLAKE3 digest followed by final English text.
-//! A matching digest binds a result to the audio; it does not prove a trusted
-//! workstation computed the right words. No output is played or executed here.
+//! One explicitly supplied in-memory utterance per mutually pinned QUIC stream.
+//! The worker runs a single incremental Zipformer decoder on mono 16 kHz PCM16LE.
+//! Previews bind to PCM prefixes; only the final binds to the whole recording.
+//! Digests do not prove the worker computed the right words. Nothing here
+//! captures or plays audio, interprets commands, or dispatches reflex hints.
 
 mod model;
+mod wire;
 pub use model::PinnedZipformer;
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use eon_primitives::{EonError, EonResult};
-use iroh::endpoint::{Connection, Endpoint, presets::Minimal};
+use iroh::endpoint::{Endpoint, presets::Minimal};
 use iroh::{EndpointAddr, EndpointId, RelayMode, SecretKey};
 use tokio::time::timeout;
 
-const ALPN: &[u8] = b"eon/asr/zipformer-en-2023-06-26/1";
+const ALPN: &[u8] = b"eon/asr/zipformer-en-2023-06-26/2";
 pub const MAX_SAMPLES: usize = 8 * 16_000;
 const MAX_PCM_BYTES: usize = 2 * MAX_SAMPLES;
 const MAX_TEXT: usize = 2048;
@@ -43,17 +44,6 @@ fn valid_text(text: &str) -> EonResult<()> {
         return Err(EonError::ValidationError("invalid English ASR result".into()));
     }
     Ok(())
-}
-
-fn decode_reply<'a>(reply: &'a [u8], pcm: &[u8]) -> EonResult<&'a str> {
-    let invalid = || EonError::ValidationError("invalid ASR reply".into());
-    let (digest, text) = reply.split_at_checked(32).ok_or_else(invalid)?;
-    if digest != blake3::hash(pcm).as_bytes() {
-        return Err(invalid());
-    }
-    let text = std::str::from_utf8(text).map_err(|_| invalid())?;
-    valid_text(text)?;
-    Ok(text)
 }
 
 /// Dedicated service (no relays or discovery), mutually pinned with the same
@@ -104,12 +94,10 @@ impl SpeechPeer {
                 return Err(model::unavailable());
             };
             let (mut send, mut recv) = conn.accept_bi().await.map_err(channel_error)?;
-            let pcm = recv.read_to_end(MAX_PCM_BYTES).await.map_err(channel_error)?;
-            let digest = blake3::hash(&pcm);
-            let text = model.infer(pcm).await?;
-            send.write_all(digest.as_bytes()).await.map_err(channel_error)?;
-            send.write_all(text.as_bytes()).await.map_err(channel_error)?;
-            send.finish().map_err(channel_error)?;
+            if let Err(err) = wire::serve(&mut send, &mut recv, model).await {
+                conn.close(400u32.into(), b"incomplete");
+                return Err(err);
+            }
             conn.closed().await;
             Ok(())
         })
@@ -144,32 +132,44 @@ pub struct Transcript {
     pub source: Source,
 }
 
-async fn request(conn: &Connection, pcm: &[u8]) -> EonResult<Vec<u8>> {
-    let (mut send, mut recv) = conn.open_bi().await.map_err(channel_error)?;
-    send.write_all(pcm).await.map_err(channel_error)?;
-    send.finish().map_err(channel_error)?;
-    recv.read_to_end(32 + MAX_TEXT).await.map_err(channel_error)
+/// Display-only snapshot from the worker, not a final result or a command.
+/// `samples` is the length of the digest-checked prefix, not a timestamp.
+pub struct Preview<'a> {
+    pub text: &'a str,
+    pub samples: usize,
 }
 
-async fn remote(edge: &SpeechPeer, worker: EndpointAddr, pcm: &[u8]) -> Result<String, Source> {
+async fn remote(
+    edge: &SpeechPeer,
+    worker: EndpointAddr,
+    pcm: &[u8],
+    preview: impl FnMut(Preview<'_>),
+) -> Result<String, Source> {
     let conn = timeout(DIAL_BUDGET, edge.endpoint.connect(worker, ALPN))
         .await
         .map_err(|_| Source::LocalOnTimeout)?
         .map_err(|_| Source::LocalOnChannelError)?;
-    let reply = timeout(RPC_BUDGET, request(&conn, pcm)).await;
+    // connect authenticates worker.id, which the consent check matched to edge.paired.
+    let reply = timeout(RPC_BUDGET, wire::request(&conn, pcm, preview)).await;
     conn.close(0u32.into(), b"done");
-    let bytes = reply
-        .map_err(|_| Source::LocalOnTimeout)?
-        .map_err(|_| Source::LocalOnChannelError)?;
-    decode_reply(&bytes, pcm)
-        .map(str::to_owned)
-        .map_err(|_| Source::LocalOnInvalidReply)
+    reply.map_err(|_| Source::LocalOnTimeout)?
 }
 
 impl Utterance<'_> {
     /// No local inference on success. A channel failure or invalid reply runs
     /// the original PCM through the local model; no model means an explicit error.
     pub async fn transcribe(self, local: Option<&PinnedZipformer>) -> EonResult<Transcript> {
+        self.transcribe_with_previews(local, |_| {}).await
+    }
+
+    /// Calls a nonblocking display observer before uploading the next chunk.
+    /// Previews are provisional: discard them on return, error or cancellation.
+    /// Only the returned `Transcript` is final. Local inference produces no previews.
+    pub async fn transcribe_with_previews(
+        self,
+        local: Option<&PinnedZipformer>,
+        preview: impl FnMut(Preview<'_>),
+    ) -> EonResult<Transcript> {
         let (samples, dest) = match self {
             Self::LocalOnly(samples) => (samples, None),
             Self::AllowPairedWorker { pcm, edge, worker } => {
@@ -184,7 +184,7 @@ impl Utterance<'_> {
         }
         let pcm: Vec<_> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
         let source = if let Some((edge, worker)) = dest {
-            match remote(edge, worker, &pcm).await {
+            match remote(edge, worker, &pcm, preview).await {
                 Ok(text) => {
                     return Ok(Transcript {
                         text,
@@ -200,24 +200,5 @@ impl Utterance<'_> {
             .await
             .map_err(|_| model::unavailable())??;
         Ok(Transcript { text, source })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn split_inference_tests_zipformer_reply_binding_and_limits() {
-        let pcm = [1, 0];
-        let prefix = blake3::hash(&pcm);
-        let reply = |text: &[u8]| [prefix.as_bytes().as_slice(), text].concat();
-        assert!(decode_reply(&reply(b"HELLO"), &pcm).is_ok());
-        assert!(decode_reply(&reply(b""), &pcm).unwrap().is_empty()); // silence
-        assert!(decode_reply(&reply(b"HELLO"), &[0, 0]).is_err()); // stale reply
-        for invalid in [b"raw\ntext".as_slice(), &[0xff], &vec![b'A'; MAX_TEXT + 1]] {
-            assert!(decode_reply(&reply(invalid), &pcm).is_err());
-        }
-        assert!(decode_reply(&[], &pcm).is_err());
     }
 }

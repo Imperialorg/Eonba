@@ -7,7 +7,8 @@ use eon_primitives::{EonError, EonResult};
 use eon_voice::asr::ZipformerAsr;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 use super::{MAX_PCM_BYTES, valid_text};
 
@@ -33,6 +34,43 @@ pub(super) fn unavailable() -> EonError {
 /// A preloaded session, shared by at most one inference at a time. No downloads,
 /// model selection, runtime paths or session settings are accepted over the wire.
 pub struct PinnedZipformer(Arc<Mutex<ZipformerAsr>>);
+
+fn normalized(pcm: &[u8]) -> EonResult<Vec<f32>> {
+    let (words, tail) = pcm.as_chunks::<2>();
+    if words.is_empty() || pcm.len() > MAX_PCM_BYTES || !tail.is_empty() {
+        return Err(EonError::ValidationError("invalid PCM16 utterance".into()));
+    }
+    Ok(words
+        .iter()
+        .map(|&v| f32::from(i16::from_le_bytes(v)) / 32768.0)
+        .collect())
+}
+
+enum Chunk {
+    More(Vec<u8>, oneshot::Sender<String>),
+    Last(Vec<u8>),
+}
+
+pub(super) struct Online {
+    input: mpsc::Sender<Chunk>,
+    result: JoinHandle<EonResult<String>>,
+}
+
+impl Online {
+    pub(super) async fn push(&self, pcm: Vec<u8>) -> EonResult<String> {
+        let (reply, text) = oneshot::channel();
+        self.input
+            .send(Chunk::More(pcm, reply))
+            .await
+            .map_err(|_| unavailable())?;
+        text.await.map_err(|_| unavailable())
+    }
+
+    pub(super) async fn finish(self, pcm: Vec<u8>) -> EonResult<String> {
+        self.input.send(Chunk::Last(pcm)).await.map_err(|_| unavailable())?;
+        self.result.await.map_err(|_| unavailable())?
+    }
+}
 
 impl PinnedZipformer {
     /// Blocking startup, not for the audio thread. Use a trusted local model
@@ -61,25 +99,35 @@ impl PinnedZipformer {
         Ok(Self(Arc::new(Mutex::new(model))))
     }
 
-    pub(super) async fn infer(&self, pcm: Vec<u8>) -> EonResult<String> {
-        if pcm.is_empty() || pcm.len() > MAX_PCM_BYTES || !pcm.len().is_multiple_of(2) {
-            return Err(EonError::ValidationError("invalid PCM16 utterance".into()));
-        }
-        // Even if the caller times out, the guard stays with the bounded CPU job.
-        // Don't queue more work behind an in-flight call or block the QUIC reactor.
+    // Keep the borrowed Zipformer stream and its caches in one bounded CPU job.
+    // Cancelling the QUIC request drops its sole sender, waking an idle job.
+    pub(super) fn online(&self) -> EonResult<Online> {
         let mut model = self.0.clone().try_lock_owned().map_err(|_| unavailable())?;
-        tokio::task::spawn_blocking(move || {
-            let samples: Vec<_> = pcm
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|&v| f32::from(i16::from_le_bytes(v)) / 32768.0)
-                .collect();
-            let text = model.transcribe(&samples).map_err(|_| unavailable())?;
-            valid_text(&text)?;
-            Ok(text)
-        })
-        .await
-        .map_err(|_| unavailable())?
+        let (input, mut chunks) = mpsc::channel(1);
+        let result = tokio::task::spawn_blocking(move || {
+            let mut stream = model.start_utterance().map_err(|_| unavailable())?;
+            while let Some(chunk) = chunks.blocking_recv() {
+                match chunk {
+                    Chunk::More(pcm, reply) => {
+                        let partial = stream.push(&normalized(&pcm)?).map_err(|_| unavailable())?;
+                        let text = partial.map(|p| p.text).unwrap_or_default();
+                        valid_text(&text)?;
+                        reply.send(text).map_err(|_| unavailable())?;
+                    }
+                    Chunk::Last(pcm) => {
+                        stream.push(&normalized(&pcm)?).map_err(|_| unavailable())?;
+                        let text = stream.finish().map_err(|_| unavailable())?;
+                        valid_text(&text)?;
+                        return Ok(text);
+                    }
+                }
+            }
+            Err(unavailable())
+        });
+        Ok(Online { input, result })
+    }
+
+    pub(super) async fn infer(&self, pcm: Vec<u8>) -> EonResult<String> {
+        self.online()?.finish(pcm).await
     }
 }
