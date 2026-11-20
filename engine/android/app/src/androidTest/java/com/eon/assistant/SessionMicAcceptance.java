@@ -2,74 +2,264 @@ package com.eon.assistant;
 
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.app.Activity;
+import android.app.AppOpsManager;
 import android.app.Instrumentation;
 import android.app.UiAutomation;
+import android.content.Context;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Process;
 import android.os.SystemClock;
+import android.text.TextUtils;
 import android.view.accessibility.AccessibilityNodeInfo;
 import java.util.List;
 import java.util.function.BooleanSupplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-/** Separate test process. Observe only visible EON controls; never grant permissions or invoke a session. */
+/**
+ * Manual, read-only observer in the test APK's process. The operator supplies virtual input;
+ * this test cannot identify its source. AppOps reports a running client operation, not PCM,
+ * recorder object lifetime, or power to a physical microphone.
+ */
 public final class SessionMicAcceptance extends Instrumentation {
-    private UiAutomation ui;
+    private static final String EON = "com.eon.assistant";
+    private static final String WATCH = "android.permission.WATCH_APPOPS";
+    private static final String OFF = "EON · Mic off";
+    private static final String START = "Start 6-second microphone meter";
+    private static final String STOP = "Stop microphone now";
+    private static final String DENIED =
+            "Mic off. Use Open EON controls to review microphone permission, then invoke a fresh card.";
+    private static final String STOPPED = "Mic off · stopped · levels cleared";
+    private static final String NONZERO = "([1-9][0-9]?|100)%";
+    private static final Pattern PROGRESS = Pattern.compile(
+            "Measuring microphone · (?:[1-9]|1[01])/12 half-second levels · RMS " + NONZERO);
+    private static final Pattern COMPLETE = Pattern.compile(
+            "Mic off · 12 levels complete · highest RMS " + NONZERO);
+    private static final long MANUAL_MS = 40_000;
+    private static final long RELEASE_MS = 1_000;
+    private static final long QUIET_MS = 600;
+
+    private Bundle arguments;
     private String mode;
-    private String step = "preflight";
+    private String step = "mode";
+    private UiAutomation ui;
+    private AppOpsManager ops;
+    private int uid;
+    private int cardWindow;
+    private int observedRms;
 
     @Override public void onCreate(Bundle args) {
         super.onCreate(args);
-        mode = args.getString("mode");
+        arguments = args;
         start();
     }
 
-    private String text(String id) {
-        AccessibilityNodeInfo root = ui.getRootInActiveWindow();
-        if (root == null || !"com.eon.assistant".contentEquals(root.getPackageName())) return "";
-        List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId("com.eon.assistant:id/" + id);
-        if (nodes.size() != 1 || !nodes.get(0).isVisibleToUser() || nodes.get(0).getText() == null) return "";
-        return nodes.get(0).getText().toString();
+    private static void require(boolean ok) {
+        if (!ok) throw new AssertionError();
     }
 
-    private void await(String name, BooleanSupplier predicate) {
-        step = name;
-        long end = SystemClock.elapsedRealtime() + 40_000;
-        do {
-            if (predicate.getAsBoolean()) return;
-            SystemClock.sleep(70);
-        } while (SystemClock.elapsedRealtime() < end);
+    private static long now() { return SystemClock.elapsedRealtime(); }
+
+    private void until(String checkpoint, long deadline, BooleanSupplier predicate) {
+        step = checkpoint;
+        while (now() < deadline) {
+            if (predicate.getAsBoolean()) {
+                require(now() <= deadline); // A stalled IPC must not extend a release deadline.
+                return;
+            }
+            SystemClock.sleep(50);
+        }
         throw new AssertionError();
+    }
+
+    private boolean active() {
+        // Unlike startWatchingActive, this does not subscribe to other packages' mic activity.
+        return ops.isOpActive(AppOpsManager.OPSTR_RECORD_AUDIO, uid, EON);
+    }
+
+    private AccessibilityNodeInfo root() {
+        ui.clearCache();
+        AccessibilityNodeInfo r = ui.getRootInActiveWindow();
+        return r != null && TextUtils.equals(EON, r.getPackageName()) ? r : null;
+    }
+
+    private static AccessibilityNodeInfo node(AccessibilityNodeInfo root, String id) {
+        if (root == null) return null;
+        List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId(EON + ":id/" + id);
+        if (nodes.isEmpty()) return null;
+        require(nodes.size() == 1);
+        AccessibilityNodeInfo n = nodes.get(0);
+        require(TextUtils.equals(EON, n.getPackageName()) && n.getWindowId() == root.getWindowId());
+        return n.isVisibleToUser() ? n : null;
+    }
+
+    private static String text(AccessibilityNodeInfo root, String id) {
+        AccessibilityNodeInfo n = node(root, id);
+        return n == null || n.getText() == null ? "" : n.getText().toString();
+    }
+
+    private static boolean idleControls(AccessibilityNodeInfo r) {
+        return OFF.equals(text(r, "hud_title")) && "Session open".equals(text(r, "hud_status"))
+                && START.equalsIgnoreCase(text(r, "hud_mic"));
+    }
+
+    private static boolean cleanExpanded(AccessibilityNodeInfo r) {
+        return node(r, "hud_mic_status") == null && node(r, "hud_mic_graph") == null && idleControls(r);
+    }
+
+    private boolean sameCard(AccessibilityNodeInfo r) {
+        return r != null && r.getWindowId() == cardWindow;
+    }
+
+    private boolean terminal(AccessibilityNodeInfo r) {
+        if ("hide".equals(mode)) {
+            // Invoke over the EON controls activity. Null, launcher, a collapsed card, or even
+            // another EON window with no mic text is NOT evidence that the card was dismissed.
+            if (sameCard(r)) {
+                require(!text(r, "hud_mic_status").startsWith("Mic off"));
+                return false;
+            }
+            return node(r, "hud_title") == null && node(r, "assistant_role_status") != null;
+        }
+        if (!sameCard(r) || !idleControls(r)) return false;
+        String s = text(r, "hud_mic_status");
+        require(!s.startsWith("Mic off · measurement unavailable"));
+        if ("complete".equals(mode)) {
+            Matcher peak = COMPLETE.matcher(s);
+            return peak.matches() && Integer.parseInt(peak.group(1)) >= observedRms
+                    && node(r, "hud_mic_graph") != null;
+        }
+        return ("stop".equals(mode) ? STOPPED : DENIED).equals(s) && node(r, "hud_mic_graph") == null;
+    }
+
+    private void finishTake(long start, long deadline) {
+        step = mode;
+        long lastActive = now();
+        boolean ended = false;
+        while (now() < deadline) {
+            if (active()) {
+                require(!ended); // Don't join evidence from two separate operations.
+                lastActive = now();
+            } else ended = true;
+            boolean done = terminal(root());
+            require(now() <= deadline && now() - lastActive <= RELEASE_MS);
+            if (done) {
+                // Allow sampling jitter, but not one short capture followed by a UI-only timer.
+                if ("complete".equals(mode)) require(lastActive - start >= 5_000);
+                if (!ended) until("record-op-release", now() + RELEASE_MS, () -> {
+                    require(terminal(root()));
+                    return !active();
+                });
+                return;
+            }
+            SystemClock.sleep(50);
+        }
+        throw new AssertionError();
+    }
+
+    private void fresh() {
+        until("fresh-collapsed", now() + MANUAL_MS, () -> {
+            require(!active());
+            AccessibilityNodeInfo r = root();
+            AccessibilityNodeInfo toggle = node(r, "hud_toggle");
+            if (toggle == null) return false;
+            require(TextUtils.equals("Show session details", toggle.getContentDescription()));
+            if (!OFF.equals(text(r, "hud_title")) || !"Session open".equals(text(r, "hud_status"))
+                    || node(r, "hud_mic") != null) return false;
+            cardWindow = r.getWindowId();
+            return true;
+        });
+        until("fresh-expanded", now() + MANUAL_MS, () -> {
+            require(!active());
+            AccessibilityNodeInfo r = root();
+            require(sameCard(r));
+            if (node(r, "hud_mic") == null) return false;
+            require(cleanExpanded(r) && !active());
+            return true;
+        });
+    }
+
+    private void observe() {
+        until("idle-card", now() + MANUAL_MS, () -> {
+            require(!active());
+            AccessibilityNodeInfo r = root();
+            if (!cleanExpanded(r)) return false;
+            cardWindow = r.getWindowId();
+            return true;
+        });
+        if ("denied".equals(mode)) {
+            until("denied", now() + MANUAL_MS, () -> {
+                require(!active());
+                AccessibilityNodeInfo r = root();
+                require(sameCard(r));
+                return terminal(r);
+            });
+        } else {
+            until("record-op-active", now() + MANUAL_MS, () -> {
+                if (active()) return true;
+                AccessibilityNodeInfo r = root();
+                require(sameCard(r) && !text(r, "hud_mic_status").startsWith("Mic off"));
+                return false;
+            });
+            // For Stop/hide, finish well before a six-second take could end naturally. Neither
+            // waiting out a leak nor observing a completed card and THEN dismissing should pass.
+            long start = now(), end = start + ("complete".equals(mode) ? 8_000 : 3_800);
+            until("nonzero-progress", end, () -> {
+                require(active());
+                AccessibilityNodeInfo r = root();
+                require(sameCard(r));
+                Matcher rms = PROGRESS.matcher(text(r, "hud_mic_status"));
+                if (!rms.matches() || !"EON · Mic on".equals(text(r, "hud_title"))
+                        || !STOP.equalsIgnoreCase(text(r, "hud_mic")) || node(r, "hud_mic_graph") == null) return false;
+                require(active());
+                observedRms = Integer.parseInt(rms.group(1));
+                return true;
+            });
+            finishTake(start, end);
+        }
+        long quiet = now() + QUIET_MS;
+        until("inactive-hold", quiet + RELEASE_MS, () -> {
+            require(!active() && terminal(root()) && !active());
+            return now() >= quiet;
+        });
+        if ("hide".equals(mode)) fresh();
     }
 
     @Override public void onStart() {
         Bundle result = new Bundle();
         int code = Activity.RESULT_CANCELED;
         try {
+            require(arguments != null && arguments.size() == 1);
+            mode = arguments.getString("mode");
+            require("denied".equals(mode) || "complete".equals(mode) || "stop".equals(mode) || "hide".equals(mode));
+            step = "preflight";
+            Context test = getTargetContext();
+            require(Build.VERSION.SDK_INT >= 34 && ("ranchu".equals(Build.HARDWARE) || "goldfish".equals(Build.HARDWARE))
+                    && (EON + ".keystoretest").equals(test.getPackageName()));
+            uid = test.getPackageManager().getPackageUid(EON, 0);
+            require(uid >= 0 && uid != Process.myUid());
+            ops = test.getSystemService(AppOpsManager.class);
+            require(ops != null);
             ui = getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
             AccessibilityServiceInfo info = ui.getServiceInfo();
-            info.packageNames = new String[]{"com.eon.assistant"};
-            info.flags |= AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS;
+            info.packageNames = new String[]{EON};
+            info.flags |= AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
+                    | AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS; // the level graph
             ui.setServiceInfo(info);
-            if ("denied".equals(mode)) {
-                await("denied", () -> text("hud_mic_status").startsWith("Mic off. Use Open EON controls"));
-            } else {
-                await("progress", () -> text("hud_mic_status").matches(
-                        "Measuring microphone · (?:[1-9]|1[01])/12 half-second levels · RMS (?:[0-9]{1,2}|100)%") &&
-                        text("hud_mic").equalsIgnoreCase("Stop microphone now"));
-                if ("complete".equals(mode)) {
-                    await("complete", () -> text("hud_mic_status").matches(
-                            "Mic off · 12 levels complete · highest RMS (?:[0-9]{1,2}|100)%"));
-                    result.putString("completion", text("hud_mic_status"));
-                } else if ("stop".equals(mode)) {
-                    await("stop", () -> "Mic off · stopped · levels cleared".equals(text("hud_mic_status")));
-                } else if ("hide".equals(mode)) {
-                    await("hide", () -> text("hud_title").isEmpty());
-                    await("fresh", () -> "Session open".equals(text("hud_status")) &&
-                            "EON · Mic off".equals(text("hud_title")) && text("hud_mic_status").isEmpty());
-                } else throw new AssertionError();
+            step = "watch-permission";
+            ui.adoptShellPermissionIdentity(WATCH);
+            try {
+                // AOSP isOperationActive silently returns false for unauthorized cross-UID reads.
+                require(test.checkSelfPermission(WATCH) == PackageManager.PERMISSION_GRANTED);
+                observe();
+            } finally {
+                ui.dropShellPermissionIdentity();
             }
             result.putString("micHud", "PASS-" + mode);
             code = Activity.RESULT_OK;
-        } catch (RuntimeException | AssertionError | LinkageError failure) {
+        } catch (PackageManager.NameNotFoundException | RuntimeException | AssertionError | LinkageError failure) {
             result.putString("micHud", "FAIL-" + step);
         }
         finish(code, result);
