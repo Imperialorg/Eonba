@@ -180,8 +180,9 @@ Use separate instrumentation gates for the stock app and the selected assistant'
   graph, its cleared state, dismissal and a clean new card for
   `voiceHud=PASS-session`. It never injects gestures, changes roles or grants permissions.
 * **Selected-role workflow:** Use a setup-complete, unlocked, disposable API 34+ AVD with
-  less than 8 GB of memory. Install the matching debug APK, select EON in Android's role
-  picker and leave the test APK uninstalled. No microphone or accessibility permission
+  less than 8 GB of memory and the system language set to English. Install the matching
+  debug APK and choose EON as the digital assistant under Android Settings → Apps →
+  Default apps. Leave the test APK uninstalled. No microphone or accessibility permission
   is needed. With EON's role status visible, run
   `python3 app/keystore_device_test.py --preconfigured-workflow-serial "$SERIAL"`.
   Invoke the assistant, expand the card and tap **Check model profile**. Expect one

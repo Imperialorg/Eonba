@@ -12,6 +12,7 @@ import android.text.TextUtils;
 import android.view.View;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
 import java.util.List;
 import java.util.function.Predicate;
 
@@ -20,8 +21,24 @@ public final class WorkflowNoticeAcceptance extends Instrumentation {
     private static final String EON = "com.eon.assistant";
     private static final String ID = EON + ":id/";
     private UiAutomation ui;
-    private int card;
-    private volatile boolean checkClicked;
+    private static final class CardClicks {
+        int window = -1;
+        long expanded, checked;
+        boolean invalid;
+
+        synchronized void record(int id, boolean toggle, long time) {
+            if (window == -1) window = id;
+            if (window != id || checked != 0 || time <= 0) invalid = true;
+            else if (toggle && expanded == 0) expanded = time;
+            else if (!toggle && expanded != 0 && time >= expanded) checked = time;
+            else invalid = true;
+        }
+
+        synchronized boolean expandedThenChecked(int card) {
+            require(!invalid);
+            return window == card && checked != 0;
+        }
+    }
     private String step = "preflight";
 
     @Override public void onCreate(Bundle args) {
@@ -74,35 +91,59 @@ public final class WorkflowNoticeAcceptance extends Instrumentation {
                 && visible(r, "hud_status") == null && visible(r, "hud_result") == null;
     }
 
+    // Read window IDs and active flags only. Never fetch the root, title or contents of other
+    // windows. An empty list, or one missing our known controls/active window, proves nothing.
+    private boolean windows(int active, int controls, int card, boolean cardPresent) {
+        List<AccessibilityWindowInfo> windows = ui.getWindows();
+        if (windows == null || windows.isEmpty()) return false;
+        boolean sawActive = false, sawControls = false, sawCard = false;
+        for (AccessibilityWindowInfo w : windows) {
+            if (w == null || w.getId() < 0) return false;
+            if (w.isActive()) {
+                if (sawActive || w.getId() != active) return false;
+                sawActive = true;
+            }
+            sawControls |= w.getId() == controls;
+            sawCard |= w.getId() == card;
+        }
+        return sawActive && sawControls && sawCard == cardPresent;
+    }
+
     private void observe() {
         // This fixture intentionally has <8 decimal GB, so the profile is known independently
         // of both the generated bindings and the text the application happens to show.
         ActivityManager.MemoryInfo memory = new ActivityManager.MemoryInfo();
         getTargetContext().getSystemService(ActivityManager.class).getMemoryInfo(memory);
         require(memory.totalMem > 0 && memory.totalMem < 8_000_000_000L);
-        await("selected-controls", WorkflowNoticeAcceptance::controls);
-        card = await("fresh-card", r -> idle(r, false)).getWindowId();
-        await("ready-check", r -> r.getWindowId() == card && idle(r, true));
-
+        int controls = await("selected-controls", WorkflowNoticeAcceptance::controls).getWindowId();
+        // Arm before observing the fresh card. The operator need not stop between expand and
+        // Check; bind both ordered click events to the window we independently observe as idle.
+        CardClicks clicks = new CardClicks();
         final long since = SystemClock.uptimeMillis();
         ui.setOnAccessibilityEventListener(event -> {
             if (event.getEventTime() < since || event.getEventType() != AccessibilityEvent.TYPE_VIEW_CLICKED
-                    || event.getWindowId() != card || !TextUtils.equals(EON, event.getPackageName())) return;
+                    || !TextUtils.equals(EON, event.getPackageName())) return;
             AccessibilityNodeInfo n = event.getSource(0);
-            if (n != null && n.getWindowId() == card && TextUtils.equals(EON, n.getPackageName())
-                    && (ID + "hud_check").equals(n.getViewIdResourceName())) checkClicked = true;
+            int window = event.getWindowId();
+            if (window < 0 || n == null || n.getWindowId() != window || !TextUtils.equals(EON, n.getPackageName())) return;
+            String id = n.getViewIdResourceName();
+            if ((ID + "hud_toggle").equals(id) || (ID + "hud_check").equals(id))
+                clicks.record(window, (ID + "hud_toggle").equals(id), event.getEventTime());
         });
-        await("explicit-check", r -> r.getWindowId() == card && checkClicked);
+        int card = await("fresh-card", r -> r.getWindowId() != controls && idle(r, false)).getWindowId();
+        await("explicit-check", r -> r.getWindowId() == card && clicks.expandedThenChecked(card));
         await("completed-receipt", r -> {
             AccessibilityNodeInfo status = visible(r, "hud_status");
             return r.getWindowId() == card && status != null
                     && status.getLiveRegion() == View.ACCESSIBILITY_LIVE_REGION_POLITE
                     && TextUtils.equals("Profile workflow complete. Completed tasks: 1", status.getText())
-                    && "Suggested profile: p0_mobile_ultralight".equals(text(r, "hud_result"));
+                    && "Suggested profile: p0_mobile_ultralight".equals(text(r, "hud_result"))
+                    && windows(card, controls, card, true);
         });
-
-        // A missing root, a background/foreign window or a collapsed card isn't a dismissal.
-        await("dismissed-to-controls", r -> r.getWindowId() != card && controls(r));
+        ui.setOnAccessibilityEventListener(null);
+        // Tapping through the non-modal card can make controls active without dismissing it.
+        await("dismissed-to-controls", r -> r.getWindowId() == controls && controls(r)
+                && windows(controls, controls, card, false));
         int fresh = await("reshown-card", r -> idle(r, false)).getWindowId();
         await("reshown-details", r -> r.getWindowId() == fresh && idle(r, true));
     }
@@ -118,7 +159,8 @@ public final class WorkflowNoticeAcceptance extends Instrumentation {
             info.packageNames = new String[]{EON};
             info.eventTypes = AccessibilityEvent.TYPE_VIEW_CLICKED;
             info.notificationTimeout = 0;
-            info.flags |= AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS;
+            info.flags |= AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
+                    | AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS;
             ui.setServiceInfo(info);
             observe();
             result.putString("workflowNotice", "PASS-session");
