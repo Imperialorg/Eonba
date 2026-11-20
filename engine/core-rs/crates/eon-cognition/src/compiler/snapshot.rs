@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::Write;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
+use std::sync::Arc;
 
 use eon_primitives::EonResult;
 use memmap2::{Mmap, MmapMut, MmapOptions};
@@ -10,21 +11,23 @@ use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, memfd_create};
 
 use super::workspace::failed;
 use super::{
-    CompiledObjective, MAX_READ_BYTES, ReadRequest, ReadWorkspace, ShadowRead, StagedPreview,
-    invalid,
+    CompiledObjective, MAX_READ_BYTES, PrivateCheckouts, ReadRequest, ReadWorkspace, ShadowRead,
+    StagedPreview, invalid,
 };
 
 /// Private CoW view of exactly the authorized extents, in task order. Not a
 /// checkout: no whole-file copies, source handles, path lookup or merge-back.
 pub struct ReadSnapshot {
     plan: CompiledObjective,
+    base: Sealed,
     view: Mmap,
     extents: Vec<Extent>,
 }
 
-struct Extent {
-    file_len: usize,
-    packed: Range<usize>,
+#[derive(Clone)]
+pub(super) struct Extent {
+    pub(super) file_len: usize,
+    pub(super) packed: Range<usize>,
 }
 
 impl CompiledObjective {
@@ -49,7 +52,7 @@ pub(super) fn alternatives(
     ])
 }
 
-fn capture<'a>(
+pub(super) fn capture<'a>(
     workspace: &ReadWorkspace,
     reads: impl Iterator<Item = &'a ReadRequest> + Clone,
 ) -> EonResult<(Sealed, Vec<Extent>)> {
@@ -94,6 +97,21 @@ fn capture<'a>(
 }
 
 impl ReadSnapshot {
+    /// Stage two writable private variants of one already-captured range. The
+    /// live workspace is not consulted again. Multi-step snapshots are not a
+    /// checkout: overlapping read requests must not become inconsistent files.
+    pub fn checkout_variants(self) -> EonResult<PrivateCheckouts> {
+        let [extent]: [_; 1] = self
+            .extents
+            .try_into()
+            .map_err(|_| invalid("expected one captured range for checkout variants"))?;
+        let [request] = self.plan.single_read()?;
+        PrivateCheckouts::new(
+            self.base,
+            [(request.clone(), extent.clone()), (request, extent)],
+        )
+    }
+
     /// Execute only the compiled read plan. The anonymous mapping is destroyed
     /// before presentation, even if the user never responds. Only the bounded
     /// results are held behind the existing one-shot attention/consent gate.
@@ -122,7 +140,8 @@ fn new_image() -> EonResult<File> {
     .map_err(failed)
 }
 
-struct Sealed(File);
+#[derive(Clone)]
+pub(super) struct Sealed(Arc<File>);
 
 fn seal(image: File) -> EonResult<Sealed> {
     fcntl_add_seals(
@@ -130,28 +149,30 @@ fn seal(image: File) -> EonResult<Sealed> {
         SealFlags::WRITE | SealFlags::SHRINK | SealFlags::GROW | SealFlags::SEAL,
     )
     .map_err(failed)?;
-    Ok(Sealed(image))
+    Ok(Sealed(Arc::new(image)))
 }
 
 impl Sealed {
     fn branch(&self, plan: CompiledObjective, extents: Vec<Extent>) -> EonResult<ReadSnapshot> {
         Ok(ReadSnapshot {
             plan,
+            base: self.clone(),
             view: self.fork()?.make_read_only().map_err(failed)?,
             extents,
         })
     }
 
-    fn fork(&self) -> EonResult<MmapMut> {
+    pub(super) fn fork(&self) -> EonResult<MmapMut> {
         // SAFETY: this is a sealed regular memfd, never the source file. No fd
         // can write to or truncate its backing. Writes to MAP_PRIVATE diverge.
-        unsafe { MmapOptions::new().map_copy(&self.0) }.map_err(failed)
+        unsafe { MmapOptions::new().map_copy(&*self.0) }.map_err(failed)
     }
 }
 
 #[cfg(test)]
 mod compiler_tests {
     use super::*;
+    use std::os::unix::fs::MetadataExt;
 
     #[test]
     fn private_pages_diverge_without_changing_the_sealed_base_or_another_view() {
@@ -170,21 +191,10 @@ mod compiler_tests {
         assert!(sealed.0.set_len(0).is_err());
     }
 
-    #[test]
-    fn anonymous_backing_is_unmapped_before_the_consent_window() {
-        use std::os::unix::fs::MetadataExt;
+    fn snapshot_and_inode() -> (ReadSnapshot, String) {
         let mut image = new_image().unwrap();
         image.write_all(b"test").unwrap();
         let inode = image.metadata().unwrap().ino().to_string();
-        let mapped = || {
-            std::fs::read_to_string("/proc/self/maps")
-                .unwrap()
-                .lines()
-                .any(|line| {
-                    line.contains("/memfd:eon-read-snapshot")
-                        && line.split_ascii_whitespace().nth(4) == Some(&inode)
-                })
-        };
         let objective = serde_json::from_value(serde_json::json!({
             "id": eon_kernel::ObjectiveId::new(),
             "owner_id": eon_kernel::IdentityId::new(),
@@ -203,8 +213,57 @@ mod compiler_tests {
                 }],
             )
             .unwrap();
-        assert!(mapped());
+        (snapshot, inode)
+    }
+
+    fn mapping_modes(inode: &str) -> Vec<String> {
+        std::fs::read_to_string("/proc/self/maps")
+            .unwrap()
+            .lines()
+            .filter(|line| {
+                line.contains("/memfd:eon-read-snapshot")
+                    && line.split_ascii_whitespace().nth(4) == Some(inode)
+            })
+            .map(|line| line.split_ascii_whitespace().nth(1).unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn anonymous_backing_is_unmapped_before_the_consent_window() {
+        let (snapshot, inode) = snapshot_and_inode();
+        assert_eq!(mapping_modes(&inode), ["r--p"]);
         let _staged = snapshot.preview();
-        assert!(!mapped());
+        assert!(mapping_modes(&inode).is_empty());
+    }
+
+    #[test]
+    fn writable_checkouts_close_the_backing_and_unmap_on_drop_denial_or_presentation() {
+        use super::super::Attention;
+
+        for attention in [None, Some(Attention::Unverified), Some(Attention::Verified)] {
+            let (snapshot, inode) = snapshot_and_inode();
+            let backing = snapshot.base.0.metadata().unwrap();
+            let mut pair = snapshot.checkout_variants().unwrap();
+            let id = pair.choices().next().unwrap().id.clone();
+            pair.overwrite(&id, 1, b"x").unwrap();
+            assert_eq!(mapping_modes(&inode), ["rw-p", "rw-p"]);
+            assert!(!std::fs::read_dir("/proc/self/fd").unwrap().any(|fd| {
+                fd.ok()
+                    .and_then(|fd| std::fs::metadata(fd.path()).ok())
+                    .is_some_and(|m| (m.dev(), m.ino()) == (backing.dev(), backing.ino()))
+            }));
+            match attention {
+                None => drop(pair),
+                Some(Attention::Unverified) => {
+                    assert!(pair.present(Attention::Unverified).is_err())
+                }
+                Some(Attention::Verified) => {
+                    let pending = pair.present(Attention::Verified).unwrap();
+                    assert!(mapping_modes(&inode).is_empty());
+                    pending.cancel();
+                }
+            }
+            assert!(mapping_modes(&inode).is_empty());
+        }
     }
 }

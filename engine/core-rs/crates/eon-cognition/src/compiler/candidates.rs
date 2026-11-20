@@ -2,8 +2,8 @@ use eon_kernel::model::Objective;
 use eon_primitives::{EonError, EonResult, TaskId};
 
 use super::{
-    Attention, Confirmation, ConfirmedPreview, Decision, ReadRequest, ReadWorkspace, StagedPreview,
-    compile_words, intent_words, invalid, snapshot,
+    Attention, CompiledObjective, Confirmation, ConfirmedPreview, Decision, ReadRequest,
+    ReadWorkspace, StagedPreview, compile_words, intent_words, invalid, snapshot,
 };
 
 /// Two separately validated single-read DAGs, never an implicit best guess.
@@ -16,6 +16,13 @@ pub fn preview_candidates(
     objective: &Objective,
     workspace: &ReadWorkspace,
 ) -> EonResult<CandidatePreview> {
+    let [left, right] = candidate_plans(objective)?;
+    Ok(CandidatePreview(snapshot::alternatives(
+        workspace, left, right,
+    )?))
+}
+
+pub(super) fn candidate_plans(objective: &Objective) -> EonResult<[CompiledObjective; 2]> {
     let words = intent_words(&objective.description)?;
     let [verb, file, a, or, b] = words.as_slice() else {
         return Err(invalid("expected exactly two explicit file alternatives"));
@@ -25,9 +32,7 @@ pub fn preview_candidates(
     }
     let left = compile_words(objective, &[verb, file, a])?;
     let right = compile_words(objective, &[verb, file, b])?;
-    Ok(CandidatePreview(snapshot::alternatives(
-        workspace, left, right,
-    )?))
+    Ok([left, right])
 }
 
 impl CandidatePreview {
@@ -56,16 +61,27 @@ impl Confirmation<CandidatePreview> {
         decision: CandidateDecision,
         attention: Attention,
     ) -> EonResult<ConfirmedPreview> {
-        let CandidateDecision::Confirm(id) = decision else {
-            return Err(EonError::SecurityViolation(
-                "candidate presentation declined".into(),
-            ));
-        };
-        self.approve(Decision::Confirm, attention)?
+        let (preview, id) = self.approve_candidate(decision, attention)?;
+        preview
             .0
             .into_iter()
             .find(|candidate| candidate.requests().any(|r| r.task_id == id))
             .map(StagedPreview::into_confirmed)
             .ok_or_else(|| invalid("selection not in this presentation"))
+    }
+}
+
+impl<T> Confirmation<T> {
+    pub(super) fn approve_candidate(
+        self,
+        decision: CandidateDecision,
+        attention: Attention,
+    ) -> EonResult<(T, TaskId)> {
+        let CandidateDecision::Confirm(id) = decision else {
+            return Err(EonError::SecurityViolation(
+                "candidate presentation declined".into(),
+            ));
+        };
+        Ok((self.approve(Decision::Confirm, attention)?, id))
     }
 }

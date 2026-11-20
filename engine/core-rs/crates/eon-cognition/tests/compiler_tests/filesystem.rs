@@ -1,3 +1,5 @@
+#[path = "checkouts.rs"]
+mod checkouts;
 #[path = "fixture.rs"]
 mod fixture;
 use fixture::{Fixture, mkdir, write};
@@ -8,7 +10,7 @@ use std::time::Duration;
 
 use eon_cognition::compiler::{
     Attention, CONFIRMATION_WINDOW, CandidateDecision, Decision, ReadSnapshot, ReadWorkspace,
-    compile, preview_candidates,
+    checkout_candidates, compile, preview_candidates,
 };
 use rustix::fs::Mode;
 
@@ -285,6 +287,10 @@ fn ambiguous_candidate_grammar_and_capture_fail_as_a_unit() {
     ] {
         assert!(
             preview_candidates(&objective(intent), &ws).is_err(),
+            "{intent}"
+        );
+        assert!(
+            checkout_candidates(&objective(intent), &ws).is_err(),
             "{intent}"
         );
     }

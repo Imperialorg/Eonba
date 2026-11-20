@@ -10,6 +10,8 @@
 
 #[cfg(target_os = "linux")]
 mod candidates;
+#[cfg(target_os = "linux")]
+mod checkout;
 mod preview;
 #[cfg(target_os = "linux")]
 mod snapshot;
@@ -23,6 +25,10 @@ use serde_json::json;
 
 #[cfg(target_os = "linux")]
 pub use candidates::{CandidateDecision, CandidatePreview, preview_candidates};
+#[cfg(target_os = "linux")]
+pub use checkout::{
+    CheckoutChoice, CheckoutPresentation, PrivateCheckouts, SelectedCheckout, checkout_candidates,
+};
 pub use preview::{
     Attention, CONFIRMATION_WINDOW, Confirmation, ConfirmedPreview, Decision, ShadowRead,
     StagedPreview,
@@ -37,7 +43,7 @@ pub const MAX_READS: usize = 8;
 pub const MAX_READ_BYTES: usize = 4096;
 
 /// A range is resolved against a workspace root supplied by the host, never by the objective.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadRequest {
     pub task_id: TaskId,
     pub path: String,

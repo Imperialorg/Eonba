@@ -96,10 +96,15 @@ pub struct Confirmation<T = StagedPreview> {
 
 impl<T> Confirmation<T> {
     pub(super) fn start(preview: T, attention: Attention) -> EonResult<Self> {
+        Self::start_with(attention, || preview)
+    }
+
+    pub(super) fn start_with(attention: Attention, freeze: impl FnOnce() -> T) -> EonResult<Self> {
         verify_attention(attention)?;
+        let presented_at = Instant::now();
         Ok(Self {
-            preview,
-            presented_at: Instant::now(),
+            preview: freeze(),
+            presented_at,
         })
     }
 
