@@ -4,6 +4,7 @@ pub mod id;
 #[cfg(feature = "onnx-runtime")]
 pub mod onnx;
 pub mod result;
+pub mod telemetry;
 pub mod time;
 
 pub use error::EonError;

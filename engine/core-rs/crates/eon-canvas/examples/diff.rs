@@ -1,5 +1,6 @@
 //! Opens a read-only function diff: `cargo run -p eon-canvas --example diff -- before.rs after.rs`.
-//! Without paths it shows the bundled Rust example.
+//! Without paths it shows the bundled Rust example. On Linux, pass `--live`
+//! before both paths to poll the opened files for in-place edits.
 
 use std::{error::Error, fs, path::Path};
 
@@ -26,7 +27,21 @@ fn read_blocks(path: &Path) -> Result<Vec<FunctionBlock>, Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    const USAGE: &str =
+        "usage: diff [<before.rs|py> <after.rs|py>] | diff --live <before.rs|py> <after.rs|py>";
     let paths: Vec<_> = std::env::args_os().skip(1).collect();
+    if paths.first().is_some_and(|arg| arg == "--live") {
+        #[cfg(target_os = "linux")]
+        {
+            let [_, before, after] = paths.as_slice() else {
+                return Err(USAGE.into());
+            };
+            let view = eon_canvas::view::LiveDiffView::open(Path::new(before), Path::new(after))?;
+            return Ok(eon_canvas::view::run_live_diff(view)?);
+        }
+        #[cfg(not(target_os = "linux"))]
+        return Err("live diff requires Linux".into());
+    }
     let (old, new) = match paths.as_slice() {
         [] => {
             eprintln!("Showing the bundled example. Pass two source paths to review files.");
@@ -36,7 +51,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             )
         }
         [old, new] => (read_blocks(Path::new(old))?, read_blocks(Path::new(new))?),
-        _ => return Err("usage: diff [<before.rs|py> <after.rs|py>]".into()),
+        _ => return Err(USAGE.into()),
     };
     Ok(eon_canvas::view::run_diff(old, new)?)
 }

@@ -147,6 +147,12 @@ just sent is credited, even if the ACK also covers other operations. Already
 imported operations are safe to replay. After disconnect or the 1024-RPC limit,
 restart from the two actual version vectors; no saved network cursor is needed.
 
+Ordinary sync does not log peer activity. To show completions in `eon watch`,
+the initiating runtime can opt in to `observed::sync_with_observer` and append
+its fieldless marker to a separate local telemetry journal. Open `/mesh` on
+that journal to see the count and last sequence. These are completed calls, not
+connected peers. A failed journal write is reported separately from the sync.
+
 ### 6.2 Projection into SQLite
 CRDTs serve as the append-only replication log. On each local node, a background projection worker materializes the CRDT state into relational **SQLite (FTS5 + `sqlite-vec`)** tables, enabling sub-5ms hybrid BM25 and vector similarity queries.
 

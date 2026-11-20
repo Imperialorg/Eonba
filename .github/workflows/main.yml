@@ -94,7 +94,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: cargo test --locked -p eon-mesh
+      - run: |
+          umask 077
+          TMPDIR=/tmp cargo test --locked -p eon-mesh
       - name: Discover, elect and measure 100 paired RPCs on an isolated two-node LAN
         run: bash "$GITHUB_WORKSPACE/scripts/test_paired_lan.sh"
 

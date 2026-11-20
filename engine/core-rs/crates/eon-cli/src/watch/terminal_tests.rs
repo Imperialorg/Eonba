@@ -34,7 +34,7 @@ fn menu_navigation_and_completion_use_the_same_destinations() {
     assert_eq!(state.prompt.as_ref().unwrap().text, "/menu");
     key(&mut state, KeyCode::BackTab);
     key(&mut state, KeyCode::Enter);
-    assert!(screen(&state).contains("Peer count is unknown"));
+    assert!(screen(&state).contains("Waiting for the local journal"));
 
     type_text(&mut state, "/v");
     key(&mut state, KeyCode::Tab);
@@ -110,6 +110,43 @@ fn replay_drives_dock_integrity_and_recent_metadata_through_failure_and_recovery
     std::fs::write(segment, good).unwrap();
     state.refresh(dir.path());
     assert!(screen(&state).contains("checksums and sequence for 2 frames"));
+}
+
+#[test]
+fn mesh_replay_counts_only_complete_known_markers_and_clears_on_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut writer = JournalWriter::open(dir.path()).unwrap();
+    let marker = PairedSyncCompleted.encode();
+    let mut unknown_version = marker.to_vec();
+    *unknown_version.last_mut().unwrap() += 1;
+    writer
+        .append_batch(&[
+            b"ordinary event",
+            &marker[..marker.len() - 1],
+            &unknown_version,
+            &[marker, b"suffix"].concat(),
+        ])
+        .unwrap();
+    let mut state = WatchState::default();
+    type_text(&mut state, "/mesh");
+    key(&mut state, KeyCode::Enter);
+    state.refresh(dir.path());
+    assert!(screen(&state).contains("No completed paired syncs recorded"));
+
+    writer.append_batch(&[marker, marker]).unwrap();
+    writer.append_batch(&[b"unrelated".as_slice(); 9]).unwrap();
+    state.refresh(dir.path());
+    let text = screen(&state);
+    assert!(text.contains("Completed paired syncs recorded: 2"));
+    assert!(text.contains("Last sync record at journal seq: 6"));
+
+    state.refresh(&dir.path().join("missing"));
+    let text = screen(&state);
+    assert!(text.contains("Journal replay failed; paired sync observations unavailable"));
+    assert!(!text.contains("Completed paired syncs recorded:"));
+    assert!(!text.contains("Last sync record at journal seq:"));
+    state.refresh(dir.path());
+    assert!(screen(&state).contains("Completed paired syncs recorded: 2"));
 }
 
 #[test]

@@ -4,6 +4,7 @@ pub mod discovery;
 pub mod election;
 pub mod exchange;
 pub mod lan;
+pub mod observed;
 pub mod paired;
 pub mod qos;
 pub mod split_inference;

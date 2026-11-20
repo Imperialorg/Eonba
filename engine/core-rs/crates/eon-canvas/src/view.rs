@@ -3,10 +3,16 @@
 
 use eframe::egui;
 use eon_cyber::cpg::FunctionBlock;
+use std::sync::Arc;
 
 use crate::Layout;
 use crate::diff::{Decision, Pairing, Review, Status};
 use crate::render::{NODE_HEIGHT, NODE_WIDTH, node_centre};
+
+#[cfg(target_os = "linux")]
+mod live;
+#[cfg(target_os = "linux")]
+pub use live::{LiveDiffView, run_live_diff};
 
 const NODE_FILL: egui::Color32 = egui::Color32::from_rgb(51, 128, 230);
 pub(crate) const EDGE_STROKE: egui::Color32 = egui::Color32::from_rgb(230, 179, 51);
@@ -197,14 +203,18 @@ pub fn run(layout: Layout) -> eframe::Result {
 }
 
 pub struct DiffView {
-    old: Vec<FunctionBlock>,
-    new: Vec<FunctionBlock>,
+    old: Arc<[FunctionBlock]>,
+    new: Arc<[FunctionBlock]>,
     pairings: Vec<Pairing>,
     review: Review,
 }
 
 impl DiffView {
     pub fn new(old: Vec<FunctionBlock>, new: Vec<FunctionBlock>) -> Self {
+        Self::from_blocks(old.into(), new.into())
+    }
+
+    fn from_blocks(old: Arc<[FunctionBlock]>, new: Arc<[FunctionBlock]>) -> Self {
         let pairings = crate::diff::match_blocks(&old, &new);
         let review = Review::new(&pairings);
         Self {
@@ -272,15 +282,18 @@ impl eframe::App for DiffView {
     }
 }
 
-/// Opens a window that shows the structural diff of two sources until it is closed.
-pub fn run_diff(old: Vec<FunctionBlock>, new: Vec<FunctionBlock>) -> eframe::Result {
-    let options = eframe::NativeOptions {
+fn diff_window_options() -> eframe::NativeOptions {
+    eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1160.0, 400.0]),
         ..Default::default()
-    };
+    }
+}
+
+/// Opens a window that shows the structural diff of two sources until it is closed.
+pub fn run_diff(old: Vec<FunctionBlock>, new: Vec<FunctionBlock>) -> eframe::Result {
     eframe::run_native(
         "eon-canvas diff",
-        options,
+        diff_window_options(),
         Box::new(move |_creation| Ok(Box::new(DiffView::new(old, new)))),
     )
 }

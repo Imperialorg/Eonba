@@ -2562,6 +2562,10 @@ dependencies = [
  "eon-primitives",
  "image",
  "pollster",
+ "rustix 1.1.6",
+ "tree-sitter",
+ "tree-sitter-python",
+ "tree-sitter-rust",
  "wgpu",
 ]
 
@@ -2708,6 +2712,8 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "bytes",
+ "eon-cli",
+ "eon-foundation",
  "eon-primitives",
  "eon-voice",
  "if-addrs",
@@ -2721,6 +2727,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "tokio",
 ]
 

@@ -9,7 +9,7 @@ use crossterm::event::{
     KeyModifiers,
 };
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
-use eon_primitives::{EonError, EonResult};
+use eon_primitives::{EonError, EonResult, telemetry::PairedSyncCompleted};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style, Stylize};
@@ -44,7 +44,7 @@ const COMMANDS: &[(Page, &str, &str)] = &[
         "What this client can observe",
     ),
     (Page::Cyber, "/cyber", "Journal integrity (read-only)"),
-    (Page::Mesh, "/mesh", "Mesh telemetry availability"),
+    (Page::Mesh, "/mesh", "Recorded paired syncs"),
     (Page::Vision, "/vision", "Selected local image (one still)"),
     (Page::Audio, "/audio", "Local microphone level (opt-in)"),
     (Page::Menu, "/menu", "Command menu"),
@@ -86,12 +86,19 @@ impl Prompt {
     }
 }
 
+#[derive(Debug)]
+struct RecordedSyncs {
+    count: usize,
+    last_seq: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct WatchState {
     pub status: Option<JournalStatus>,
     pub error: Option<String>,
     pub quit: bool,
     recent: Vec<(u64, usize)>,
+    syncs: Option<RecordedSyncs>,
     page: Page,
     selected: usize,
     prompt: Option<Prompt>,
@@ -105,6 +112,14 @@ impl WatchState {
         match read_journal(dir) {
             Ok((status, frames)) => {
                 self.status = Some(status);
+                let mut syncs = frames
+                    .iter()
+                    .rev()
+                    .filter(|f| PairedSyncCompleted::decode(&f.payload).is_some());
+                self.syncs = syncs.next().map(|last| RecordedSyncs {
+                    count: 1 + syncs.count(),
+                    last_seq: last.seq_no,
+                });
                 self.recent = frames
                     .iter()
                     .rev()
@@ -115,6 +130,7 @@ impl WatchState {
             }
             Err(err) => {
                 self.status = None;
+                self.syncs = None;
                 self.recent.clear();
                 self.error = Some(err.to_string().replace(char::is_control, "?"));
             }
@@ -137,7 +153,11 @@ impl WatchState {
     }
 
     pub fn on_key(&mut self, key: char) {
-        self.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+        let code = match key {
+            '\r' | '\n' => KeyCode::Enter,
+            c => KeyCode::Char(c),
+        };
+        self.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
     }
 
     fn handle_event(&mut self, event: Event) {
@@ -287,7 +307,7 @@ impl WatchState {
                     .join("\n")
             }),
             Page::Capabilities => Some(format!(
-                "Read-only local journal: {}\n/status: frame metadata\n/cyber: replay checksums and sequence\n/audio: local opt-in input meter\n/vision: one explicitly selected still; no live capture\nNo peer or video feed is attached to this client.",
+                "Read-only local journal: {}\n/status: frame metadata\n/cyber: replay checksums and sequence\n/mesh: opt-in paired sync completions\n/audio: local opt-in input meter\n/vision: one explicitly selected still; no live capture",
                 if self.error.is_some() {
                     "read failed"
                 } else if self.status.is_some() {
@@ -311,7 +331,18 @@ impl WatchState {
             } else {
                 "No replay result yet.".into()
             }),
-            Page::Mesh => Some("No mesh peer feed is attached. Peer count is unknown.".into()),
+            Page::Mesh => Some(if self.error.is_some() {
+                "Journal replay failed; paired sync observations unavailable.".into()
+            } else if let Some(syncs) = &self.syncs {
+                format!(
+                    "Completed paired syncs recorded: {}\nLast sync record at journal seq: {}",
+                    syncs.count, syncs.last_seq
+                )
+            } else if self.status.is_some() {
+                "No completed paired syncs recorded in this journal.".into()
+            } else {
+                "Waiting for the local journal.".into()
+            }),
             Page::Vision => {
                 let border = block();
                 let inner = border.inner(body);

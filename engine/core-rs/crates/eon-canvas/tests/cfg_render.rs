@@ -1,71 +1,14 @@
 //! Read back the same egui scene the operator sees, including the font atlas and arrowheads.
 
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, mpsc},
-    time::Duration,
-};
+#[path = "support/pixels.rs"]
+mod pixels;
 
-use eframe::egui_wgpu::{Renderer, RendererOptions, ScreenDescriptor, capture::CaptureState};
-use egui::{Color32, ColorImage, Pos2, Rect, Shape, Vec2, pos2, vec2};
+use std::collections::BTreeMap;
+
+use egui::{Color32, Pos2, Rect, Shape, Vec2, pos2, vec2};
 use eon_canvas::cfg::CfgView;
 
 const SIZE: [u32; 2] = [640, 640];
-
-fn render(ctx: &egui::Context, mut output: egui::FullOutput) -> Arc<ColorImage> {
-    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
-    desc.backends = desc.backends.with_env();
-    let instance = wgpu::Instance::new(desc);
-    let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
-    let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
-    let format = wgpu::TextureFormat::Rgba8Unorm;
-    let extent = wgpu::Extent3d {
-        width: SIZE[0],
-        height: SIZE[1],
-        depth_or_array_layers: 1,
-    };
-    let mut capture = CaptureState::new(&device, extent, format);
-    let mut renderer = Renderer::new(&device, format, RendererOptions::PREDICTABLE);
-    for (id, deltas) in output.textures_delta.set.drain() {
-        for delta in deltas {
-            renderer.update_texture(&device, &queue, id, &delta);
-        }
-    }
-    let jobs = ctx.tessellate(output.shapes, output.pixels_per_point);
-    let screen = ScreenDescriptor {
-        size_in_pixels: SIZE,
-        pixels_per_point: output.pixels_per_point,
-    };
-    let mut encoder = device.create_command_encoder(&Default::default());
-    let extra = renderer.update_buffers(&device, &queue, &mut encoder, &jobs, &screen);
-    {
-        let view = capture.texture.create_view(&Default::default());
-        let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &view,
-                resolve_target: None,
-                ops: Default::default(),
-                depth_slice: None,
-            })],
-            ..Default::default()
-        });
-        renderer.render(&mut pass.forget_lifetime(), &jobs, &screen);
-    }
-    let buffer = capture.copy_textures(&device, None, &mut encoder);
-    queue.submit(extra.into_iter().chain([encoder.finish()]));
-    for id in output.textures_delta.free.drain() {
-        renderer.free_texture(&id);
-    }
-    let (tx, rx) = mpsc::channel();
-    capture.read_screen_rgba(
-        buffer,
-        vec![egui::ScreenshotCallback::new(move |image| {
-            tx.send(image).unwrap()
-        })],
-    );
-    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-    rx.recv_timeout(Duration::from_secs(5)).unwrap()
-}
 
 #[test]
 fn gcc_graph_renders_all_ids_directed_branches_back_edge_and_self_loop() {
@@ -106,7 +49,7 @@ fn gcc_graph_renders_all_ids_directed_branches_back_edge_and_self_loop() {
         [1, 2, 3, 4, 5, 6, 7]
     );
     assert_eq!(boxes.len(), nodes.len());
-    let image = render(&ctx, output);
+    let image = pixels::render(&ctx, output, SIZE);
     let pixel = |p: Pos2| image[(p.x.floor() as usize, p.y.floor() as usize)];
     for &p in nodes.values() {
         // Check for bright glyph ink *inside* each blue block in the read-back pixels.

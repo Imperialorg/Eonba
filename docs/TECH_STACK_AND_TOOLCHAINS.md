@@ -149,6 +149,10 @@ JVM tests and `--build-only` do not exercise AndroidKeyStore. A passing emulator
 
 ## 6. Desktop & CLI Workspace (`clients/cli`, `clients/canvas` & `clients/daemon`)
 
+For a live function diff on Linux, run `cargo run --locked -p eon-canvas --example diff -- --live before.rs after.rs` from `engine/core-rs`. Supply exactly two UTF-8 `.rs` or `.py` regular files on a local filesystem. The viewer pins each file once (requires Linux `openat2` and `/proc/self/fd`; no symlinks, including in ancestors). It reads only those handles: **in-place edits are visible; atomic saves, renames and unlinks do not switch to a new file**. Close and reopen to authorize a replacement. No directory watching, imports, program execution or write-back. Omit `--live` for a one-time diff, or omit both paths for the bundled example.
+
+The live viewer samples at most twice a second, not once per paint. It compares exact bytes (64 KiB per file); only changed input is reparsed, including after a syntax error. Each parse is limited to 1,024 Tree-sitter progress checks, 24,000 syntax nodes, 128 functions and 256 KiB of function bodies including nested copies. A failed read, invalid UTF-8, recovered syntax tree or exceeded limit hides the diff and its review controls. A valid sample restores them. Decisions survive identical samples, not edits or failures. These are sampled views, not an atomic snapshot of both files or a hard I/O latency guarantee.
+
 To review a recorded sequence, run `cargo run --locked -p eon-canvas --example scrub -- 1250 a.jpg 1480 b.jpg` in the Rust workspace with your own timestamps (milliseconds) and JPEG files. The slider follows elapsed time, not frame number. Input is limited to 150 frames in a 30-second window, 30 MiB compressed in total, and 4096 pixels per side. There is also a pixel-area limit before decoding to account for progressive JPEG buffers (1080p fits; 4K does not). The viewer keeps thumbnails up to 256 pixels per side and neither opens a capture device nor writes the source files.
 
 To view a control-flow graph, redirect **one regular file** of GCC successor records into the canvas. From `engine/core-rs`:
