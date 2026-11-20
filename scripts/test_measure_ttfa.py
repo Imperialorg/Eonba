@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import shutil
 import struct
 import tempfile
@@ -11,25 +12,27 @@ from measure_ttfa import latency_ms, main, summarize
 
 
 class LatencyTests(unittest.TestCase):
-    def fixture(self, output_start=200, output_length=15, rate=8000):
-        temp = tempfile.TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        path = Path(temp.name) / "trial.wav"
+    def fixture(self, output_start=200, output_length=15, rate=8000, *, path=None,
+                frames=None, level=1800):
+        if path is None:
+            temp = tempfile.TemporaryDirectory()
+            self.addCleanup(temp.cleanup)
+            path = Path(temp.name) / "trial.wav"
         with wave.open(str(path), "wb") as wav:
             wav.setparams((2, 2, rate, 0, "NONE", "not compressed"))
             frames = (
-                (1800 * (60 <= i * 1000 // rate < 100),
+                (level * (60 <= i * 1000 // rate < 100),
                  900 * (output_start <= i * 1000 // rate < output_start + output_length))
-                for i in range(rate // 4)
+                for i in range(frames if frames is not None else rate // 4)
             )
             wav.writeframes(b"".join(struct.pack("<hh", *f) for f in frames))
         return path
 
     def test_two_channels_on_one_clock(self):
-        for rate in (8000, 44100, 48000):
+        for rate, upper_bound in ((8000, 102), (44100, 103), (48000, 102)):
             with self.subTest(rate=rate):
                 # The actual gap is 100ms. Include quantization uncertainty.
-                self.assertEqual(latency_ms(self.fixture(rate=rate), 500), 102)
+                self.assertEqual(latency_ms(self.fixture(rate=rate), 500), upper_bound)
 
     def test_no_response_single_impulse_overlap_and_truncation_are_not_passes(self):
         for start, duration in [(250, 15), (150, 1), (80, 10)]:
@@ -53,3 +56,34 @@ class LatencyTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()) as errors:
             self.assertEqual(main([str(trial.parent), "--threshold", "500"]), 2)
         self.assertIn("duplicate PCM recording", errors.getvalue())
+
+    def test_partial_final_window_is_not_five_ms_of_output(self):
+        with self.assertRaisesRegex(ValueError, "no sustained"):
+            latency_ms(self.fixture(frames=8 * 204 + 1), 500)
+
+    def test_muted_control_detects_bleed_short_tail_and_mismatched_clocks(self):
+        trial = self.fixture()
+        for options, expected in [
+            ({"output_start": 70, "output_length": 1, "frames": 3200}, "muted control exceeds"),
+            ({"output_length": 0}, "280 ms"),
+            ({"output_length": 0, "rate": 16000, "frames": 6400}, "rate differs"),
+        ]:
+            with self.subTest(options=options):
+                control = self.fixture(**options)
+                with contextlib.redirect_stderr(io.StringIO()) as errors:
+                    self.assertEqual(main([str(trial.parent), "--threshold", "500",
+                                           "--muted-control", str(control)]), 2)
+                self.assertIn(expected, errors.getvalue())
+
+    def test_acceptance_checks_control_and_all_one_hundred_trials(self):
+        trial = self.fixture()
+        for i in range(1, 100):
+            self.fixture(path=trial.with_name(f"trial-{i}.wav"), level=1800 + i)
+        control = self.fixture(output_length=0, frames=3200)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(main([str(trial.parent), "--threshold", "500",
+                                   "--muted-control", str(control)]), 0)
+        self.assertEqual(json.loads(output.getvalue()), {
+            "trials": 100, "p50_ms": 102, "p99_ms": 102,
+            "passed": True, "muted_control_checked": True,
+        })

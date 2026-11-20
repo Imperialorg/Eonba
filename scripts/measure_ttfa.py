@@ -6,6 +6,7 @@ import hashlib
 import json
 import sys
 import wave
+from dataclasses import dataclass
 from pathlib import Path
 from struct import iter_unpack
 
@@ -14,8 +15,28 @@ P50_LIMIT_MS = 170
 P99_LIMIT_MS = 280
 
 
-def _measure(path: Path, threshold: int) -> tuple[int, bytes]:
-    """Return a conservative 1 ms estimate and an identity for the recorded PCM."""
+@dataclass(frozen=True)
+class Capture:
+    rate: int
+    frames: int
+    last_input_start: int
+    last_input_end: int
+    first_output_end: int | None
+    any_output: bool
+    fingerprint: bytes
+
+    def latency_ms(self) -> int:
+        if self.first_output_end is None:
+            raise ValueError("no sustained speaker response")
+        if self.first_output_end <= self.last_input_end:
+            raise ValueError("channels overlap or the response preceded the end of the utterance")
+        # Latest possible onset in the first output window minus earliest
+        # possible endpoint in the last input window, in actual sample frames.
+        n = (self.first_output_end - self.last_input_start) * 1000
+        return (n + self.rate - 1) // self.rate
+
+
+def _analyze(path: Path, threshold: int) -> Capture:
     if not 1 <= threshold <= 32767:
         raise ValueError("RMS threshold must be between 1 and 32767 PCM units")
     with wave.open(str(path), "rb") as wav:
@@ -25,8 +46,9 @@ def _measure(path: Path, threshold: int) -> tuple[int, bytes]:
             raise ValueError("expected stereo uncompressed 16-bit PCM WAV")
         if not 8000 <= rate <= 192000 or not 0 < frames <= 30 * rate:
             raise ValueError("expected a capture of at most 30 seconds at 8 to 192 kHz")
-        first_input = last_input = first_output = None
-        previous_output = output_run = input_windows = pos = 0
+        first_input = first_output = None
+        last_start = last_end = onset_end = output_run = input_windows = pos = 0
+        any_output = False
         fingerprint = hashlib.sha256()
         for ms in range((frames * 1000 + rate - 1) // rate):
             end = min(frames, (ms + 1) * rate // 1000)
@@ -41,31 +63,28 @@ def _measure(path: Path, threshold: int) -> tuple[int, bytes]:
             cutoff = threshold * threshold * (end - pos)
             if left >= cutoff:
                 first_input = ms if first_input is None else first_input
-                last_input = ms
+                last_start, last_end = pos, end
                 input_windows += 1
             if right >= cutoff:
+                any_output = True
+                if ms < 50:
+                    raise ValueError("speaker channel is not quiet during lead-in")
                 if not output_run:
-                    previous_output = ms
+                    onset_end = end
                 output_run += 1
-                if output_run >= 5 and first_output is None:
-                    first_output = previous_output
+                if output_run >= 5 and first_output is None and end == (ms + 1) * rate // 1000:
+                    first_output = onset_end
             else:
                 output_run = 0
             pos = end
         if first_input is None or first_input < 50 or input_windows < 20:
             raise ValueError("need a quiet lead-in and a measurable input utterance")
-        if first_output is None:
-            raise ValueError("no sustained speaker response")
-        if first_output <= last_input:
-            raise ValueError("channels overlap or the response preceded the end of the utterance")
-        # Latest possible onset in the first output window minus earliest possible
-        # endpoint in the last input window. Do not round a borderline result down.
-        return first_output + 1 - last_input, fingerprint.digest()
+        return Capture(rate, frames, last_start, last_end, first_output, any_output, fingerprint.digest())
 
 
 def latency_ms(path: Path, threshold: int) -> int:
     """Measure one trial, without claiming a percentile or a physical origin."""
-    return _measure(path, threshold)[0]
+    return _analyze(path, threshold).latency_ms()
 
 
 def summarize(trials: list[int]) -> dict:
@@ -81,10 +100,20 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("captures", type=Path, help="directory with one .wav per trial")
     parser.add_argument("--threshold", required=True, type=int, help="calibrated RMS threshold in PCM units")
+    parser.add_argument("--muted-control", type=Path, help="separate same-route recording with stimulus and speaker muted")
     args = parser.parse_args(argv)
     try:
         if not args.captures.is_dir():
             raise ValueError("capture directory does not exist")
+        control = None
+        if args.muted_control is not None:
+            if not args.muted_control.is_file():
+                raise ValueError("missing muted control WAV")
+            control = _analyze(args.muted_control, args.threshold)
+            if control.any_output:
+                raise ValueError("muted control exceeds the speaker threshold; check isolation and gains")
+            if (control.frames - control.last_input_end) * 1000 < P99_LIMIT_MS * control.rate:
+                raise ValueError("muted control needs at least 280 ms after the stimulus")
         paths = sorted(args.captures.glob("*.wav"))
         values = []
         seen = set()
@@ -92,17 +121,21 @@ def main(argv=None) -> int:
             if not path.is_file():
                 raise ValueError(f"not a regular capture file: {path.name}")
             try:
-                latency, fingerprint = _measure(path, args.threshold)
+                sample = _analyze(path, args.threshold)
+                if control is not None and sample.rate != control.rate:
+                    raise ValueError("capture rate differs from muted control")
+                latency = sample.latency_ms()
             except (ValueError, wave.Error, EOFError) as error:
                 raise ValueError(f"{path.name}: {error}") from error
-            if fingerprint in seen:
+            if sample.fingerprint in seen:
                 raise ValueError(f"duplicate PCM recording: {path.name}")
-            seen.add(fingerprint)
+            seen.add(sample.fingerprint)
             values.append(latency)
         result = summarize(values)
+        result["muted_control_checked"] = control is not None
         print(json.dumps(result))
         return 0 if result["passed"] else 1
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, wave.Error, EOFError) as error:
         print(f"TTFA benchmark failed: {error}", file=sys.stderr)
         return 2
 
