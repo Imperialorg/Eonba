@@ -1,13 +1,15 @@
 """Host-side transcript/CLI checks. These tests do not stand in for Android instrumentation."""
 
 import contextlib
+import hashlib
 import io
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 from keystore_device_test import (MIC_PHASES, TARGET, TEST, check_packages, check_result, parse_args,
-                                  require_setup_complete, require_stock_emulator, run)
+                                  require_preconfigured_apk, require_setup_complete, require_stock_emulator, run)
 
 
 class InstrumentationResults(unittest.TestCase):
@@ -145,6 +147,26 @@ class DeviceModes(unittest.TestCase):
                 self.assertEqual(len(calls), 4)
                 self.assertEqual(calls[1], ["install", "-t", Path("/test.apk")])
                 self.assertEqual(calls[-1], ["uninstall", TEST])
+
+    def test_digest_is_checked_for_the_current_users_installed_apk(self):
+        data = b"target APK fixture"
+        remote = "/data/app/eon/base.apk"
+        with TemporaryDirectory() as directory:
+            apk = Path(directory) / "base.apk"
+            apk.write_bytes(data)
+            for matches in (True, False):
+                def adb(*args):
+                    if args == ("shell", "pm", "path", "--user", "current", TARGET):
+                        return f"package:{remote}\n"
+                    self.assertEqual(args, ("shell", "sha256sum", remote))
+                    return f"{hashlib.sha256(data if matches else b'other APK').hexdigest()}  {remote}\n"
+
+                with self.subTest(matches=matches), patch("keystore_device_test.TARGET_APK", apk):
+                    if matches:
+                        require_preconfigured_apk(adb)
+                    else:
+                        with self.assertRaisesRegex(SystemExit, "does not match"):
+                            require_preconfigured_apk(adb)
 
     def test_mic_results_cannot_pass_from_another_phase_or_extra_measurement(self):
         for phase in MIC_PHASES:

@@ -78,7 +78,7 @@ def require_stock_emulator(adb, serial, minimum_api):
 def require_preconfigured_apk(adb):
     # An operator installed and configured the target, not the test APK. Don't replace, clear or
     # uninstall their target. A matching package name (or even debug signer) is not a build ID.
-    paths = adb("shell", "pm", "path", TARGET).splitlines()
+    paths = adb("shell", "pm", "path", "--user", "current", TARGET).splitlines()
     if len(paths) != 1 or not paths[0].startswith("package:/"):
         raise SystemExit("Expected the single preconfigured EON debug APK.")
     digest = hashlib.sha256()
