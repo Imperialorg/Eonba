@@ -18,8 +18,8 @@ use crate::ring::{PcmConsumer, PcmProducer, pcm_ring};
 use crate::speaker::{SpeakerEmbedder, SpeakerGate};
 use crate::vad::SileroVad;
 
-// WeSpeaker needs at least 50 fbank frames. Sixteen Silero frames give it 512 ms.
-const CANDIDATE_SAMPLES: usize = 16 * VAD_FRAME_SAMPLES;
+/// Shortest whole number of Silero frames giving WeSpeaker 50 complete analysis windows.
+pub const CANDIDATE_SAMPLES: usize = crate::speaker::MIN_SAMPLES.div_ceil(VAD_FRAME_SAMPLES) * VAD_FRAME_SAMPLES;
 
 /// Capture-side wiring for the two 16 kHz, time-aligned streams. The render input
 /// must be the resampled *played* reference, including silence, not pending TTS.

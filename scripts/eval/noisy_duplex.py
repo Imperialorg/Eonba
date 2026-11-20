@@ -188,16 +188,23 @@ def write_pcm(path, samples):
 
 def observations(output, returncode):
     # A renamed/filtered test can exit 0 without making a single inference.
-    rejected = re.search(r"recorded non-owner: ([1-9]\d*) candidate embeddings rejected", output)
+    rejected = re.search(r"recorded non-owner: (\d+) candidate embeddings rejected", output)
     decision = re.search(r"recorded owner: verified after ([1-9]\d*) ms of fixture audio", output)
+    missed = re.search(r"recorded owner: missed; (\d+) candidate embeddings rejected", output)
+    false_interrupt = "recorded non-owner: interrupted playback" in output
+    stale_interrupt = "recorded stale capture: interrupted playback" in output
     return {
         "native_exit_code": returncode,
-        "duplex_check_passed": (returncode == 0 and rejected is not None and decision is not None
+        "duplex_check_passed": (returncode == 0 and rejected is not None and int(rejected[1]) > 0
+                                and decision is not None and missed is None and not (false_interrupt or stale_interrupt)
                                 and "test result: ok. 1 passed; 0 failed; 0 ignored;" in output),
         # This marker is emitted only after the entire negative interval's audit.
         "non_owner_embeddings_rejected": int(rejected[1]) if rejected else None,
-        "non_owner_interruptions": 0 if rejected else None,
-        "owner_decision_audio_ms": int(decision[1]) if decision else None,
+        "non_owner_interruptions": 1 if false_interrupt else (0 if rejected else None),
+        "stale_capture_interrupted": True if stale_interrupt else (False if rejected else None),
+        "owner_missed": True if missed else (False if decision else None),
+        "missed_owner_embeddings_rejected": int(missed[1]) if missed else None,
+        "owner_decision_audio_ms": int(decision[1]) if decision and not missed else None,
         "ttfa_ms": None,
     }
 
@@ -222,15 +229,15 @@ def evaluate(label, owner_wav, other_wav):
     return result
 
 
-def main():
+def run_conditions():
     try:
         paths, archive = pinned_inputs()
         owner_path, other_path = paths["voice-test-sensevoice-en"], paths["voice-test-zipformer-0"]
         owner, other = read_pcm(owner_path), read_pcm(other_path)
     except INPUT_ERRORS as error:
         for label in CONDITIONS:
-            print(json.dumps({"condition": label, "unavailable": str(error), **observations("", None)}))
-        return 2
+            yield {"condition": label, "unavailable": str(error), **observations("", None)}
+        return
     try:
         tracks = speech_tracks(archive)
     except INPUT_ERRORS as error:
@@ -238,7 +245,6 @@ def main():
 
     scratch = ROOT / "target"
     scratch.mkdir(exist_ok=True)
-    status = 0
     with tempfile.TemporaryDirectory(prefix="noisy-duplex-", dir=scratch) as work:
         for label in CONDITIONS:
             row = {
@@ -260,12 +266,17 @@ def main():
                 for role, wav in (("owner", owner_wav), ("non_owner", other_wav)):
                     row[f"{role}_wav_sha256"] = hashlib.sha256(wav.read_bytes()).hexdigest()
                 row.update(evaluate(label, owner_wav, other_wav))
-                if not row["duplex_check_passed"]:
-                    status = max(status, 1)
             except INPUT_ERRORS as error:
                 row.update(unavailable=str(error), **observations("", None))
-                status = 2
-            print(json.dumps(row), flush=True)
+            yield row
+
+
+def main():
+    status = 0
+    for row in run_conditions():
+        print(json.dumps(row), flush=True)
+        if not row["duplex_check_passed"]:
+            status = max(status, 2 if "unavailable" in row else 1)
     return status
 
 

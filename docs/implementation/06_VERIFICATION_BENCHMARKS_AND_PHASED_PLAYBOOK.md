@@ -172,6 +172,20 @@ Collect at least 100 independent turns in a directory containing only the trial 
 
 The analyzer bounds latency from sample positions in the last active input window and the first of five consecutive full active output windows. It rounds the bound up, including at noninteger samples per millisecond. Missing replies, overlap, and truncated captures invalidate the run, rather than disappearing from the percentile calculation. Exit 0 means nearest-rank P50 < 170 ms and P99 < 280 ms; 1 means a threshold failed; 2 means invalid evidence. Preserve the device, route, gains, threshold, and original recordings with the result. The script cannot attest to the physical origin of a WAV file.
 
+**Physical inputs to the combined runner (§3.7).** Supply `--physical-session /path/to/authorized-session` only for original, authorized, synchronized input-reference/isolated acoustic speaker recordings. Preserve the authorization and the recording conditions at acquisition. A declaration and matching bytes do not prove physical origin, scene or authorization. Never label generated PCM, digital loopback, callback observations or a null-sink trace as physical.
+
+Use `muted-control.wav`, a `trials/` directory containing only the original stereo PCM16 WAVs (one independent end-to-end turn per file), and `session.json` with these fields:
+
+| Field | Meaning |
+|---|---|
+| `origin` | Literal `authorized-single-clock-physical` |
+| `route`, `gains` | Nonempty descriptions of the common clock/device/route and fixed gains |
+| `threshold_pcm` | Integer RMS level calibrated above both channels' noise floors across the included scenes |
+| `control_pcm_sha256` | SHA-256 of the interleaved little-endian PCM **data**, not the WAV header |
+| `trials` | Object keyed by every exact WAV basename; each value is `{"scene": "...", "pcm_sha256": "..."}` using the same digest convention |
+
+Scene labels are `control`, `babble-0db`, `traffic-0db`, and `tv-0db`. For mixed-scene batches the muted control must exercise the included noise/stimuli on the same route; keep background out of the isolated speaker measurement. The combined runner requires the valid muted control and the original ≥100 complete, distinct, same-rate trials. An unlisted or missing file, changed digest, or invalid trial invalidates the batch. Task 10.2 uses the original P50/P99 limits above. Independently, Task 10.6 requires every measured noisy turn to have an acoustic upper bound **<200 ms**, with coverage reported for each of the three named scenes. A clean-only session cannot supply noisy TTFA.
+
 ### 3.4 Gate 4: Cyber CRS CWE Discovery & 4-Gate Patch Benchmark (`tests/cyber-security-tests/`)
 Maintain a self-contained corpus of 12 vulnerable micro-projects (`4` C, `4` Rust with `unsafe`/logic flaws, `2` Kotlin/Android Manifest & JNI, `2` Python/TS web handlers):
 - **Pass Criteria**:
@@ -220,15 +234,21 @@ With the native voice build and ONNX Runtime installed, provision `voice-test-se
 
 Run `python3 scripts/eval/noisy_duplex.py`. Each JSON line records one condition, both input WAV digests and the measured whole-clip input SNR. The harness keeps the clean enrollment half separate from the 3.576 s owner query. Each negative interval uses the same 6.625 s non-owner clip. For the mixtures, foreground and background have equal energy before playback echo is added. Synthetic babble overlaps three speech clips; synthetic traffic models passing engines and tire noise; synthetic TV alternates two filtered clips. These are not field recordings.
 
+Enrollment and query use the [upstream WeSpeaker ResNet34 front end](https://github.com/wenet-e2e/wespeaker/tree/master/runtime/core/frontend): PCM16 units, complete 25 ms Hamming windows every 10 ms and per-utterance mean normalization. Do not reuse enrollment vectors computed with the old ASR features. Seventeen consecutive 32 ms Silero frames supply ≥50 complete fbank frames. The original VAD and cosine thresholds and both echo-cancellation paths apply to every condition.
+
 | Condition | Non-owner embeddings rejected | Non-owner interruptions | Held-out owner interrupted |
 |---|---:|---:|---|
-| Clean control | 11 | 0 | At 800 ms |
-| Rumble control (0 dB) | 11 | 0 | At 1,310 ms |
-| Competing babble (0 dB) | 12 | 0 | No |
-| Street traffic (0 dB) | 11 | 0 | No |
-| TV dialogue (0 dB) | 12 | 0 | No |
+| Clean control | 10 | 0 | At 830 ms |
+| Rumble control (0 dB) | 10 | 0 | At 1,380 ms |
+| Competing babble (0 dB) | 12 | 0 | No (6 embeddings rejected during owner interval) |
+| Street traffic (0 dB) | 10 | 0 | No (5 rejected) |
+| TV dialogue (0 dB) | 11 | 0 | No (5 rejected) |
 
-These are five runs, one per condition, not five population samples. The native test required a positive owner decision at the original 0.35 threshold. All three scene mixtures missed it, so the suite exited 1. Times count fixture audio up to the speaker decision; no first output sample or physical speaker latency was measured.
+These are five runs, one per condition, not five population samples. Acceptance requires a real negative embedding decision and verified owner interruption at the original 0.35 cosine threshold in **each** condition, including post-decision mute and audit. All three scene mixtures missed the owner, so the suite exited 1. Times count fixture samples up to the speaker decision, not physical speaker latency.
+
+**Combined offline acceptance.** Run `python3 -B scripts/eval/acceptance.py` in a trusted, prepared checkout. It runs the fixed kernel `eval_harness` target, the entire digest-checked benign repair corpus (§3.6), and all five recorded speaker-decision conditions. `cargo test --test eval_harness` alone exercises only the kernel checks. Use the offline toolchains, `eon-repair-edit`, built native `speaker_e2e` target, locked recordings/models and cached archive described above. No historical results, source, commands or test reports are accepted as input.
+
+Add `--physical-session /path/to/authorized-session` **only** when the independent evidence in §3.3 exists. Without it, acoustic percentiles and noisy TTFA remain unavailable; the runner never opens devices or substitutes decision time. JSON goes to stdout and tool diagnostics to stderr. Exit 0 means both tasks passed, 1 means a measured check failed, and 2 means evidence is unavailable with no measured failure. Missing evidence is reported even alongside a failure.
 
 ## 4. Master Phased Execution Playbook (Order of Implementation)
 

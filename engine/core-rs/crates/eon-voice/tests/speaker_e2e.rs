@@ -71,6 +71,7 @@ fn recorded_capture_and_render_rings_make_one_auditable_owner_decision() {
     let render: Vec<_> = (0..480).map(|i| (i as f32 * std::f32::consts::TAU / 96.0).sin() * 0.1).collect();
     let mut decisions = 0;
     let mut verified_at = None;
+    let mut before_owner = 0;
     let non_owner = common::read_pcm16_mono_16k(&other);
     for (offset, near) in [(0, &speech[half..]), (3, &non_owner[..]), (7, &speech[half..])] {
         let near = resample_mono(near, 16_000, 48_000).unwrap();
@@ -95,18 +96,28 @@ fn recorded_capture_and_render_rings_make_one_auditable_owner_decision() {
                     verified_at = Some((i + 1) * 10);
                 }
             }
-            if offset != 7 {
-                assert!(audit.record().is_none(), "stale capture or non-owner interrupted playback");
+            if offset != 7 && audit.record().is_some() {
+                let phase = if offset == 3 { "non-owner" } else { "stale capture" };
+                panic!("recorded {phase}: interrupted playback");
             }
         }
         if offset == 3 {
-            assert!(reflex.rejected_candidates() > 0, "non-owner never reached the speaker gate");
-            eprintln!("recorded non-owner: {} candidate embeddings rejected", reflex.rejected_candidates());
+            before_owner = reflex.rejected_candidates();
+            eprintln!("recorded non-owner: {before_owner} candidate embeddings rejected");
+            assert!(before_owner > 0, "non-owner never reached the speaker gate");
         }
+    }
+    if verified_at.is_none() {
+        eprintln!("recorded owner: missed; {} candidate embeddings rejected", reflex.rejected_candidates() - before_owner);
     }
     assert_eq!(decisions, 1);
     assert!(signal.is_muted());
-    eprintln!("recorded owner: verified after {} ms of fixture audio", verified_at.unwrap());
+    // Test late renderer writes too, not just the coordinator's mute flag.
+    assert_eq!(playback.push_slice(&render), 480);
+    let mut out = [1.0; 480];
+    let muted = signal.render(&mut sink, &mut out);
+    assert!(muted.muted && muted.flushed == 480);
+    assert_eq!(out, [0.0; 480]);
     drop(reflex);
     let mut journal = Vec::new();
     assert!(audit.append_if_present(&mut journal).unwrap());
@@ -116,6 +127,7 @@ fn recorded_capture_and_render_rings_make_one_auditable_owner_decision() {
     assert_eq!(event["token_offset"], 7);
     assert_eq!(event["task_id"], task.as_str());
     assert!(event["timestamp_ms"].as_u64().unwrap() > 0);
+    eprintln!("recorded owner: verified after {} ms of fixture audio", verified_at.unwrap());
 }
 
 /// Route the default output to a *private virtual sink* and the default input to its monitor.
@@ -309,8 +321,8 @@ fn check_assistant_voice(mut tts: KokoroTts) {
 
 fn time_verification(speaker: &mut SpeakerEmbedder, held_out: &[f32], owner: &[f32]) {
     // Warm inference at the actual gate window size. Includes fbank, CMN,
-    // ONNX and normalization; excludes model load and waiting for 512 ms of PCM.
-    let pcm = &held_out[..8192];
+    // ONNX and normalization; excludes model load and waiting for candidate PCM.
+    let pcm = &held_out[..eon_voice::coordinator::CANDIDATE_SAMPLES];
     let candidate = speaker.embed(pcm).unwrap();
     let mut embed_times = [Duration::ZERO; 9];
     for elapsed in &mut embed_times {
@@ -330,7 +342,7 @@ fn time_verification(speaker: &mut SpeakerEmbedder, held_out: &[f32], owner: &[f
     embed_times.sort_unstable();
     eprintln!(
         "256-d cosine (21 x 1000, per-call batch mean) median {:?}, p95 {:?}; \
-         512 ms WeSpeaker embed (9 warm calls) median {:?}, max {:?}",
+         WeSpeaker gate-window embed (9 warm calls) median {:?}, max {:?}",
         cosine_times[10], cosine_times[19], embed_times[4], embed_times[8],
     );
     assert!(cosine_times[19] < Duration::from_millis(2));

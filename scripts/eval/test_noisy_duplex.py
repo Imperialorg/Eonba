@@ -95,6 +95,22 @@ class ReportingTests(unittest.TestCase):
             self.assertFalse(bench.observations(incomplete, 0)["duplex_check_passed"])
         self.assertTrue(bench.observations(self.rejected + self.verified + self.ok, 0)["duplex_check_passed"])
 
+    def test_miss_false_interrupt_and_no_native_inference_are_different(self):
+        missed = bench.observations(self.rejected + "recorded owner: missed; 0 candidate embeddings rejected", 101)
+        self.assertIs(missed["owner_missed"], True)
+        self.assertEqual(missed["missed_owner_embeddings_rejected"], 0)
+        self.assertEqual(missed["non_owner_interruptions"], 0)
+        false = bench.observations("recorded non-owner: interrupted playback", 101)
+        self.assertEqual(false["non_owner_interruptions"], 1)
+        self.assertIsNone(false["owner_missed"])
+        self.assertIsNone(bench.observations("build failed", 101)["owner_missed"])
+        empty_negative = self.rejected.replace("3 candidate", "0 candidate") + self.verified + self.ok
+        self.assertFalse(bench.observations(empty_negative, 0)["duplex_check_passed"])
+        contradictory = self.rejected + self.verified + "recorded owner: missed; 1 candidate embeddings rejected\n"
+        result = bench.observations(contradictory + self.ok, 0)
+        self.assertFalse(result["duplex_check_passed"])
+        self.assertIsNone(result["owner_decision_audio_ms"])
+
     def test_missing_speech_and_rumble_failure_do_not_skip_traffic(self):
         with tempfile.TemporaryDirectory(dir=bench.ROOT) as work:
             wav = Path(work) / "input.wav"

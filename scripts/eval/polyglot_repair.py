@@ -37,11 +37,7 @@ def trial(tools, cwd, case):
         steps.append(rule)
 
 
-def main(argv=None):
-    cli = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    cli.add_argument("--language", choices=FILES, help="run just this fixed partition")
-    args = cli.parse_args(argv)
-    langs = [args.language] if args.language else list(FILES)
+def run_corpus(langs, log):
     cases = inventory(langs)
     tools = Toolchain(langs)
     outcomes = Counter()
@@ -51,16 +47,26 @@ def main(argv=None):
             cwd = work / str(n)
             cwd.mkdir(mode=0o700)
             status, rules = trial(tools, cwd, case)
-            print(f"{case.language}/{case.label}: {status} ({', '.join(rules) or 'no edit'})", flush=True)
+            print(f"{case.language}/{case.label}: {status} ({', '.join(rules) or 'no edit'})", file=log, flush=True)
             outcomes[status] += 1
             first += status == "pass" and len(rules) == 1
-    print(f"one-edit pass: {first}/{len(cases)}; bounded-loop pass: {outcomes['pass']}/{len(cases)}; "
-          f"outcomes: {dict(sorted(outcomes.items()))}")
     # An abstention stays in the denominator. The 10.6 acceptance bar is
     # strictly >80%; use the more conservative single-edit score as the gate.
     # Never accept a mislabeled baseline or candidate that failed behavior.
-    return int(first * 5 <= len(cases) * 4 or
-               any(outcomes[k] for k in ("baseline-clean", "baseline-passed", "behavior-fail")))
+    return {"cases": len(cases), "one_edit_pass": first, "bounded_pass": outcomes["pass"],
+            "outcomes": dict(sorted(outcomes.items())),
+            "passed": first * 5 > len(cases) * 4 and
+            not any(outcomes[k] for k in ("baseline-clean", "baseline-passed", "behavior-fail"))}
+
+
+def main(argv=None):
+    cli = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    cli.add_argument("--language", choices=FILES, help="run just this fixed partition")
+    args = cli.parse_args(argv)
+    result = run_corpus([args.language] if args.language else list(FILES), sys.stdout)
+    print("one-edit pass: {one_edit_pass}/{cases}; bounded-loop pass: {bounded_pass}/{cases}; "
+          "outcomes: {outcomes}".format(**result))
+    return int(not result["passed"])
 
 
 if __name__ == "__main__":
