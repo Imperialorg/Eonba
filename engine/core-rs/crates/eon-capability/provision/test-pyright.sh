@@ -13,6 +13,8 @@ gate() {
     shift 2
     bin=$(cargo test --locked -j2 -p eon-capability "$@" --no-run --message-format=json |
         jq -ser --arg name "$target" 'map(select(.target.name == $name and .executable != null)) | last.executable')
+    # libtest exits zero if an exact filter selects no tests (including on the wrong ABI).
+    "$bin" --list --ignored --exact "$test" | grep -Fx -- "$test: test"
     systemd-run --user --pipe --quiet --wait --collect -p UMask=0077 -p TasksMax=24 -p Delegate=pids \
         --setenv=EON_TEST_PYRIGHT="$EON_TEST_PYRIGHT" --setenv=EON_TEST_PYRIGHT_RUNTIME="$libs" \
         --setenv=EON_TEST_PYRIGHT_SHA256="$EON_TEST_PYRIGHT_SHA256" \
