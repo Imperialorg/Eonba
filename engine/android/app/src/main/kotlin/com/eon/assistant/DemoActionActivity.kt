@@ -97,6 +97,29 @@ class DemoActionActivity : Activity() {
         }
         controls.addView(confirm)
         controls.addView(cancel)
+        val fieldGroup = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val fieldLabel = TextView(this).apply {
+            id = R.id.demo_field_label
+            text = "Sample text field · lookup only, no input stored"
+        }
+        val field = DemoSampleField(this)
+        fieldGroup.addView(fieldLabel)
+        fieldGroup.addView(field)
+        controls.addView(fieldGroup)
+        val lookup = DemoFieldLookup(fieldGroup, fieldLabel, field)
+        controls.addView(protectedButton().apply {
+            id = R.id.demo_locate_field
+            text = "Locate sample field"
+            setOnClickListener {
+                clearReview("")
+                val found = try {
+                    val scope = liveScope()
+                    scope != null && lookup.present() && liveScope() == scope
+                } catch (_: RuntimeException) { false }
+                status.text = if (found) "Located the sample text field. No value was read or changed."
+                    else "Sample field unavailable. No action was taken."
+            }
+        })
         clearReview("No action is approved.")
         val retireOnDetach = object : View.OnAttachStateChangeListener {
             override fun onViewAttachedToWindow(view: View) = Unit

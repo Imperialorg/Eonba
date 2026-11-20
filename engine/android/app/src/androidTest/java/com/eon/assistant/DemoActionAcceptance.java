@@ -65,6 +65,46 @@ public final class DemoActionAcceptance extends Instrumentation {
     private ScrollView samples() { return activity.findViewById(R.id.demo_samples); }
     private String status() { return ((TextView) activity.findViewById(R.id.demo_status)).getText().toString(); }
     private boolean reviewing() { return button(R.id.demo_confirm).getVisibility() == View.VISIBLE; }
+    private void checkFieldLookup() throws Exception {
+        DemoSampleField field = main(() -> activity.findViewById(R.id.demo_field));
+        View label = main(() -> activity.findViewById(R.id.demo_field_label));
+        LinearLayout group = main(() -> (LinearLayout) field.getParent());
+        DemoFieldLookup lookup = new DemoFieldLookup(group, label, field);
+        main(() -> {
+            check(!field.isSaveEnabled() && !field.isFocusable());
+            check(field.onCreateInputConnection(new android.view.inputmethod.EditorInfo()) == null);
+            check(field.createAccessibilityNodeInfo().getActionList().stream().noneMatch(
+                    a -> a.getId() == AccessibilityNodeInfo.ACTION_SET_TEXT));
+            check(!field.performAccessibilityAction(AccessibilityNodeInfo.ACTION_SET_TEXT, null));
+            field.requestRectangleOnScreen(new android.graphics.Rect(0, 0, field.getWidth(), field.getHeight()), true);
+            return null;
+        });
+        await(lookup::present);
+        main(() -> {
+            group.removeView(field);
+            group.addView(field, 0);
+            return null;
+        });
+        await(lookup::present); // Previously last, now first in the real attached hierarchy.
+        main(() -> {
+            field.setAccessibilityDataSensitive(View.ACCESSIBILITY_DATA_SENSITIVE_YES);
+            check(!lookup.present());
+            field.setAccessibilityDataSensitive(View.ACCESSIBILITY_DATA_SENSITIVE_AUTO);
+            field.setAccessibilityDelegate(new View.AccessibilityDelegate() {
+                @Override public void onInitializeAccessibilityNodeInfo(View host, AccessibilityNodeInfo info) {
+                    super.onInitializeAccessibilityNodeInfo(host, info);
+                    info.setClassName("android.widget.TextView");
+                }
+            });
+            check(!lookup.present());
+            field.setAccessibilityDelegate(null);
+            check(lookup.present());
+            group.removeView(field);
+            group.addView(new DemoSampleField(activity), 0); // Same class/ID, not the retained field.
+            check(!lookup.present());
+            return null;
+        });
+    }
     private Integer visibleOffset() {
         LinearLayout list = (LinearLayout) samples().getChildAt(0);
         List<TextView> rows = new ArrayList<>();
@@ -132,6 +172,13 @@ public final class DemoActionAcceptance extends Instrumentation {
                     scroll.setId(R.id.demo_samples);
                     return null;
                 });
+                step = "field-lookup";
+                main(() -> {
+                    tap(R.id.demo_locate_field);
+                    check(status().startsWith("Sample field unavailable.") && !reviewing());
+                    return null;
+                });
+                checkFieldLookup();
             } else {
                 step = "operator-prerequisites";
                 await(() -> DemoShortcut.INSTANCE.eligible(activity));

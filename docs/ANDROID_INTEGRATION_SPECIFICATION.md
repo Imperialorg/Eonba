@@ -73,6 +73,11 @@ the view list. It does not enumerate other windows. Two fresh API 35 AVDs passed
 the counter at 0, the native click produced 1, the local fallback produced 2, and
 both scroll routes advanced the rendered list by at most one viewport.
 
+**Locate sample field** reports only whether the demo's own unsaved `EditText` was
+found. It does not expose a value, open an IME, accept edits or grant an action.
+The API 35 gate changes the order of the field and its label, then checks that
+sensitive, wrong-class and same-ID replacement controls cannot satisfy the lookup.
+
 ---
 
 ## 2. Android Manifest & Permissions (`AndroidManifest.xml`)

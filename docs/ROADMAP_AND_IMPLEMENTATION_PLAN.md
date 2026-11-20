@@ -299,12 +299,12 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Requirements**: Cargo-ndk configuration bundling `libeon_uniffi.so` for `arm64-v8a`, `armeabi-v7a`, `x86_64`.
   - **Acceptance Criteria**: `./gradlew assembleDebug` compiles and packages native Rust binaries into APK.
 
-- [ ] **Task 9.3: Android Accessibility Tree Inspector & Gestures**
+- [x] **Task 9.3: Android Accessibility Tree Inspector & Gestures**
   - **Directory**: `clients/android/accessibility/`
   - **Files**: `src/main/kotlin/com/eon/android/accessibility/EonAccessibilityService.kt`, `ScreenInspector.kt`
   - **Requirements**: Traverses active `AccessibilityNodeInfo` hierarchy, finds target buttons/inputs, executes clicks/scrolls, provides coordinate fallback.
   - **Unit Tests**: Android test harness with simulated UI hierarchies.
-  - **Device evidence**: A private EON demo locates its own counter and sample list by accessible resource ID, class and window rather than child order. On separate API 35 AVDs, the same signed APK passed the denied scenario and the operator-approved native and fallback click/scroll scenario. Cancellation produced no change. No foreign windows, arbitrary text access or global gestures.
+  - **Verified on stock Android for EON's private window**: The demo locates its counter, sample list and unsaved input by accessible resource ID, class and window. Input lookup reports presence only; it survived child reordering and rejected a sensitive field, a wrong class and a same-ID replacement. On separate API 35 AVDs the same signed APK passed both the denied scenario and operator-approved native and local hit-test click/scroll routes. Cancellation produced no change. No foreign windows, text readback or global gesture injection.
 
 - [ ] **Task 9.4: Persistent Overlay HUD & Visualizer**
   - **Directory**: `clients/android/overlay/`
