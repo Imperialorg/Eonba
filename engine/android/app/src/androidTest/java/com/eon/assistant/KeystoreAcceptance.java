@@ -176,13 +176,8 @@ public final class KeystoreAcceptance extends Instrumentation {
     private void secondProcess() throws Exception {
         step = "restarted";
         check(liveUntilProcessDeath == null);
-        step = "key-continuity";
+        checkSingleKey();
         SharedPreferences prefs = getTargetContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        Cipher probe = Cipher.getInstance("AES/GCM/NoPadding");
-        probe.init(Cipher.DECRYPT_MODE, checkSingleKey(),
-                new GCMParameterSpec(128, Base64.decode(prefs.getString("probe-iv", ""), Base64.NO_WRAP)));
-        check(Arrays.equals(RESTART_PROBE, probe.doFinal(
-                Base64.decode(prefs.getString("probe-ciphertext", ""), Base64.NO_WRAP))));
         step = "handle-isolation";
         String old = prefs.getString("old-handle", null);
         check(old != null);
@@ -191,10 +186,20 @@ public final class KeystoreAcceptance extends Instrumentation {
         try (AndroidCredentialBroker broker = new AndroidCredentialBroker(authority)) {
             byte[] expected = MessageDigest.getInstance("SHA-256").digest(fixture());
             check(!broker.consumeInspectionProof(owner.use, old, expected) && !broker.release(owner.manage, old));
-            String fresh = broker.put(owner.manage, fixture());
-            check(fresh != null && !old.equals(fresh) && broker.consumeInspectionProof(owner.use, fresh, expected));
+            // A new owner's denial alone would not detect a retained old entry.
+            String[] fresh = new String[AndroidCredentialBroker.CAPACITY];
+            for (int i = 0; i < fresh.length; i++) {
+                fresh[i] = broker.put(owner.manage, fixture());
+                check(fresh[i] != null && !old.equals(fresh[i]));
+            }
+            for (String handle : fresh) check(broker.consumeInspectionProof(owner.use, handle, expected));
         }
-        checkSingleKey();
+        step = "key-continuity";
+        Cipher probe = Cipher.getInstance("AES/GCM/NoPadding");
+        probe.init(Cipher.DECRYPT_MODE, checkSingleKey(),
+                new GCMParameterSpec(128, Base64.decode(prefs.getString("probe-iv", ""), Base64.NO_WRAP)));
+        check(Arrays.equals(RESTART_PROBE, probe.doFinal(
+                Base64.decode(prefs.getString("probe-ciphertext", ""), Base64.NO_WRAP))));
         check(prefs.edit().clear().commit());
     }
 }

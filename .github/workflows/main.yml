@@ -25,7 +25,11 @@ jobs:
           umask 077
           TMPDIR=/tmp cargo test --locked -p eon-foundation -p eon-primitives -p eon-cli -p eon-daemon --features eon-primitives/serde
       - name: Verify the native process keyring and key removal
-        run: cargo test --locked -p eon-foundation --lib linux_process_keyring_round_trip_and_teardown -- --ignored
+        shell: bash
+        run: |
+          case_name='credentials::platform::identity_and_credential_tests::linux_process_keyring_round_trip_and_teardown'
+          cargo test --locked -p eon-foundation --lib "$case_name" -- --ignored --exact --color never | tee "$RUNNER_TEMP/keyring-result"
+          grep -Fx "test $case_name ... ok" "$RUNNER_TEMP/keyring-result"
       - run: python3 -m unittest discover -s "$GITHUB_WORKSPACE/scripts"
 
   kernel-and-advisories:
@@ -164,7 +168,7 @@ jobs:
           # getprop must run on the emulator, not the host.
           # shellcheck disable=SC2016
           timeout 180 "$adb" -s "$serial" shell 'until [ "$(getprop sys.boot_completed)" = 1 ]; do sleep 1; done'
-          "$adb" -s "$serial" emu avd name | grep -Fx eon-keystore
+          "$adb" -s "$serial" emu avd name | sed 's/\r$//' | grep -Fx eon-keystore
           python3 app/keystore_device_test.py --serial "$serial"
 
   lean-backtest:
