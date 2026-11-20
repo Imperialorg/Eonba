@@ -11,7 +11,7 @@ from zipfile import ZIP_STORED, ZipFile
 ABIS = {"arm64-v8a": (2, 183), "armeabi-v7a": (1, 40), "x86_64": (2, 62)}
 FUNCTIONS = {
     "generate_ulid", "get_monotonic_time_nanos", "select_model_profile", "endpoint_silence_ms",
-    "inject_audio_pcm_for_testing", "execute_task_sync",
+    "inject_audio_pcm_for_testing", "execute_task_sync", "validate_task_dag",
 }
 
 
@@ -34,8 +34,13 @@ def check_elf(path, abi, library):
     require(needed and needed <= {"libc.so", "libm.so", "libdl.so", "liblog.so", "libandroid.so"},
             f"{path}: unexpected or missing Android dependencies: {needed}")
     symbols = subprocess.check_output(["readelf", "--dyn-syms", "-W", path], text=True)
+    check_exports(path, library, symbols)
+
+
+def check_exports(path, library, symbols):
     exports = {fields[-1] for line in symbols.splitlines() if len(fields := line.split()) >= 8
-               and fields[3] == "FUNC" and fields[4] == "GLOBAL" and fields[6] != "UND"}
+               and fields[3:5] == ["FUNC", "GLOBAL"] and fields[5] in ("DEFAULT", "PROTECTED")
+               and fields[6] != "UND"}
     expected = {"JNI_OnLoad"} if library == "libjnidispatch.so" else {
         f"uniffi_eon_uniffi_{kind}_func_{func}" for kind in ("fn", "checksum") for func in FUNCTIONS
     }

@@ -95,6 +95,8 @@ jobs:
         with:
           persist-credentials: false
       - run: cargo test --locked -p eon-mesh
+      - name: Discover, elect and measure 100 paired RPCs on an isolated two-node LAN
+        run: bash "$GITHUB_WORKSPACE/scripts/test_paired_lan.sh"
 
   recorded-speech:
     runs-on: ubuntu-latest
@@ -148,10 +150,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Check that the default probe tests compile without Linux providers
+        run: cargo test --locked -p eon-ebpf
       - name: Require both native DPAPI tests to execute
         shell: bash
         run: |
-          cargo test --locked -p eon-foundation --lib windows_dpapi -- --color never | tr -d '\r' | tee dpapi-result.txt
+          cargo test --locked -p eon-foundation --lib windows_dpapi -- --color never | tee "$RUNNER_TEMP/dpapi-result.txt"
+          tr -d '\r' < "$RUNNER_TEMP/dpapi-result.txt" > dpapi-result.txt
           for case_name in windows_dpapi_owner_grants_and_child_stdin windows_dpapi_broker_lifetime_and_invalid_ciphertext; do
             grep -Fx "test credentials::platform::identity_and_credential_tests::$case_name ... ok" dpapi-result.txt
           done
@@ -180,8 +185,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Test instrumentation result parsing and CLI modes (host only)
-        run: python3 -m unittest discover -s app -p 'test_keystore_device_test.py'
+      - name: Use the runner's JDK 17 for the Android build
+        run: |
+          test -x "${JAVA_HOME_17_X64:?}/bin/java"
+          echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+          echo "$JAVA_HOME_17_X64/bin" >> "$GITHUB_PATH"
+      - name: Test APK export checks and instrumentation harness (host only)
+        run: python3 -m unittest discover -s app
       - name: Install Android cross-build prerequisites
         run: |
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;37.0.0" "ndk;27.3.13750724"

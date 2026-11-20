@@ -38,7 +38,8 @@ def main():
             try:
                 symbols = subprocess.check_output(["readelf", "--dyn-syms", "-W", library])
                 exports = {fields[-1] for line in symbols.splitlines() if len(fields := line.split()) >= 8
-                           and fields[3:5] == [b"FUNC", b"GLOBAL"] and fields[6] != b"UND"}
+                           and fields[3:5] == [b"FUNC", b"GLOBAL"] and fields[5] in (b"DEFAULT", b"PROTECTED")
+                           and fields[6] != b"UND"}
                 if missing := functions - exports:
                     raise ValueError(f"{abi}: missing generated function exports {sorted(missing)}")
                 actual = generate(abi, library)
