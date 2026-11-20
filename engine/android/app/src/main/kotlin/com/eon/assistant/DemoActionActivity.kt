@@ -202,11 +202,12 @@ class DemoActionActivity : Activity() {
     private fun offer(view: View, action: DemoAction): DemoOffer? {
         val node = safeNode(view) ?: return null
         val route = if (node.actionList.any { it.id == action.nativeId() }) DemoRoute.NATIVE else DemoRoute.LOCAL_HIT
+        val before = visibleValue(view, action) ?: return null
         val offer = when (action) {
             DemoAction.CLICK_COUNTER -> if (view === counter && counter.isClickable && count < Int.MAX_VALUE)
-                DemoOffer(route, count, 1) else null
+                DemoOffer(route, before, 1) else null
             DemoAction.SCROLL_SAMPLES_FORWARD -> if (view === samples && samples.canScrollVertically(1))
-                DemoOffer(route, samples.scrollY, samples.height - samples.paddingTop - samples.paddingBottom) else null
+                DemoOffer(route, before, samples.height - samples.paddingTop - samples.paddingBottom) else null
         }
         return offer?.takeIf { hasLocalHit(view) }
     }
@@ -223,9 +224,15 @@ class DemoActionActivity : Activity() {
 
     private fun readValue(view: View, action: DemoAction): Int? {
         if (safeNode(view) == null || !hasLocalHit(view)) return null
+        return visibleValue(view, action)
+    }
+
+    // Measure the rendered EON sample, not just the value assigned by the listener or a
+    // provider's return code. This never reads arbitrary accessibility text or other windows.
+    private fun visibleValue(view: View, action: DemoAction): Int? {
         return when (action) {
-            DemoAction.CLICK_COUNTER -> count
-            DemoAction.SCROLL_SAMPLES_FORWARD -> samples.scrollY
+            DemoAction.CLICK_COUNTER -> count.takeIf { view === counter && counter.text.toString() == "Demo count: $it" }
+            DemoAction.SCROLL_SAMPLES_FORWARD -> if (view === samples) DemoSamplePosition.read(samples, list, rows) else null
         }
     }
 

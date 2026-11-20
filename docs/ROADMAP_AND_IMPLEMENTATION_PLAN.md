@@ -304,19 +304,20 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/main/kotlin/com/eon/android/accessibility/EonAccessibilityService.kt`, `ScreenInspector.kt`
   - **Requirements**: Traverses active `AccessibilityNodeInfo` hierarchy, finds target buttons/inputs, executes clicks/scrolls, provides coordinate fallback.
   - **Unit Tests**: Android test harness with simulated UI hierarchies.
-  - **Verified subset**: A private EON demo can review one counter click or list scroll, use a local hit test if the native action is absent, and check the resulting change. It never retries an attempted action or dispatches gestures outside the activity. Fifteen host tests and the clean API 35 denied scenario passed. The positive device scenario still needs an operator-selected assistant and enabled service and shortcut.
+  - **Verified subset**: A private EON demo can review one counter click or list scroll, use a local hit test if the native action is absent, and check the resulting change. It never retries an attempted action or dispatches gestures outside the activity. The clean API 35 denied scenario passed. On a user-configured AVD the sample's widgets visibly moved, but the foreground demo reported unavailable before confirmation despite the selected role, bound service and assigned shortcut. Neither native nor fallback dispatch passed on device.
 
 - [ ] **Task 9.4: Persistent Overlay HUD & Visualizer**
   - **Directory**: `clients/android/overlay/`
   - **Files**: `src/main/kotlin/com/eon/android/ui/EonOverlayManager.kt`, `AudioVisualizerView.kt`
   - **Requirements**: Persistent unobtrusive floating presence. Visualizes thought state, active listening wave, and task completion notices.
-  - **Verified subset**: The collapsible assistant card can show progress and completion for a local model-profile check or analysis of an OS-installed notification tone. On a clean API 35 emulator the production decoder produced levels, cancellation stopped delivery, and the unattached view displayed and cleared the result. This was not an OS-invoked assistant session, live task feed or microphone waveform.
+  - **Verified subset**: Android opened the selected assistant's card on API 35. A visible user-started analysis of a built-in tone produced 11 levels (peak 42% RMS); Stop/Clear, Back and a fresh invocation passed. The card can count EON's own Android activity tasks. Neither the tone nor those counts establish a microphone waveform or a live workflow feed.
 
 - [ ] **Task 9.5: Native Digital Assistant Role & OS Survival (`ROLE_ASSISTANT`)**
   - **Directory**: `clients/android/app/`
   - **Files**: `src/main/kotlin/com/eon/assistant/service/EonVoiceInteractionService.kt`, `EonVoiceInteractionSessionService.kt`, `res/xml/voice_interaction_service_config.xml`
   - **Requirements (stock Android)**: Support the user-selected assistant role and request hotword detection only where the OS and hardware permit it. Respect microphone permission and foreground restrictions. Consume only OS-supplied assist context while the role is active. Require fresh user consent for each screen-capture session; release resources on revocation. Test clean recovery after process death. A regular app cannot choose its OOM adjustment or promise immunity from OEM process management.
   - **Unit Tests**: Android instrumented test verifying assistant binding, assist structure extraction, and background audio streaming.
+  - **Platform evidence**: A clean API 35 AVD showed Android's real assistant role picker and canceled without selection. On a separately configured AVD, screen-off removed the visible card; after EON's process was killed, Android rebound the selected service under a new PID and a fresh invocation showed a new card. No secure lock credential, hotword hardware, microphone or assist-content extraction was tested in this run.
 
 ---
 

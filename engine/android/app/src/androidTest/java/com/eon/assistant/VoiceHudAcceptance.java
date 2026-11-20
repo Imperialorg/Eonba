@@ -79,14 +79,14 @@ public final class VoiceHudAcceptance extends Instrumentation {
             // An unattached production view, NOT a voice session or a simulated OS binding.
             Context theme = new ContextThemeWrapper(getTargetContext(), android.R.style.Theme_Material_Light);
             Runnable unused = () -> { throw new AssertionError(); };
-            VoiceHudView view = new VoiceHudView(theme, unused, unused, unused, unused, unused, unused);
+            VoiceHudView view = new VoiceHudView(theme, unused, unused, unused, unused, unused, unused, unused);
             ToneGraph graph = view.findViewById(R.id.hud_tone_graph);
             TextView status = view.findViewById(R.id.hud_tone_status);
             view.render(new VoiceHudFrame(true, ProfileCheck.Idle.INSTANCE,
-                    new ToneScan.Reading(new ToneScan.Request(), levels.subList(0, 1))));
+                    new ToneScan.Reading(new ToneScan.Request(), levels.subList(0, 1)), null));
             check(graph.getLevels().size() == 1 && !view.findViewById(R.id.hud_tone_scan).isEnabled());
             check(theme.getString(R.string.voice_tone_progress, 1, 12).contentEquals(status.getText()));
-            view.render(new VoiceHudFrame(true, ProfileCheck.Idle.INSTANCE, new ToneScan.Complete(levels)));
+            view.render(new VoiceHudFrame(true, ProfileCheck.Idle.INSTANCE, new ToneScan.Complete(levels), null));
             check(graph.getLevels().equals(levels) && graph.getVisibility() == View.VISIBLE);
             check(theme.getString(R.string.voice_tone_complete, levels.size(), Collections.max(levels))
                     .contentEquals(status.getText()));

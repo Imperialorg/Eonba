@@ -1,5 +1,8 @@
 <resources>
     <bool name="voice_hud_supported">false</bool>
+    <item type="id" name="assistant_role_status" />
+    <item type="id" name="assistant_role_request" />
+    <string name="voice_role_canceled">Selection canceled. EON is not the selected assistant.</string>
     <string name="voice_hud_title">EON · Mic off</string>
     <string name="voice_hud_ready">Session open</string>
     <string name="voice_hud_checking">Checking model profile…</string>
@@ -15,6 +18,10 @@
     <string name="voice_hud_expand">Show session details</string>
     <string name="voice_hud_collapse">Hide session details</string>
     <string name="voice_hud_check">Check model profile</string>
+    <string name="voice_tasks_sample">Check EON’s Android activity tasks</string>
+    <string name="voice_tasks_reading">Checking EON activity tasks…</string>
+    <string name="voice_tasks_counts">Android activity tasks: %1$d running, %2$d retained without running activities. Tap again to refresh.</string>
+    <string name="voice_tasks_unavailable">EON activity task counts unavailable.</string>
     <string name="open_eon_controls">Open EON controls</string>
     <string name="close_voice_session">End session</string>
     <string name="voice_hud_help">With EON selected, use your assistant gesture while unlocked. Expand the card to check a model profile or see the levels of a built-in tone. Collapse or close the card to clear the levels. Nothing is recorded.</string>

@@ -100,7 +100,7 @@ def check_packages(inventory, preconfigured_allowed):
         raise SystemExit("Install and configure the target APK before running the allowed gate.")
 
 
-def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, preconfigured_allowed=False,
+def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, stock_assistant=False, preconfigured_allowed=False,
         preconfigured_hud=False):
     def adb(*args):
         return subprocess.check_output([sdk / "platform-tools/adb", "-s", serial, *args],
@@ -113,7 +113,7 @@ def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, preconfigu
         print(f"PASS: {name}", flush=True)
 
     preconfigured = preconfigured_allowed or preconfigured_hud
-    require_stock_emulator(adb, serial, 34 if demo_denied or stock_hud or preconfigured else 28)
+    require_stock_emulator(adb, serial, 34 if demo_denied or stock_hud or stock_assistant or preconfigured else 28)
     check_packages(adb("shell", "pm", "list", "packages", "-u", "--user", "all"), preconfigured)
     with ExitStack() as cleanup:
         def install(package, apk):
@@ -126,11 +126,15 @@ def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, preconfigu
             install(TEST, test_apk)
             if preconfigured_hud:
                 print("Invoke EON with the unlocked assistant gesture. Expand and choose Analyze built-in "
-                      "notification tone. After completion, close the card, wait a second, then invoke again.",
+                      "notification tone. After completion, tap Stop and clear; pause, close the card, "
+                      "wait a second, then invoke again.",
                       flush=True)
-                instrument("VoiceHudAcceptance", "voiceHud", "PASS-session", "-e", "mode", "session")
+                instrument("OperatorWindowAcceptance", "voiceHud", "PASS-session", "-e", "mode", "session")
             else:
-                instrument("DemoActionAcceptance", "demo", "PASS-allowed", "-e", "mode", "allowed")
+                print("Open a fresh EON action demo. Review and cancel a counter click. Review and confirm "
+                      "a click, then a scroll. Choose samples without native actions and repeat the "
+                      "confirmed click and scroll. Pause briefly at each result.", flush=True)
+                instrument("OperatorWindowAcceptance", "demo", "PASS-allowed", "-e", "mode", "demo")
             return
 
         install(TARGET, TARGET_APK)
@@ -142,6 +146,8 @@ def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, preconfigu
             instrument("DemoActionAcceptance", "demo", "PASS-denied", "-e", "mode", "denied")
         if stock_hud:
             instrument("VoiceHudAcceptance", "voiceHud", "PASS-stock", "-e", "mode", "stock")
+        if stock_assistant:
+            instrument("AssistantActivityAcceptance", "assistantActivity", "PASS-picker-canceled")
         # Only after restart's single-alias and continuity checks; the native vault has its own key.
         instrument("NativeVaultAcceptance", "nativeVault", "PASS")
 
@@ -164,11 +170,16 @@ def parse_args(argv=None):
                              "decoder on the unselected clean API 34+ emulator named by --serial")
     parser.add_argument("--demo-denied", action="store_true",
                         help="also require demo=denied on the clean, unlocked API 34+ emulator named by --serial")
+    parser.add_argument("--stock-assistant", action="store_true",
+                        help="on the clean unlocked API 34+ AVD, launch EON's ACTION_ASSIST activity and "
+                             "cancel its real Android role picker without making a selection")
     args = parser.parse_args(argv)
     if args.demo_denied and not args.serial:
         parser.error("--demo-denied requires --serial")
     if args.stock_hud and not args.serial:
         parser.error("--stock-hud requires --serial")
+    if args.stock_assistant and not args.serial:
+        parser.error("--stock-assistant requires --serial")
     return args
 
 
@@ -178,6 +189,6 @@ if __name__ == "__main__":
     apk = build(sdk)
     if not args.build_only:
         run(sdk, args.serial or args.preconfigured_allowed_serial or args.preconfigured_hud_serial, apk,
-            demo_denied=args.demo_denied, stock_hud=args.stock_hud,
+            demo_denied=args.demo_denied, stock_hud=args.stock_hud, stock_assistant=args.stock_assistant,
             preconfigured_allowed=args.preconfigured_allowed_serial is not None,
             preconfigured_hud=args.preconfigured_hud_serial is not None)

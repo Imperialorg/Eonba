@@ -40,6 +40,7 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
     private var hud: VoiceHudView? = null
     private var work: FutureTask<String>? = null
     private var toneStop: CancellationSignal? = null
+    private var taskStop: CancellationSignal? = null
     private var observingScreenOff = false
     private val screenOff = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -91,7 +92,7 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
             setBackgroundDrawableResource(android.R.color.transparent)
             setHideOverlayWindows(true)
         }
-        return VoiceHudView(context, ::toggleDetails, ::checkProfile, ::analyzeTone, ::clearTone,
+        return VoiceHudView(context, ::toggleDetails, ::checkProfile, ::sampleTasks, ::analyzeTone, ::clearTone,
             ::openControls, ::closeHud).also {
             hud = it
             it.render(surface.frame)
@@ -116,9 +117,35 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
 
     private fun toggleDetails() {
         if (!requireVisible()) return
-        if (surface.frame?.expanded == true) clearTone()
+        if (surface.frame?.expanded == true) {
+            clearTone()
+            cancelTaskSample()
+        }
         surface.toggleDetails()
         render()
+    }
+
+    private fun sampleTasks() {
+        if (!requireVisible()) return
+        val request = surface.requestTasks() ?: return
+        val stop = CancellationSignal().also { taskStop = it }
+        render()
+        val app = context.applicationContext
+        Thread({
+            val counts = try { OwnActivityTasks.read(app, stop) } catch (_: RuntimeException) { null }
+            main.post {
+                if (taskStop === stop && requireVisible()) {
+                    taskStop = null
+                    surface.finishTasks(request, counts)
+                    render()
+                }
+            }
+        }, "EON activity tasks").start()
+    }
+
+    private fun cancelTaskSample() {
+        taskStop?.cancel()
+        taskStop = null
     }
 
     private fun analyzeTone() {
@@ -203,6 +230,7 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
 
     private fun clearShowing() {
         surface.hide()
+        cancelTaskSample()
         clearTone()
         work?.cancel(true)
         work = null

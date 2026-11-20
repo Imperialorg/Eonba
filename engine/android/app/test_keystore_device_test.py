@@ -11,7 +11,8 @@ class InstrumentationResults(unittest.TestCase):
     def test_requires_result_for_the_requested_gate_and_successful_finish(self):
         for key, result in (("keystore", "PASS-issue"), ("keystore", "PASS-restart"),
                             ("demo", "PASS-denied"), ("demo", "PASS-allowed"), ("nativeVault", "PASS"),
-                            ("voiceHud", "PASS-stock"), ("voiceHud", "PASS-session")):
+                            ("voiceHud", "PASS-stock"), ("voiceHud", "PASS-session"),
+                            ("assistantActivity", "PASS-picker-canceled")):
             with self.subTest(key=key, result=result):
                 check_result(f"INSTRUMENTATION_RESULT: {key}={result}\r\nINSTRUMENTATION_CODE: -1\r\n", key, result)
 
@@ -68,7 +69,9 @@ class DeviceModes(unittest.TestCase):
                      ["--preconfigured-allowed-serial", "emulator-5556", "--demo-denied"],
                      ["--preconfigured-allowed-serial", "emulator-5556", "--serial", "emulator-5554"],
                      ["--build-only", "--stock-hud"], ["--preconfigured-hud-serial", "emulator-5554", "--stock-hud"],
-                     ["--preconfigured-hud-serial", "emulator-5554", "--demo-denied"]):
+                     ["--preconfigured-hud-serial", "emulator-5554", "--demo-denied"],
+                     ["--preconfigured-hud-serial", "emulator-5554", "--stock-assistant"],
+                     ["--build-only", "--stock-assistant"]):
             with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 parse_args(args)
 

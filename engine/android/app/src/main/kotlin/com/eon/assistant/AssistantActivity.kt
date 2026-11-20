@@ -19,6 +19,8 @@ import android.widget.TextView
 import uniffi.eon_uniffi.BridgeException
 import uniffi.eon_uniffi.selectModelProfile
 
+internal const val ASSISTANT_ROLE_REQUEST = 1
+
 /** ACTION_ASSIST launches a normal, foreground activity. It doesn't inspect the incoming intent. */
 class AssistantActivity : Activity() {
     private lateinit var measureNextProfile: CheckBox
@@ -27,6 +29,7 @@ class AssistantActivity : Activity() {
     private lateinit var inspectionStatus: TextView
     private var consent: AlertDialog? = null
     private var resumed = false
+    private var selectionCanceled = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -70,15 +73,18 @@ class AssistantActivity : Activity() {
             }
         })
         column.addView(result)
-        roleStatus = TextView(this)
+        roleStatus = TextView(this).apply { id = R.id.assistant_role_status; isSaveEnabled = false }
         requestRole = Button(this).apply {
+            id = R.id.assistant_role_request
             text = "Choose EON as assistant"
+            filterTouchesWhenObscured = true
             setOnClickListener {
                 if (Build.VERSION.SDK_INT >= 29) {
                     val role = getSystemService(RoleManager::class.java)
                     if (role.isRoleAvailable(RoleManager.ROLE_ASSISTANT) && !role.isRoleHeld(RoleManager.ROLE_ASSISTANT)) {
                         try {
-                            startActivityForResult(role.createRequestRoleIntent(RoleManager.ROLE_ASSISTANT), 1)
+                            selectionCanceled = false
+                            startActivityForResult(role.createRequestRoleIntent(RoleManager.ROLE_ASSISTANT), ASSISTANT_ROLE_REQUEST)
                         } catch (_: ActivityNotFoundException) {
                             roleStatus.text = "The system assistant picker is unavailable."
                         } catch (_: SecurityException) {
@@ -121,6 +127,14 @@ class AssistantActivity : Activity() {
             fitsSystemWindows = true
             addView(column, ViewGroup.LayoutParams(-1, -2))
         })
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == ASSISTANT_ROLE_REQUEST) {
+            // This result is UI feedback, never authority. onResume re-reads the role from Android.
+            selectionCanceled = resultCode == RESULT_CANCELED
+        }
     }
 
     private fun openSettings(action: String) {
@@ -190,6 +204,7 @@ class AssistantActivity : Activity() {
         val held = available && role.isRoleHeld(RoleManager.ROLE_ASSISTANT)
         roleStatus.text = when {
             held -> "EON is the selected assistant."
+            available && selectionCanceled -> getString(R.string.voice_role_canceled)
             available -> "EON is not the selected assistant."
             else -> "This device does not offer an assistant role."
         }

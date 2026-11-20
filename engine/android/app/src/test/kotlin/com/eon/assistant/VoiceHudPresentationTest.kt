@@ -21,6 +21,31 @@ class VoiceHudPresentationTest {
     }
 
     @Test
+    fun androidTaskCountsRequireAnExplicitRequestInTheCurrentExpandedShowing() {
+        assertNull(hud.requestTasks())
+        assertTrue(hud.show(true, true))
+        assertNull(hud.requestTasks())
+        hud.toggleDetails()
+        val first = assertNotNull(hud.requestTasks())
+        assertNull(hud.requestTasks())
+        hud.toggleDetails()
+        hud.toggleDetails()
+        val next = assertNotNull(hud.requestTasks())
+        val counts = OwnActivityTasks.Counts(1, 0)
+        hud.finishTasks(first, counts)
+        assertSame(next, hud.frame?.tasks)
+        hud.finishTasks(next, counts)
+        assertEquals(TaskSample.Result(counts), hud.frame?.tasks)
+        val unavailable = assertNotNull(hud.requestTasks())
+        hud.finishTasks(unavailable, null)
+        assertEquals(TaskSample.Result(null), hud.frame?.tasks)
+        val pending = assertNotNull(hud.requestTasks())
+        registry.shutdown(binding)
+        hud.finishTasks(pending, counts)
+        assertNull(hud.frame)
+    }
+
+    @Test
     fun openingIsIdleAndOnlyAnExplicitExpandedCheckStartsWork() {
         hud.toggleDetails()
         assertNull(hud.frame)

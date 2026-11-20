@@ -16,7 +16,12 @@ internal sealed interface ToneScan {
 }
 
 internal data class VoiceHudFrame(val expanded: Boolean = false, val check: ProfileCheck = ProfileCheck.Idle,
-                                 val tone: ToneScan = ToneScan.Idle)
+                                 val tone: ToneScan = ToneScan.Idle, val tasks: TaskSample? = null)
+
+internal sealed interface TaskSample {
+    class Request : TaskSample
+    data class Result(val counts: OwnActivityTasks.Counts?) : TaskSample
+}
 
 /** Main-thread only. A window belongs to one OS binding; neither survives a process restart. */
 internal class VoiceHudRegistry {
@@ -61,7 +66,18 @@ internal class VoiceHudRegistry {
         fun canUse(eligible: Boolean): Boolean = visible === this && owner === binding && eligible
 
         fun toggleDetails() {
-            frame = frame?.let { it.copy(expanded = !it.expanded, tone = ToneScan.Idle) }
+            frame = frame?.let { it.copy(expanded = !it.expanded, tone = ToneScan.Idle, tasks = null) }
+        }
+
+        fun requestTasks(): TaskSample.Request? {
+            val current = frame ?: return null
+            if (!current.expanded || current.tasks is TaskSample.Request) return null
+            return TaskSample.Request().also { frame = current.copy(tasks = it) }
+        }
+
+        fun finishTasks(request: TaskSample.Request, counts: OwnActivityTasks.Counts?) {
+            val current = frame ?: return
+            if (current.tasks === request) frame = current.copy(tasks = TaskSample.Result(counts))
         }
 
         fun requestTone(): ToneScan.Request? {

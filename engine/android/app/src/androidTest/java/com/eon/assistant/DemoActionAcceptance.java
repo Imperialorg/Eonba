@@ -10,8 +10,11 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.Button;
+import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.FutureTask;
 
@@ -62,6 +65,12 @@ public final class DemoActionAcceptance extends Instrumentation {
     private ScrollView samples() { return activity.findViewById(R.id.demo_samples); }
     private String status() { return ((TextView) activity.findViewById(R.id.demo_status)).getText().toString(); }
     private boolean reviewing() { return button(R.id.demo_confirm).getVisibility() == View.VISIBLE; }
+    private Integer visibleOffset() {
+        LinearLayout list = (LinearLayout) samples().getChildAt(0);
+        List<TextView> rows = new ArrayList<>();
+        for (int i = 0; i < list.getChildCount(); i++) rows.add((TextView) list.getChildAt(i));
+        return DemoSamplePosition.INSTANCE.read(samples(), list, rows);
+    }
     private void reviewLocal(int id) {
         tap(id);
         check(reviewing() && button(R.id.demo_confirm).getText().toString().contains("local hit fallback"));
@@ -90,6 +99,22 @@ public final class DemoActionAcceptance extends Instrumentation {
                             check("Demo count: 0".equals(count()) && samples().getScrollY() == 0);
                         }
                     }
+                    return null;
+                });
+                // Ordinary local widget input in reduced-provider mode, NOT an approved action.
+                // Verify the read-only postcondition witness on a real, visible Android hierarchy.
+                step = "visible-samples";
+                main(() -> {
+                    check(Integer.valueOf(0).equals(visibleOffset()));
+                    tap(R.id.demo_counter);
+                    check("Demo count: 1".equals(count()));
+                    check(samples().arrowScroll(View.FOCUS_DOWN));
+                    return null;
+                });
+                await(() -> visibleOffset() != null && visibleOffset() > 0);
+                main(() -> {
+                    samples().getChildAt(0).setVisibility(View.INVISIBLE);
+                    check(visibleOffset() == null && !reviewing() && !InspectionAccess.INSTANCE.eligible(activity));
                     return null;
                 });
             } else {
@@ -125,7 +150,7 @@ public final class DemoActionAcceptance extends Instrumentation {
                     tap(R.id.demo_confirm);
                     return null;
                 });
-                await(() -> samples().getScrollY() > 0 && status().startsWith("Verified:") && status().contains("native action"));
+                await(() -> visibleOffset() != null && visibleOffset() > 0 && status().startsWith("Verified:") && status().contains("native action"));
                 step = "local-cancel-and-state-change";
                 main(() -> {
                     tap(R.id.demo_review_click);
@@ -172,7 +197,7 @@ public final class DemoActionAcceptance extends Instrumentation {
                     reviewLocal(R.id.demo_review_scroll);
                     tap(R.id.demo_confirm);
                     int after = samples().getScrollY();
-                    check(after > before && after - before <= samples().getHeight());
+                    check(after > before && after - before <= samples().getHeight() && Integer.valueOf(after).equals(visibleOffset()));
                     check(status().startsWith("Verified:") && status().contains("local hit fallback"));
                     button(R.id.demo_confirm).performClick();
                     check(!reviewing() && samples().getScrollY() == after);

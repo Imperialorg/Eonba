@@ -18,6 +18,7 @@ internal class VoiceHudView(
     context: Context,
     toggleDetails: Runnable,
     checkProfile: Runnable,
+    sampleTasks: Runnable,
     analyzeTone: Runnable,
     clearTone: Runnable,
     openControls: Runnable,
@@ -40,6 +41,8 @@ internal class VoiceHudView(
     private val result: TextView = findViewById(R.id.hud_result)
     private val toggle: ImageButton = findViewById(R.id.hud_toggle)
     private val check: Button = findViewById(R.id.hud_check)
+    private val tasks: Button = findViewById(R.id.hud_tasks)
+    private val taskStatus: TextView = findViewById(R.id.hud_task_status)
     private val scan: Button = findViewById(R.id.hud_tone_scan)
     private val clear: Button = findViewById(R.id.hud_tone_clear)
     private val graph: ToneGraph = findViewById(R.id.hud_tone_graph)
@@ -49,6 +52,7 @@ internal class VoiceHudView(
     init {
         toggle.setOnClickListener { toggleDetails.run() }
         check.setOnClickListener { checkProfile.run() }
+        tasks.setOnClickListener { sampleTasks.run() }
         scan.setOnClickListener { analyzeTone.run() }
         clear.setOnClickListener { clearTone.run() }
         findViewById<Button>(R.id.hud_controls).setOnClickListener { openControls.run() }
@@ -70,6 +74,16 @@ internal class VoiceHudView(
         toggle.rotation = if (expanded) 180f else 0f
         toggle.contentDescription = context.getString(if (expanded) R.string.voice_hud_collapse else R.string.voice_hud_expand)
         check.isEnabled = expanded && frame.check !is ProfileCheck.Requested
+        val sample = frame?.tasks
+        tasks.isEnabled = expanded && sample !is TaskSample.Request
+        taskStatus.text = when (sample) {
+            null -> null
+            is TaskSample.Request -> context.getString(R.string.voice_tasks_reading)
+            is TaskSample.Result -> sample.counts?.let {
+                context.getString(R.string.voice_tasks_counts, it.running, it.retained)
+            } ?: context.getString(R.string.voice_tasks_unavailable)
+        }
+        taskStatus.visibility = if (sample == null) GONE else VISIBLE
         track.check = frame?.check ?: ProfileCheck.Idle
         val recommendation = (frame?.check as? ProfileCheck.Result)?.recommendation
         result.visibility = if (recommendation == null) GONE else VISIBLE
