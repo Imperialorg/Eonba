@@ -209,7 +209,7 @@ This is a closed local benchmark, not a way to run a submission. On Linux, put `
 ```bash
 R=/home/runner/work/Eonba/Eonba
 cargo build --locked --offline --manifest-path "$R/engine/core-rs/Cargo.toml" -j2 -p eon-cyber --no-default-features --bin eon-repair-edit
-cargo test --locked --offline --manifest-path "$R/engine/core-rs/Cargo.toml" -j2 -p eon-cyber --no-default-features --test benign_repair
+cargo test --locked --offline --manifest-path "$R/engine/core-rs/Cargo.toml" -j2 -p eon-cyber --no-default-features --test benign_repair --test benign_repair_kotlin
 python3 -B -m unittest discover -s "$R/scripts/eval" -p test_polyglot_repair.py
 python3 -B "$R/scripts/eval/polyglot_repair.py"
 ```
@@ -219,10 +219,12 @@ The only selector is `--language rust|kotlin|python|typescript`. `scripts/eval/r
 | Partition (tested tools) | Diagnostic / edit selection | Passed in one edit | Passed within loop |
 |---|---|---:|---:|
 | Rust (rustc 1.99.1, edition 2021 subjects) | rustc JSON spans and suggestions; tree-sitter validates the revision | 16/17 | 16/17 |
-| Kotlin (kotlinc-jvm 2.4.21, JDK 17) | K2 diagnostic names, positions and types; guarded token edits, **not** a Kotlin tree-sitter grammar | 10/10 | 10/10 |
+| Kotlin (kotlinc-jvm 2.4.21, JDK 17) | Match the K2 diagnostic to the Kotlin tree at its UTF-8 byte position; check the declaration or use site and reparse the proposed edit | 9/10 | 9/10 |
 | Python (CPython 3.12.3) | Semantic lint on the standard-library AST; localized edits | 12/12 | 12/12 |
 | TypeScript (tsc 7.0.2, Node 24.22.1) | Strict ES2022 `.ts` diagnostics and TypeScript tree-sitter nodes; not JS/TSX | 10/11 | 11/11 |
-| **Total** | | **48/50 (96%)** | **49/50 (98%)** |
+| **Total** | | **47/50 (94%)** | **48/50 (96%)** |
+
+The previous Kotlin token rules passed 10/10. The structural adapter abstains on the compact superclass fixture: the pinned grammar does not produce an error-free tree for that source. It does not fall back to text substitution. Both the subjects and the independent behavior checks are unchanged.
 
 Each baseline must have a subject diagnostic; for Python the original must also fail the independent behavior checks. Each iteration gets the current subject and diagnostic, not the label, checks, expected outputs or a fixed source file. There is one deterministic trajectory, at most three revisions, no behavior-guided search. A pass requires a clean diagnostic pass **and** successful execution of the checks. The TypeScript date subtraction needed two revisions (one per operand). The Rust format-string case stays in the denominator: knowing an argument is unused doesn't determine where to put it. Exit 0 requires strictly over 80% in one edit and no mislabeled baseline or behavior failure; infrastructure failure does not produce a complete score.
 
