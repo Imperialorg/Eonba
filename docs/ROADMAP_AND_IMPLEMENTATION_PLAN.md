@@ -189,7 +189,7 @@
   - **Files**: `src/router.rs`, `src/reflex.rs`, `src/tactical_slm.rs`, `src/strategic_frontier.rs`
   - **Requirements**: Route latency < 20ms for Tier 0 reflex, < 120ms for Tier 1 local SLM. Dual-stream split: silent `<think>...</think>` scratchpad routed to HUD/CLI, post-`</think>` tokens to TTS.
   - **Unit Tests**: `cargo test -p eon-cognition router_tests`.
-  - **Latency evidence**: On Linux, 2,000 complete reflex turns had a p95 of 621 ns. With the pinned P0 GGUF, 40 warm Tier 1 turns produced validated speech. Their p50 was 481.48 ms, p95 531.10 ms and max 550.23 ms. The 120 ms target was not met.
+  - **Latency evidence**: On Linux, 2,000 complete reflex turns had a p95 of 621 ns. Checking the greedy winner against the grammar before filtering the whole vocabulary reduced warm Tier 1 p95 from 535–560 ms to 413–417 ms on the same host. All 120 optimized turns reached natural end of generation and returned the correct validated reading. The 120 ms target was not met.
 
 - [x] **Task 6.2: Appraisal Engine & Hybrid Cognitive Memory**
   - **Crate**: `eon-cognition`

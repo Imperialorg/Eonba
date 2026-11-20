@@ -16,6 +16,8 @@ use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::{LlamaModel, params::LlamaModelParams};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
+use llama_cpp_2::token::data::LlamaTokenData;
+use llama_cpp_2::token::data_array::LlamaTokenDataArray;
 
 use crate::persona::SpeechAct;
 use crate::prompts::{QWEN_VOICE_REPLY, qwen_voice_header, speech_grammar};
@@ -65,6 +67,20 @@ fn llm_err(context: &str, e: impl std::fmt::Display) -> EonError {
         operation: format!("llm.{context}"),
         reason: e.to_string(),
     }
+}
+
+// If the unconstrained maximum is legal it is also the constrained maximum.
+// Applying the grammar + greedy chain masks logits but does not advance it.
+fn try_accept_speech_winner(constrained: &mut LlamaSampler, raw: LlamaToken) -> EonResult<bool> {
+    let mut probe = LlamaTokenDataArray::from_iter([LlamaTokenData::new(raw, 0.0, 0.0)], false);
+    constrained.apply(&mut probe);
+    if !probe.data[0].logit().is_finite() {
+        return Ok(false);
+    }
+    constrained
+        .try_accept(raw)
+        .map_err(|e| llm_err("speech_grammar", e))?;
+    Ok(true)
 }
 
 impl LocalModel {
@@ -163,7 +179,7 @@ impl LocalModel {
                 // Never mask a natural stop to manufacture a required body, or let the
                 // grammar's length limit force EOG in the middle of an answer.
                 let raw = greedy.sample(ctx, idx);
-                if vocab.is_eog(raw) {
+                if vocab.is_eog(raw) || try_accept_speech_winner(&mut constrained, raw)? {
                     return Ok(raw);
                 }
                 let token = constrained.sample(ctx, idx);
@@ -364,6 +380,29 @@ impl SpeechBackend for LocalModel {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    #[ignore = "requires the pinned Qwen GGUF"]
+    fn speech_winner_probe_advances_only_on_acceptance() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../perception/models/slm/Qwen3.5-0.8B-Q4_K_M.gguf");
+        let model = LocalModel::load(path).unwrap();
+        let token = |text: &[u8]| {
+            let tokens = model.model.vocab().tokenize(text, false, false);
+            let [id]: [_; 1] = tokens.try_into().unwrap();
+            id
+        };
+        let (x, y) = (token(b"x"), token(b"y"));
+        let grammar = LlamaSampler::grammar(&model.model, "root ::= \"xy\"", "root").unwrap();
+        let mut constrained = LlamaSampler::chain_simple([grammar, LlamaSampler::greedy()]);
+        // Even a masked singleton is selected by greedy: inspect its logit, not its index.
+        for (raw, allowed) in [(y, false), (x, true), (x, false), (y, true), (y, false)] {
+            assert_eq!(
+                try_accept_speech_winner(&mut constrained, raw).unwrap(),
+                allowed
+            );
+        }
+    }
 
     // Exercise native batch construction and the prefill stop points, not inference.
     #[test]
