@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use eon_primitives::{EonError, EonResult};
+use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
@@ -17,7 +18,7 @@ use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 
 use crate::persona::SpeechAct;
-use crate::prompts::{QWEN_VOICE_REPLY, qwen_voice_header};
+use crate::prompts::{QWEN_VOICE_REPLY, qwen_voice_header, speech_grammar};
 use crate::router::{
     CognitiveRouter, DEFAULT_TURN_TIMEOUT, RouteError, SpeechBackend, SpeechBudget, SpeechRequest,
     SpeechTokens, Workload,
@@ -134,7 +135,7 @@ impl LocalModel {
         out.check_active()?;
         let vocab = self.model.vocab();
         let mut tokens = vocab.tokenize(qwen_voice_header(request.act).as_bytes(), true, true);
-        tokens.extend(vocab.tokenize(request.text.as_bytes(), false, false));
+        tokens.extend(vocab.tokenize(request.text.trim().as_bytes(), false, false));
         tokens.extend(vocab.tokenize(QWEN_VOICE_REPLY.as_bytes(), false, true));
         let max_tokens = request.max_tokens;
         if max_tokens > (CONTEXT_TOKENS as usize).saturating_sub(tokens.len()) || max_tokens == 0 {
@@ -152,11 +153,29 @@ impl LocalModel {
             |batch| ctx.decode(batch).map_err(|e| llm_err("decode", e)),
         )?;
         out.check_active()?;
+        let constraint = LlamaSampler::grammar(&self.model, &speech_grammar(request.act), "root")
+            .map_err(|e| llm_err("speech_grammar", e))?;
+        let mut constrained = LlamaSampler::chain_simple([constraint, LlamaSampler::greedy()]);
+        let mut greedy = LlamaSampler::greedy();
         let complete = self.sample_into(
             &mut ctx,
-            LlamaSampler::greedy(),
+            |ctx, idx| {
+                // Never mask a natural stop to manufacture a required body, or let the
+                // grammar's length limit force EOG in the middle of an answer.
+                let raw = greedy.sample(ctx, idx);
+                if vocab.is_eog(raw) {
+                    return Ok(raw);
+                }
+                let token = constrained.sample(ctx, idx);
+                if vocab.is_eog(token) {
+                    return Err(EonError::ValidationError("incomplete verbal turn".into()));
+                }
+                Ok(token)
+            },
             tokens.len(),
-            max_tokens,
+            // The sink caps non-EOG tokens. Probe the final logits for EOG even if
+            // the last permitted text token exactly filled the budget.
+            max_tokens + 1,
             logits,
             // Preserve model control tokens for the filter, not for speech.
             |token| out.push_token(&vocab.token_to_piece(token, true, None)),
@@ -232,7 +251,7 @@ impl LocalModel {
     fn sample_into(
         &self,
         ctx: &mut llama_cpp_2::context::LlamaContext<'_>,
-        mut sampler: LlamaSampler,
+        mut sample: impl FnMut(&LlamaContext<'_>, i32) -> EonResult<LlamaToken>,
         prompt_len: usize,
         max_tokens: usize,
         logits_index: i32,
@@ -243,7 +262,7 @@ impl LocalModel {
         let mut logits_index = logits_index;
         for position in (prompt_len as i32..).take(max_tokens) {
             // `sample` also accepts the token into the sampler chain, so it must not be accepted again.
-            let token = sampler.sample(ctx, logits_index);
+            let token = sample(ctx, logits_index)?;
             if vocab.is_eog(token) {
                 return Ok(true);
             }
@@ -260,17 +279,24 @@ impl LocalModel {
     fn sample_loop(
         &self,
         ctx: &mut llama_cpp_2::context::LlamaContext<'_>,
-        sampler: LlamaSampler,
+        mut sampler: LlamaSampler,
         prompt_len: usize,
         max_tokens: usize,
         logits_index: i32,
     ) -> EonResult<String> {
         let mut output = Vec::new();
         let vocab = self.model.vocab();
-        self.sample_into(ctx, sampler, prompt_len, max_tokens, logits_index, |token| {
-            output.extend(vocab.token_to_piece(token, false, None));
-            Ok(())
-        })?;
+        self.sample_into(
+            ctx,
+            |ctx, idx| Ok(sampler.sample(ctx, idx)),
+            prompt_len,
+            max_tokens,
+            logits_index,
+            |token| {
+                output.extend(vocab.token_to_piece(token, false, None));
+                Ok(())
+            },
+        )?;
         String::from_utf8(output).map_err(|e| llm_err("utf8", e))
     }
 

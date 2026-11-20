@@ -87,3 +87,17 @@ fn qwen_public_speech_uses_the_ciel_contract() {
     assert!(!speech.contains(['<', '>']));
     assert!(model.generate_speech(SpeechAct::Report, request, 1).is_err());
 }
+
+#[test]
+fn qwen_notice_generates_its_own_public_body() {
+    let speech = load()
+        .generate_speech(
+            SpeechAct::Notice,
+            "The library is closed. Notify the listener briefly.",
+            48,
+        )
+        .unwrap();
+    let body = speech.strip_prefix("Notice: ").expect("wrong speech act");
+    assert!(body.to_lowercase().contains("closed"));
+    assert!(!body.contains(['<', '>']));
+}

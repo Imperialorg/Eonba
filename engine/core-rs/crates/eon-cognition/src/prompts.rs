@@ -23,5 +23,24 @@ pub(crate) fn qwen_voice_header(act: SpeechAct) -> String {
 }
 
 #[cfg(feature = "llama-backend")]
+// The pinned GGUF's tokenizer.chat_template emits an already CLOSED empty reasoning block
+// for enable_thinking=false. A user-text switch is not equivalent to this assistant header.
 pub(crate) const QWEN_VOICE_REPLY: &str =
     "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+
+// Constrain the non-thinking turn, not its answer. The model generates the opener too;
+// SpeechRouter remains responsible for validating the complete utterance after EOG.
+#[cfg(feature = "llama-backend")]
+pub(crate) fn speech_grammar(act: SpeechAct) -> String {
+    let optional = if act == SpeechAct::Affirmative {
+        "?"
+    } else {
+        ""
+    };
+    format!(
+        r#"root ::= "{}" body{optional}
+body ::= " " [^<>\x00-\x20\x7f-\x9f] [^<>\x00-\x1f\x7f-\x9f]{{0,255}}
+"#,
+        act.prefix()
+    )
+}

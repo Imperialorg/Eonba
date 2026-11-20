@@ -133,6 +133,30 @@ mod router_tests {
     }
 
     #[test]
+    fn a_label_inside_a_hidden_block_cannot_select_or_supply_the_public_act() {
+        for act in [
+            SpeechAct::Affirmative,
+            SpeechAct::Report,
+            SpeechAct::Notice,
+            SpeechAct::Negative,
+            SpeechAct::Proposal,
+        ] {
+            let public = format!("{} Access is restricted.", act.prefix());
+            for lead in ["", "<think>Report: not for speech.</think>\n"] {
+                let mut router = SpeechRouter::new(act);
+                router.push(lead.as_bytes()).unwrap();
+                router.push(public.as_bytes()).unwrap();
+                assert_eq!(router.finish().unwrap(), public);
+            }
+            let mut hidden_only = SpeechRouter::new(act);
+            hidden_only.push(b"<think>").unwrap();
+            hidden_only.push(public.as_bytes()).unwrap();
+            hidden_only.push(b"</think>").unwrap();
+            assert!(hidden_only.finish().is_err());
+        }
+    }
+
+    #[test]
     fn malformed_markers_never_release_text_even_when_split() {
         for turn in [
             "<thi",
