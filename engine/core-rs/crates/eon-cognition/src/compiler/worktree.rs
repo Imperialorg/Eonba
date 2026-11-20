@@ -1,6 +1,7 @@
 //! One captured extent per branch. No source path, link, cwd or executable
-//! directory capability crosses this boundary. All names are created exclusively.
+//! directory capability crosses this boundary. Only a selected export names its data.
 use std::fs::{File, Metadata};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::sync::Arc;
 
@@ -52,15 +53,27 @@ impl WorktreeStore {
     }
 
     /// Make a filesystem-local lower inode for FICLONE. Never clone the live
-    /// file or the whole packed image. Unlink and close the only writer before
-    /// handing out the read-only lower, including on non-reflink filesystems.
+    /// file or the whole packed image. No capture is written to a named inode.
     pub(super) fn lower(&self, bytes: &[u8]) -> EonResult<Arc<File>> {
-        let name = TaskId::new().to_string();
-        let writer = self.0.file(&name, Mode::RUSR)?;
-        writer.fd.write_all_at(bytes, 0).map_err(failed)?;
-        let reader = writer.read_only()?;
-        // Moving the fd drops its name guard, leaving just the open lower inode.
-        Ok(Arc::new(reader.fd))
+        let writer = self.0.anonymous_file(Mode::RUSR)?;
+        writer.write_all_at(bytes, 0).map_err(failed)?;
+        // dup would retain write access. Reopen the pinned inode on real procfs.
+        let procfd = fs::open("/proc/self/fd", DIR, Mode::empty()).map_err(failed)?;
+        if fs::fstatfs(&procfd).map_err(failed)?.f_type != fs::PROC_SUPER_MAGIC {
+            return Err(invalid("trusted procfs required to reopen private extent"));
+        }
+        let reader = fs::openat(
+            procfd,
+            writer.as_raw_fd().to_string(),
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .map(File::from)
+        .map_err(failed)?;
+        if identity(&reader)? != identity(&writer)? {
+            return Err(invalid("private extent inode changed"));
+        }
+        Ok(Arc::new(reader))
     }
 }
 
@@ -120,17 +133,33 @@ impl Dir {
         }))
     }
 
-    fn file(self: &Arc<Self>, name: &str, mode: Mode) -> EonResult<NamedFile> {
+    fn create_exclusive(&self, name: &str, mode: Mode) -> EonResult<File> {
         let flags = OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let fd = fs::openat(&self.fd, name, flags | OFlags::RDWR, mode).map_err(failed)?;
-        Ok(NamedFile {
-            fd: fd.into(),
-            entry: Entry {
-                parent: self.clone(),
-                name: name.into(),
-                flags: AtFlags::empty(),
-            },
-        })
+        fs::openat(&self.fd, name, flags | OFlags::RDWR, mode)
+            .map(File::from)
+            .map_err(failed)
+    }
+
+    fn anonymous_file(&self, mode: Mode) -> EonResult<File> {
+        // EXCL with TMPFILE prevents even linkat from publishing the inode.
+        let flags = OFlags::TMPFILE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::RDWR;
+        match fs::openat(&self.fd, ".", flags, mode) {
+            Ok(fd) => Ok(fd.into()),
+            Err(Errno::OPNOTSUPP) => self.create_unlinked(&TaskId::new().to_string(), mode),
+            Err(e) => Err(failed(e)),
+        }
+    }
+
+    fn create_unlinked(&self, name: &str, mode: Mode) -> EonResult<File> {
+        // A crash between create and unlink can leave only an empty file.
+        private_dir(&self.fd)?;
+        let fd = self.create_exclusive(name, mode)?;
+        fs::unlinkat(&self.fd, name, AtFlags::empty()).map_err(failed)?;
+        let m = fd.metadata().map_err(failed)?;
+        if !m.is_file() || m.nlink() != 0 {
+            return Err(invalid("private extent is not an unlinked regular file"));
+        }
+        Ok(fd)
     }
 }
 
@@ -182,9 +211,16 @@ impl Slot {
         })
     }
 
-    fn create(&self, mode: Mode) -> EonResult<NamedFile> {
-        self.parent
-            .file(self.path.rsplit('/').next().unwrap(), mode)
+    fn create_export(&self) -> EonResult<NamedFile> {
+        let name = self.path.rsplit('/').next().unwrap();
+        Ok(NamedFile {
+            fd: self.parent.create_exclusive(name, Mode::RUSR)?,
+            entry: Entry {
+                parent: self.parent.clone(),
+                name: name.into(),
+                flags: AtFlags::empty(),
+            },
+        })
     }
 }
 
@@ -200,7 +236,7 @@ pub enum CheckoutBacking {
 pub(super) struct BranchTree {
     slot: Slot,
     lower: Arc<File>,
-    upper: Option<NamedFile>,
+    upper: Option<File>,
     len: usize,
     poisoned: bool,
 }
@@ -213,8 +249,8 @@ impl BranchTree {
         len: usize,
     ) -> EonResult<(Self, CheckoutBacking)> {
         let slot = Slot::new(store, path)?;
-        let upper = slot.create(Mode::RUSR | Mode::WUSR)?;
-        let (upper, backend) = match fs::ioctl_ficlone(&upper.fd, &*lower) {
+        let upper = slot.parent.anonymous_file(Mode::RUSR | Mode::WUSR)?;
+        let (upper, backend) = match fs::ioctl_ficlone(&upper, &*lower) {
             Ok(()) => (Some(upper), CheckoutBacking::Reflink),
             Err(Errno::OPNOTSUPP | Errno::NOTTY | Errno::NOSYS) => {
                 (None, CheckoutBacking::FileOverlay)
@@ -238,9 +274,9 @@ impl BranchTree {
             return Err(invalid("checkout write previously failed"));
         }
         if self.upper.is_none() {
-            let upper = self.slot.create(Mode::RUSR | Mode::WUSR)?;
+            let upper = self.slot.parent.anonymous_file(Mode::RUSR | Mode::WUSR)?;
             let data = read_extent(&self.lower, self.len)?;
-            upper.fd.write_all_at(&data, 0).map_err(failed)?;
+            upper.write_all_at(&data, 0).map_err(failed)?;
             self.upper = Some(upper);
         }
         // Never present a partially successful filesystem write.
@@ -248,7 +284,6 @@ impl BranchTree {
         self.upper
             .as_ref()
             .unwrap()
-            .fd
             .write_all_at(bytes, start as u64)
             .map_err(failed)?;
         self.poisoned = false;
@@ -259,7 +294,7 @@ impl BranchTree {
         if self.poisoned {
             return Err(invalid("checkout write previously failed"));
         }
-        let fd = self.upper.as_ref().map_or(&*self.lower, |f| &f.fd);
+        let fd = self.upper.as_ref().unwrap_or(&self.lower);
         read_extent(fd, self.len)
     }
 }
@@ -286,7 +321,7 @@ pub struct CheckoutDirectory {
 impl CheckoutDirectory {
     pub(super) fn export(store: &WorktreeStore, path: &str, bytes: &[u8]) -> EonResult<Self> {
         let slot = Slot::new(store, path)?;
-        let file = slot.create(Mode::RUSR)?;
+        let file = slot.create_export()?;
         file.fd.write_all_at(bytes, 0).map_err(failed)?;
         Ok(Self {
             slot,
@@ -337,8 +372,24 @@ impl CheckoutDirectory {
 
 #[cfg(test)]
 mod compiler_tests {
-    use super::super::fixture::Fixture;
+    use super::super::fixture::{Fixture, write};
     use super::*;
+
+    #[test]
+    fn fallback_only_unlinks_its_own_new_empty_file() {
+        let f = Fixture::new();
+        let scratch = f.root();
+        let store = WorktreeStore::from_directory(File::open(&scratch).unwrap()).unwrap();
+        let existing = scratch.join("existing");
+        write(&existing, b"keep");
+        assert!(store.0.create_unlinked("existing", Mode::RUSR).is_err());
+        let fd = store.0.create_unlinked("fresh", Mode::RUSR).unwrap();
+        assert_eq!(fd.metadata().unwrap().nlink(), 0);
+        fd.write_all_at(b"only via fd", 0).unwrap();
+        assert_eq!(read_extent(&fd, 11).unwrap(), b"only via fd");
+        assert_eq!(std::fs::read_dir(scratch).unwrap().count(), 1);
+        assert_eq!(std::fs::read(existing).unwrap(), b"keep");
+    }
 
     #[test]
     fn an_unlinked_read_only_lower_survives_divergent_files_unchanged() {
@@ -357,6 +408,11 @@ mod compiler_tests {
         let mut a = fork();
         let b = fork();
         a.overwrite(1, b"y").unwrap();
+        let upper = a.upper.as_ref().unwrap();
+        let m = upper.metadata().unwrap();
+        assert!(m.is_file());
+        assert_eq!((m.nlink(), m.mode() & 0o777), (0, 0o600));
+        assert_ne!(identity(upper).unwrap(), identity(&lower).unwrap());
         assert_eq!(a.freeze().unwrap(), b"byse");
         assert_eq!(b.freeze().unwrap(), b"base");
         assert_eq!(read_extent(&lower, 4).unwrap(), b"base");

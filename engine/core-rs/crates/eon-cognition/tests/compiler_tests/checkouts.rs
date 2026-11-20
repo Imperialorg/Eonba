@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use eon_cognition::compiler::{
     Attention, CONFIRMATION_WINDOW, CandidateDecision, CheckoutBacking, MAX_READ_BYTES,
-    WorktreeStore,
+    ReadWorkspace, WorktreeStore,
 };
 use eon_kernel::TaskId;
 use rustix::io::Errno;
@@ -23,7 +23,7 @@ fn inode(path: &Path) -> (u64, u64) {
     (m.dev(), m.ino())
 }
 
-// Includes unlinked lower files; the store dirfd itself is allowed to survive.
+// Includes anonymous extent files; the store dirfd itself is allowed to survive.
 fn open_children(scratch: &Path) -> usize {
     let root = fs::canonicalize(scratch).unwrap();
     entries(Path::new("/proc/self/fd"))
@@ -31,6 +31,58 @@ fn open_children(scratch: &Path) -> usize {
         .filter_map(|fd| fs::read_link(fd).ok())
         .filter(|path| path.starts_with(&root) && path != &root)
         .count()
+}
+
+#[test]
+fn forced_exit_with_edited_branches_leaves_no_named_extent() {
+    const CHILD: &str = "EON_TEST_CRASH_CHECKOUT_FIXTURE";
+    const STAGED: i32 = 86;
+    if let Some(path) = std::env::var_os(CHILD) {
+        let path = PathBuf::from(path);
+        let ws = ReadWorkspace::from_directory(
+            File::open(path.join("workspace")).unwrap(),
+            &["src/A", "src/B"],
+        )
+        .unwrap();
+        let store =
+            WorktreeStore::from_directory(File::open(path.join("scratch")).unwrap()).unwrap();
+        let mut branches =
+            checkout_candidates(&objective("read file src/A or src/B"), &ws, &store).unwrap();
+        let ids: Vec<_> = branches.choices().map(|c| c.id.clone()).collect();
+        for id in ids {
+            branches.overwrite(&id, 1, b"edited").unwrap();
+        }
+        // Do not unwind: all lower/upper descriptors and directory guards are live.
+        std::process::exit(STAGED);
+    }
+
+    let f = Fixture::new();
+    mkdir(&f.root().join("src"));
+    write(&f.root().join("src/A"), b"captured first extent");
+    write(&f.root().join("src/B"), b"captured second extent");
+    let scratch = f.path().join("scratch");
+    mkdir(&scratch);
+    let unrelated = scratch.join("operator-file");
+    write(&unrelated, b"keep");
+    let original = inode(&unrelated);
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg(std::thread::current().name().unwrap())
+        .env(CHILD, fs::canonicalize(f.path()).unwrap())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(STAGED));
+
+    // Empty private directories can outlive their guards, but no named data can.
+    let mut pending = entries(&scratch);
+    while let Some(path) = pending.pop() {
+        if path != unrelated {
+            assert!(path.symlink_metadata().unwrap().is_dir(), "{path:?}");
+            pending.extend(entries(&path));
+        }
+    }
+    assert_eq!(inode(&unrelated), original);
+    assert_eq!(fs::read(unrelated).unwrap(), b"keep");
 }
 
 #[test]
@@ -125,37 +177,17 @@ fn disjoint_read_clauses_make_real_private_extent_files_and_export_one_directory
     let staged = entries(&scratch);
     assert_eq!(staged.len(), 2);
     assert_ne!(inode(&staged[0]), inode(&staged[1]));
-    for root in &staged {
-        assert_eq!(entries(root), [root.join("src")]);
-        assert_eq!(root.symlink_metadata().unwrap().mode() & 0o777, 0o700);
-        let files = entries(&root.join("src"));
-        match backing {
-            CheckoutBacking::Reflink => {
-                let [file]: [_; 1] = files.try_into().unwrap();
-                let expected = if file == root.join(a) {
-                    b"ALPHA"
-                } else {
-                    b"BRAVO"
-                };
-                assert_eq!(fs::read(file).unwrap(), expected);
-            }
-            CheckoutBacking::FileOverlay => assert!(files.is_empty()),
+    let assert_anonymous = || {
+        for root in &staged {
+            assert_eq!(entries(root), [root.join("src")]);
+            assert_eq!(root.symlink_metadata().unwrap().mode() & 0o777, 0o700);
+            assert!(entries(&root.join("src")).is_empty());
         }
-    }
-
+    };
+    assert_anonymous();
     branches.overwrite(&ids[0], 8, b"xx").unwrap();
     branches.overwrite(&ids[1], 6, b"yy").unwrap();
-    let [left, right] = [a, b].map(|p| staged.iter().find(|r| r.join(p).exists()).unwrap());
-    assert_ne!(left, right);
-    for (root, path, contents) in [(left, a, b"AxxHA"), (right, b, b"BRyyO")] {
-        let entry = root.join(path);
-        assert_eq!(entries(&root.join("src")), std::slice::from_ref(&entry));
-        let m = entry.symlink_metadata().unwrap();
-        assert!(m.is_file());
-        assert_eq!((m.nlink(), m.mode() & 0o777), (1, 0o600));
-        assert_ne!(inode(&entry), inode(&f.root().join(path)));
-        assert_eq!(fs::read(entry).unwrap(), contents);
-    }
+    assert_anonymous();
 
     let window = branches.present(Attention::Verified).unwrap();
     assert!(entries(&scratch).is_empty());
