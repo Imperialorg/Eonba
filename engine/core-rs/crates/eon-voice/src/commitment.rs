@@ -105,9 +105,9 @@ impl Clause {
         }
     }
 
-    fn synthesize(&self, tts: &mut KokoroTts, speed: f32) -> EonResult<Vec<f32>> {
+    fn synthesize(&self, tts: &mut KokoroTts, speed: f32, playback: &BargeIn) -> EonResult<Vec<f32>> {
         match self {
-            Self::Text(text) => tts.synthesize(text, speed),
+            Self::Text(text) => tts.synthesize_cancellable(text, speed, || playback.is_muted()),
             Self::Prepared(clause) => tts.synthesize_prepared(clause, speed),
         }
     }
@@ -182,9 +182,13 @@ impl CommitmentGate {
     /// Software-only path; driver callers should use `ReplyRenderer` which also fences already queued PCM.
     pub fn synthesize_next(&mut self, tts: &mut KokoroTts, speed: f32) -> EonResult<Option<Vec<f32>>> {
         let Some(text) = self.ready() else { return Ok(None) };
-        let samples = text.synthesize(tts, speed)?;
+        let samples = match text.synthesize(tts, speed, &self.playback) {
+            Ok(samples) => Some(samples),
+            Err(_) if self.playback.is_muted() => None,
+            Err(e) => return Err(e),
+        };
         self.pending.pop_front();
-        Ok((!self.playback.is_muted()).then_some(samples))
+        Ok(samples.filter(|_| !self.playback.is_muted()))
     }
 }
 
@@ -287,10 +291,10 @@ impl ReplyRenderer {
     /// Publish a partial ring write, or synthesize and publish at most one committed clause.
     /// Zero means no space, no ready clause, or cancellation; never busy-wait on the callback.
     pub fn pump(&mut self, tts: &mut KokoroTts, speed: f32) -> EonResult<usize> {
-        self.pump_with(|clause| clause.synthesize(tts, speed))
+        self.pump_with(|clause, playback| clause.synthesize(tts, speed, playback))
     }
 
-    fn pump_with(&mut self, synthesize: impl FnOnce(&Clause) -> EonResult<Vec<f32>>) -> EonResult<usize> {
+    fn pump_with(&mut self, synthesize: impl FnOnce(&Clause, &BargeIn) -> EonResult<Vec<f32>>) -> EonResult<usize> {
         if self.gate.playback.is_muted() || self.staged.is_some() {
             return Ok(self.publish());
         }
@@ -298,9 +302,9 @@ impl ReplyRenderer {
         if self.tx.writable() == 0 {
             return Ok(0);
         }
-        let samples = synthesize(text)?;
+        let samples = synthesize(text, &self.gate.playback);
         if !self.gate.playback.is_muted() {
-            self.staged = Some(device_pcm(samples, self.rate)?.into());
+            self.staged = Some(device_pcm(samples?, self.rate)?.into());
             self.started = true;
         }
         self.gate.pending.pop_front();
@@ -364,7 +368,7 @@ mod commitment_gate_tests {
         worker.queue("First claim. Second claim.").unwrap();
         assert_eq!(worker.start_bridge(&cache, Bridge::Report).unwrap(), 2);
         assert!(worker.start_bridge(&cache, Bridge::Notice).is_err());
-        let no_run = |_: &Clause| panic!("should not start synthesis");
+        let no_run = |_: &Clause, _: &BargeIn| panic!("should not start synthesis");
         assert_eq!(worker.pump_with(no_run).unwrap(), 0);
         let mut played = [0.; 2];
         signal.render(&mut rx, &mut played);
@@ -376,7 +380,7 @@ mod commitment_gate_tests {
         worker.revocation().invalidate(8);
         assert_eq!(
             worker
-                .pump_with(|text| {
+                .pump_with(|text, _| {
                     assert_eq!(text.text(), "First claim.");
                     Ok(vec![0.4, 0.5, 0.6])
                 })
@@ -407,8 +411,9 @@ mod commitment_gate_tests {
         worker.lease_acquired(2, LeaseId::new());
         assert_eq!(
             worker
-                .pump_with(|_| {
+                .pump_with(|_, playback| {
                     control.invalidate(2);
+                    assert!(playback.is_muted());
                     Ok(vec![1.0; 8])
                 })
                 .unwrap(),

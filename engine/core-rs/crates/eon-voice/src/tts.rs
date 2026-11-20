@@ -6,10 +6,10 @@
 //!
 //! espeak-ng reads the text from stdin and is never given it as an argument, so text cannot inject options.
 
+mod phonemizer;
+
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 use eon_primitives::{EonError, EonResult};
 use ort::session::Session;
@@ -55,31 +55,7 @@ fn load_vocab() -> EonResult<HashMap<char, i64>> {
 
 /// Converts text to en-us IPA phonemes with stress marks. Newlines become spaces and runs of spaces collapse.
 pub fn phonemize(text: &str) -> EonResult<String> {
-    if text.len() > MAX_CLAUSE_BYTES {
-        return Err(EonError::ValidationError("Kokoro clause exceeds text budget".into()));
-    }
-    let mut child = Command::new("espeak-ng")
-        .args(["-v", "en-us", "-q", "--ipa=3"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| tts_err("phonemize.spawn", format!("espeak-ng is required on PATH: {e}")))?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| tts_err("phonemize.stdin", "no stdin pipe"))?
-        .write_all(text.as_bytes())
-        .map_err(|e| tts_err("phonemize.write", e))?;
-    let output = child.wait_with_output().map_err(|e| tts_err("phonemize.wait", e))?;
-    if !output.status.success() {
-        return Err(tts_err(
-            "phonemize",
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        ));
-    }
-    let raw = String::from_utf8_lossy(&output.stdout);
-    Ok(raw.split_whitespace().collect::<Vec<_>>().join(" "))
+    phonemizer::run(text, || false)
 }
 
 pub struct KokoroTts {
@@ -126,7 +102,13 @@ impl KokoroFrontend {
     }
 
     pub fn prepare(&self, text: &str) -> EonResult<PreparedClause> {
-        let ids = phonemize(text)?
+        self.prepare_cancellable(text, || false)
+    }
+
+    /// Like `prepare`, but stops the phonemizer when the caller revokes this clause.
+    /// `cancelled` must be a cheap, nonblocking check.
+    pub fn prepare_cancellable(&self, text: &str, cancelled: impl Fn() -> bool) -> EonResult<PreparedClause> {
+        let ids = phonemizer::run(text, cancelled)?
             .chars()
             .filter_map(|c| self.vocab.get(&c))
             .take(MAX_TOKENS + 1)
@@ -217,12 +199,21 @@ impl KokoroTts {
     }
 
     pub fn synthesize(&mut self, text: &str, speed: f32) -> EonResult<Vec<f32>> {
+        self.synthesize_cancellable(text, speed, || false)
+    }
+
+    pub(crate) fn synthesize_cancellable(
+        &mut self,
+        text: &str,
+        speed: f32,
+        cancelled: impl Fn() -> bool,
+    ) -> EonResult<Vec<f32>> {
         if !SPEED_RANGE.contains(&speed) {
             return Err(EonError::ValidationError(format!(
                 "speed {speed} is outside 0.5 to 2.0"
             )));
         }
-        let clause = self.frontend.prepare(text)?;
+        let clause = self.frontend.prepare_cancellable(text, cancelled)?;
         self.synthesize_prepared(&clause, speed)
     }
 

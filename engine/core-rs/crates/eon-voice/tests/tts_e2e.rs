@@ -149,6 +149,80 @@ fn check_synthesis_budgets(mut tts: KokoroTts) {
     assert!(rtf < 0.15);
 }
 
+/// Exercise the ordinary text (not PreparedClause) renderer with a real
+/// Kokoro instance. Only the child test process sees the fake espeak on PATH.
+#[cfg(target_os = "linux")]
+#[test]
+fn revoking_plain_text_interrupts_stalled_g2p_without_publishing_pcm() {
+    use std::{fs, os::unix::fs::DirBuilderExt, os::unix::fs::PermissionsExt, process::Command, time::Duration};
+
+    use eon_voice::{commitment::ReplyRenderer, ring::pcm_ring};
+
+    const FIXTURE: &str = "EON_TEST_STALLED_G2P";
+    let Some(marker) = std::env::var_os(FIXTURE) else {
+        let exe = std::env::current_exe().unwrap();
+        let dir = exe
+            .parent()
+            .unwrap()
+            .join(format!("stalled-g2p-{}", std::process::id()));
+        fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let fixture = dir.join("espeak-ng");
+        let marker = dir.join("started");
+        fs::write(
+            &fixture,
+            "#!/bin/sh\n: > \"$EON_TEST_STALLED_G2P\"\nexec /bin/sleep 10\n",
+        )
+        .unwrap();
+        fs::set_permissions(fixture, fs::Permissions::from_mode(0o700)).unwrap();
+        let child = Command::new(exe)
+            .args([
+                "--exact",
+                "revoking_plain_text_interrupts_stalled_g2p_without_publishing_pcm",
+                "--nocapture",
+            ])
+            .env("PATH", &dir)
+            .env(FIXTURE, &marker)
+            .output();
+        let started = marker.is_file(); // --exact with zero matching tests also exits successfully.
+        fs::remove_dir_all(dir).unwrap();
+        let child = child.unwrap();
+        assert!(
+            started && child.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        return;
+    };
+
+    let models = repo_models();
+    let mut tts = KokoroTts::load(
+        models.join("tts/kokoro-v1.0-int8.onnx"),
+        models.join("tts/voices/af_heart.bin"),
+    )
+    .unwrap();
+    let (tx, rx) = pcm_ring(64);
+    let mut renderer = ReplyRenderer::new(1, BargeIn::new(), tx, SAMPLE_RATE_HZ).unwrap();
+    renderer.queue("The report is ready.").unwrap();
+    renderer.lease_acquired(1, LeaseId::new());
+    let revoke = renderer.revocation();
+    let observer = std::thread::spawn(move || {
+        let start = Instant::now();
+        while !std::path::Path::new(&marker).is_file() {
+            assert!(start.elapsed() < Duration::from_secs(3), "espeak fixture did not start");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let interrupted = Instant::now();
+        revoke.invalidate(1);
+        interrupted
+    });
+    assert_eq!(renderer.pump(&mut tts, 1.0).unwrap(), 0);
+    assert!(
+        observer.join().unwrap().elapsed() < Duration::from_secs(1),
+        "fell back to deadline"
+    );
+    assert_eq!(rx.available(), 0);
+}
+
 /// Output only, never opens a microphone. Start a private virtual sink explicitly.
 #[cfg(target_os = "linux")]
 #[test]
