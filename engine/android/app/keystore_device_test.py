@@ -100,23 +100,40 @@ def check_packages(inventory, preconfigured_allowed):
         raise SystemExit("Install and configure the target APK before running the allowed gate.")
 
 
+MIC_PHASES = {
+    "denied": "Leave microphone access unreviewed. Tap Start and leave the denial visible.",
+    "complete": "With access reviewed and a nonzero virtual input, tap Start and let all 12 levels finish.",
+    "stop": "With access reviewed and a nonzero virtual input, tap Start. After progress appears, tap Stop.",
+    "hide": "With access reviewed and a nonzero virtual input, tap Start. After progress appears, dismiss the "
+            "card, pause, then invoke a fresh collapsed card.",
+}
+
+
+def require_setup_complete(adb):
+    for scope, key in (("global", "device_provisioned"), ("secure", "user_setup_complete")):
+        if adb("shell", "settings", "--user", "current", "get", scope, key).strip() != "1":
+            raise SystemExit("Finish device and current user setup in Android before testing a selected session.")
+
+
 def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, stock_assistant=False, preconfigured_allowed=False,
-        preconfigured_hud=False):
+        preconfigured_hud=False, mic_phase=None):
     def adb(*args, timeout=120):
         return subprocess.check_output([sdk / "platform-tools/adb", "-s", serial, *args],
                                        text=True, stderr=subprocess.STDOUT, timeout=timeout)
 
     def instrument(component, key, expected, *args):
         # The operator observer allows up to 30 seconds for each of eight visible checkpoints.
-        timeout = 270 if component == "OperatorWindowAcceptance" else 120
+        timeout = 270 if component in ("OperatorWindowAcceptance", "SessionMicAcceptance") else 120
         output = adb("shell", "am", "instrument", "-w", "-r", *args, f"{TEST}/{TARGET}.{component}",
                      timeout=timeout)
         check_result(output, key, expected)
         name = expected.removeprefix("PASS-") if key == "keystore" else f"{key}={expected}"
         print(f"PASS: {name}", flush=True)
 
-    preconfigured = preconfigured_allowed or preconfigured_hud
+    preconfigured = preconfigured_allowed or preconfigured_hud or mic_phase is not None
     require_stock_emulator(adb, serial, 34 if demo_denied or stock_hud or stock_assistant or preconfigured else 28)
+    if preconfigured_hud or mic_phase is not None:
+        require_setup_complete(adb)
     check_packages(adb("shell", "pm", "list", "packages", "-u", "--user", "all"), preconfigured)
     with ExitStack() as cleanup:
         def install(package, apk):
@@ -127,7 +144,11 @@ def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, stock_assi
         if preconfigured:
             require_preconfigured_apk(adb)
             install(TEST, test_apk)
-            if preconfigured_hud:
+            if mic_phase is not None:
+                print("Invoke the selected assistant on the unlocked AVD and expand its card. "
+                      + MIC_PHASES[mic_phase], flush=True)
+                instrument("SessionMicAcceptance", "micHud", f"PASS-{mic_phase}", "-e", "mode", mic_phase)
+            elif preconfigured_hud:
                 print("Invoke EON with the unlocked assistant gesture. Expand and choose Analyze built-in "
                       "notification tone. After completion, tap Stop and clear; pause, close the card, "
                       "wait a second, then invoke again.",
@@ -168,6 +189,11 @@ def parse_args(argv=None):
                       help="observe an operator's real assistant gesture, tone analysis, dismissal and fresh "
                            "invocation on an unlocked disposable API 34+ AVD already configured with EON "
                            "as assistant. Do not enable accessibility. Install only the matching target APK.")
+    mode.add_argument("--preconfigured-mic-serial", metavar="SERIAL",
+                      help="observe one manual microphone phase on a separate, setup-complete, unlocked API 34+ "
+                           "AVD with the matching target already selected as assistant. Use only a private "
+                           "virtual input, never a host microphone. The harness does not configure or start capture.")
+    parser.add_argument("--mic-phase", choices=MIC_PHASES, help="required only with --preconfigured-mic-serial")
     parser.add_argument("--stock-hud", action="store_true",
                         help="also measure and cancel an actual OS notification tone with the production "
                              "decoder on the unselected clean API 34+ emulator named by --serial")
@@ -177,6 +203,8 @@ def parse_args(argv=None):
                         help="on the clean unlocked API 34+ AVD, launch EON's ACTION_ASSIST activity and "
                              "cancel its real Android role picker without making a selection")
     args = parser.parse_args(argv)
+    if bool(args.preconfigured_mic_serial) != (args.mic_phase is not None):
+        parser.error("--preconfigured-mic-serial and --mic-phase must be supplied together")
     if args.demo_denied and not args.serial:
         parser.error("--demo-denied requires --serial")
     if args.stock_hud and not args.serial:
@@ -191,7 +219,8 @@ if __name__ == "__main__":
     sdk = Path(os.environ.get("ANDROID_HOME") or os.environ["ANDROID_SDK_ROOT"])
     apk = build(sdk)
     if not args.build_only:
-        run(sdk, args.serial or args.preconfigured_allowed_serial or args.preconfigured_hud_serial, apk,
+        run(sdk, args.serial or args.preconfigured_allowed_serial or args.preconfigured_hud_serial
+            or args.preconfigured_mic_serial, apk,
             demo_denied=args.demo_denied, stock_hud=args.stock_hud, stock_assistant=args.stock_assistant,
             preconfigured_allowed=args.preconfigured_allowed_serial is not None,
-            preconfigured_hud=args.preconfigured_hud_serial is not None)
+            preconfigured_hud=args.preconfigured_hud_serial is not None, mic_phase=args.mic_phase)

@@ -6,7 +6,8 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from keystore_device_test import TARGET, TEST, check_packages, check_result, parse_args, require_stock_emulator, run
+from keystore_device_test import (MIC_PHASES, TARGET, TEST, check_packages, check_result, parse_args,
+                                  require_setup_complete, require_stock_emulator, run)
 
 
 class InstrumentationResults(unittest.TestCase):
@@ -92,6 +93,70 @@ class DeviceModes(unittest.TestCase):
         self.assertFalse(manual.stock_hud)
         self.assertIsNone(manual.serial)
 
+    def test_selected_session_requires_both_setup_steps_without_changing_settings(self):
+        for values in (["0"], ["null"], ["1", "0"], ["1", "null"], ["1", "1"]):
+            replies = iter(values)
+            calls = []
+
+            def adb(*args):
+                calls.append(args)
+                return next(replies) + "\n"
+
+            with self.subTest(values=values):
+                if values == ["1", "1"]:
+                    require_setup_complete(adb)
+                else:
+                    with self.assertRaisesRegex(SystemExit, "Finish device and current user setup"):
+                        require_setup_complete(adb)
+                self.assertEqual(calls, [
+                    ("shell", "settings", "--user", "current", "get", "global", "device_provisioned"),
+                    ("shell", "settings", "--user", "current", "get", "secure", "user_setup_complete"),
+                ][:len(values)])
+
+    def test_mic_observes_only_requested_phase_and_leaves_existing_app_alone(self):
+        for phase in ("denied", "complete", "stop", "hide"):
+            with self.subTest(phase=phase):
+                parsed = parse_args(["--preconfigured-mic-serial", "emulator-5556", "--mic-phase", phase])
+                self.assertEqual(parsed.mic_phase, phase)
+                calls = []
+
+                def response(cmd, **kwargs):
+                    self.assertEqual(cmd[1:3], ["-s", "emulator-5556"])
+                    args = cmd[3:]
+                    calls.append(args)
+                    if args == ["shell", "pm", "list", "packages", "-u", "--user", "all"]:
+                        return f"package:android\npackage:{TARGET}\n"
+                    if args[:2] == ["install", "-t"] or args == ["uninstall", TEST]:
+                        return "Success\n"
+                    self.assertEqual(args, ["shell", "am", "instrument", "-w", "-r", "-e", "mode", phase,
+                                            f"{TEST}/{TARGET}.SessionMicAcceptance"])
+                    self.assertGreater(kwargs["timeout"], 120)
+                    return f"INSTRUMENTATION_RESULT: micHud=PASS-{phase}\nINSTRUMENTATION_CODE: -1\n"
+
+                with (patch("keystore_device_test.subprocess.check_output", side_effect=response),
+                      patch("keystore_device_test.require_stock_emulator") as emulator,
+                      patch("keystore_device_test.require_setup_complete") as setup,
+                      patch("keystore_device_test.require_preconfigured_apk") as identity,
+                      contextlib.redirect_stdout(io.StringIO())):
+                    run(Path("/sdk"), parsed.preconfigured_mic_serial, Path("/test.apk"), mic_phase=phase)
+                self.assertEqual(emulator.call_args.args[1:], ("emulator-5556", 34))
+                setup.assert_called_once()
+                identity.assert_called_once()
+                self.assertEqual(len(calls), 4)
+                self.assertEqual(calls[1], ["install", "-t", Path("/test.apk")])
+                self.assertEqual(calls[-1], ["uninstall", TEST])
+
+    def test_mic_results_cannot_pass_from_another_phase_or_extra_measurement(self):
+        for phase in MIC_PHASES:
+            with self.subTest(phase=phase):
+                output = f"INSTRUMENTATION_RESULT: micHud=PASS-{phase}\nINSTRUMENTATION_CODE: -1"
+                check_result(output, "micHud", f"PASS-{phase}")
+                with self.assertRaises(SystemExit):
+                    check_result("INSTRUMENTATION_RESULT: completion=unvalidated\n" + output,
+                                 "micHud", f"PASS-{phase}")
+                with self.assertRaises(SystemExit):
+                    check_result(output, "micHud", "PASS-other")
+
     def test_incompatible_requests_are_rejected_not_silently_skipped(self):
         for args in (["--demo-denied"], ["--build-only", "--demo-denied"],
                      ["--preconfigured-allowed-serial", "emulator-5556", "--demo-denied"],
@@ -99,7 +164,12 @@ class DeviceModes(unittest.TestCase):
                      ["--build-only", "--stock-hud"], ["--preconfigured-hud-serial", "emulator-5554", "--stock-hud"],
                      ["--preconfigured-hud-serial", "emulator-5554", "--demo-denied"],
                      ["--preconfigured-hud-serial", "emulator-5554", "--stock-assistant"],
-                     ["--build-only", "--stock-assistant"]):
+                     ["--build-only", "--stock-assistant"],
+                     ["--preconfigured-mic-serial", "emulator-5554"],
+                     ["--serial", "emulator-5554", "--mic-phase", "stop"],
+                     ["--build-only", "--mic-phase", "complete"],
+                     ["--preconfigured-mic-serial", "emulator-5554", "--mic-phase", "all"],
+                     ["--preconfigured-hud-serial", "emulator-5554", "--mic-phase", "complete"]):
             with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 parse_args(args)
 
