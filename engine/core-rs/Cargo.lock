@@ -2567,6 +2567,7 @@ name = "eon-vision"
 version = "0.1.0"
 dependencies = [
  "eon-primitives",
+ "rustix 1.1.6",
 ]
 
 [[package]]

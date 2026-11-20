@@ -207,7 +207,7 @@
   - **Files**: `src/omniparser.rs`, `src/keyframe_sampler.rs`, `src/ring_buffer.rs`, `src/lib.rs`
   - **Requirements**: OmniParser-v2 (< 30ms YOLO element detector + PaddleOCR ONNX) for UI grounding when accessibility trees are obfuscated. Adaptive 1–5 FPS video keyframe sampler and 30-second rolling visual memory in shared memory. Integration with `Qwen2.5-VL-3B-Instruct`.
   - **Unit Tests**: `cargo test -p eon-vision vision_tests`.
-  - **Verified subset**: The in-process keyframe history uses 32x32 luma block SSIM, a one-second heartbeat, a 200 ms sampling floor, and age and byte limits. This does not verify shared-memory capture, OCR, object detection, or VLM inference.
+  - **Verified subset**: The same sampler drives the portable history and a Linux shared-memory history. Each accepted frame in the latter gets a sealed anonymous file; an explicitly selected local reader can map that frame without seeing the rest of the ring. Age and byte limits evict producer references, not copies already shared. Screen capture, OCR, object detection and VLM inference are not verified.
 
 ---
 

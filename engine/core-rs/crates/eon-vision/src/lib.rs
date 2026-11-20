@@ -1,6 +1,8 @@
 //! UI geometry and bounded temporal sampling of caller-supplied screen frames.
 
 pub mod keyframes;
+#[cfg(target_os = "linux")]
+pub mod shared;
 
 pub use eon_primitives::*;
 
@@ -29,10 +31,10 @@ impl UiBoundingBox {
 
 /// A temporal video frame in the visual ring buffer.
 #[derive(Debug, Clone)]
-pub struct VideoKeyframe {
+pub struct VideoKeyframe<Jpeg = Vec<u8>> {
     pub sequence_number: u64,
     pub timestamp_ms: u64,
-    pub jpeg_bytes: Vec<u8>,
+    pub jpeg_bytes: Jpeg,
     pub width: u32,
     pub height: u32,
     pub is_scene_transition: bool,

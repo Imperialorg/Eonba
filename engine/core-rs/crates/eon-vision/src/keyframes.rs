@@ -37,10 +37,9 @@ fn similarity(a: &Luma, b: &Luma) -> f64 {
     total / 16.
 }
 
-/// In-process, byte-bounded history. All times are milliseconds from the same
-/// monotonic capture clock. No background thread, disk storage or capture permission.
-pub struct VisualMemory {
-    frames: VecDeque<VideoKeyframe>,
+/// A byte-bounded history of caller-supplied frames, using one monotonic capture clock.
+pub struct KeyframeHistory<Jpeg> {
+    frames: VecDeque<(VideoKeyframe<Jpeg>, usize)>,
     last_luma: Option<Luma>,
     clock_ms: u64,
     sequence: u64,
@@ -48,13 +47,16 @@ pub struct VisualMemory {
     budget: usize,
 }
 
-impl Default for VisualMemory {
+/// Portable in-process history. Sampling does not grant capture permission.
+pub type VisualMemory = KeyframeHistory<Vec<u8>>;
+
+impl<Jpeg> Default for KeyframeHistory<Jpeg> {
     fn default() -> Self {
         Self::with_budget(DEFAULT_BYTES)
     }
 }
 
-impl VisualMemory {
+impl<Jpeg> KeyframeHistory<Jpeg> {
     pub fn with_budget(bytes: usize) -> Self {
         Self {
             frames: VecDeque::new(),
@@ -67,8 +69,8 @@ impl VisualMemory {
     }
 
     fn evict_oldest(&mut self) {
-        let frame = self.frames.pop_front().expect("only evict existing frames");
-        self.bytes -= frame.jpeg_bytes.len();
+        let (_, len) = self.frames.pop_front().expect("only evict existing frames");
+        self.bytes -= len;
     }
 
     /// Also call on idle reads so a paused capture cannot return stale imagery.
@@ -82,7 +84,7 @@ impl VisualMemory {
         while self
             .frames
             .front()
-            .is_some_and(|f| now_ms - f.timestamp_ms >= RETENTION_MS)
+            .is_some_and(|(f, _)| now_ms - f.timestamp_ms >= RETENTION_MS)
         {
             self.evict_oldest();
         }
@@ -92,22 +94,20 @@ impl VisualMemory {
         Ok(())
     }
 
-    /// Returns the accepted sequence, or `None` when the frame is not sampled.
-    /// Copies compressed bytes only on acceptance. The caller supplies the JPEG
-    /// and matching thumbnail; this buffer does not decode or trust image contents.
-    pub fn observe(
+    pub(crate) fn observe_with(
         &mut self,
         now_ms: u64,
         dimensions: (u32, u32),
         thumbnail: &Luma,
         jpeg: &[u8],
+        store: impl FnOnce(&[u8]) -> EonResult<Jpeg>,
     ) -> EonResult<Option<u64>> {
         if dimensions.0 == 0 || dimensions.1 == 0 || jpeg.is_empty() {
             return Err(EonError::ValidationError("empty capture frame".into()));
         }
         self.advance(now_ms)?;
         let mut transition = false;
-        if let Some(last) = self.frames.back() {
+        if let Some((last, _)) = self.frames.back() {
             let elapsed = now_ms - last.timestamp_ms;
             if elapsed < MIN_INTERVAL_MS {
                 return Ok(None);
@@ -132,17 +132,22 @@ impl VisualMemory {
             .sequence
             .checked_add(1)
             .ok_or_else(|| EonError::InternalError("keyframe sequence exhausted".into()))?;
+        // A storage failure must not evict live frames or advance the sampling state.
+        let payload = store(jpeg)?;
         while self.bytes > self.budget - jpeg.len() {
             self.evict_oldest();
         }
-        self.frames.push_back(VideoKeyframe {
-            sequence_number: seq,
-            timestamp_ms: now_ms,
-            jpeg_bytes: jpeg.to_vec(),
-            width: dimensions.0,
-            height: dimensions.1,
-            is_scene_transition: transition,
-        });
+        self.frames.push_back((
+            VideoKeyframe {
+                sequence_number: seq,
+                timestamp_ms: now_ms,
+                jpeg_bytes: payload,
+                width: dimensions.0,
+                height: dimensions.1,
+                is_scene_transition: transition,
+            },
+            jpeg.len(),
+        ));
         self.last_luma = Some(*thumbnail);
         self.sequence = seq;
         self.bytes += jpeg.len();
@@ -154,7 +159,7 @@ impl VisualMemory {
         &mut self,
         since_ms: u64,
         now_ms: u64,
-    ) -> EonResult<impl Iterator<Item = &VideoKeyframe>> {
+    ) -> EonResult<impl Iterator<Item = &VideoKeyframe<Jpeg>>> {
         if since_ms > now_ms {
             return Err(EonError::ValidationError(
                 "invalid keyframe time range".into(),
@@ -164,13 +169,55 @@ impl VisualMemory {
         Ok(self
             .frames
             .iter()
+            .map(|(frame, _)| frame)
             .filter(move |f| f.timestamp_ms >= since_ms))
+    }
+}
+
+impl VisualMemory {
+    /// Copies the caller's compressed bytes only when the sampler accepts a frame.
+    pub fn observe(
+        &mut self,
+        now_ms: u64,
+        dimensions: (u32, u32),
+        thumbnail: &Luma,
+        jpeg: &[u8],
+    ) -> EonResult<Option<u64>> {
+        self.observe_with(
+            now_ms,
+            dimensions,
+            thumbnail,
+            jpeg,
+            |data| Ok(data.to_vec()),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_failure_leaves_the_previous_sample_and_sequence_intact() {
+        let mut ring = VisualMemory::with_budget(1);
+        ring.observe(0, (1, 1), &[0; 1024], b"a").unwrap();
+        let err = EonError::OperationFailed {
+            operation: "test storage".into(),
+            reason: "unavailable".into(),
+        };
+        assert_eq!(
+            ring.observe_with(200, (1, 1), &[255; 1024], b"b", |_| Err(err.clone())),
+            Err(err)
+        );
+        assert_eq!(
+            ring.recent(0, 200).unwrap().next().unwrap().jpeg_bytes,
+            b"a"
+        );
+        assert_eq!(
+            ring.observe(200, (1, 1), &[255; 1024], b"b").unwrap(),
+            Some(2)
+        );
+    }
 
     #[test]
     fn vision_tests_static_heartbeat_and_dynamic_rate_limit() {
