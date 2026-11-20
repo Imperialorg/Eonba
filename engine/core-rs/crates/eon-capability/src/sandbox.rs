@@ -16,6 +16,8 @@ use landlock::{
 };
 use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, TargetArch};
 
+mod rust_analyzer;
+
 /// Read/execute grants for a trusted worker. Socket access is not a supported
 /// launch mode: explicitly requesting `deny_network: false` fails admission.
 #[derive(Debug, Clone)]
@@ -40,7 +42,11 @@ fn sandbox_err(context: &str, e: impl std::fmt::Display) -> EonError {
     }
 }
 
-fn build_ruleset(policy: &ConfinementPolicy) -> EonResult<RulesetCreated> {
+fn build_ruleset(
+    policy: &ConfinementPolicy,
+    program: &Path,
+    io: WorkerIo<'_>,
+) -> EonResult<RulesetCreated> {
     let abi = ABI::V3;
     let mut created = Ruleset::default()
         .handle_access(AccessFs::from_all(abi))
@@ -62,8 +68,19 @@ fn build_ruleset(policy: &ConfinementPolicy) -> EonResult<RulesetCreated> {
         } else {
             AccessFs::ReadFile.into()
         };
+        let access = if matches!(io, WorkerIo::RustAnalyzer(_)) {
+            if rust_analyzer::executable_grant(path, program, &fd, &metadata)
+                .map_err(|e| sandbox_err("rust-analyzer grant", e))?
+            {
+                read | AccessFs::Execute
+            } else {
+                read
+            }
+        } else {
+            read | AccessFs::Execute
+        };
         created = created
-            .add_rule(PathBeneath::new(fd, read | AccessFs::Execute))
+            .add_rule(PathBeneath::new(fd, access))
             .map_err(|e| sandbox_err("rule", e))?;
     }
     Ok(created)
@@ -77,7 +94,7 @@ fn build_ruleset(policy: &ConfinementPolicy) -> EonResult<RulesetCreated> {
         target_arch = "x86_64"
     )
 ))]
-fn worker_filter() -> EonResult<BpfProgram> {
+fn worker_filters(io: WorkerIo<'_>) -> EonResult<Vec<BpfProgram>> {
     use libc::*;
     // Unknown/future syscalls are refused. No socket, descriptor acquisition
     // from other processes, process creation/control, ioctl, AIO or io_uring.
@@ -152,6 +169,10 @@ fn worker_filter() -> EonResult<BpfProgram> {
     rules.insert(SYS_fcntl, vec![query]);
     let arch =
         TargetArch::try_from(std::env::consts::ARCH).map_err(|e| sandbox_err("architecture", e))?;
+    let mut filters = Vec::new();
+    if matches!(io, WorkerIo::RustAnalyzer(_)) {
+        filters.push(rust_analyzer::thread_filter(&mut rules, arch)?);
+    }
     let filter = SeccompFilter::new(
         rules,
         SeccompAction::Errno(libc::EPERM as u32),
@@ -159,9 +180,12 @@ fn worker_filter() -> EonResult<BpfProgram> {
         arch,
     )
     .map_err(|e| sandbox_err("seccomp", e))?;
-    filter
-        .try_into()
-        .map_err(|e: seccompiler::BackendError| sandbox_err("seccomp", e))
+    filters.push(
+        filter
+            .try_into()
+            .map_err(|e: seccompiler::BackendError| sandbox_err("seccomp", e))?,
+    );
+    Ok(filters)
 }
 
 #[cfg(not(all(
@@ -172,15 +196,17 @@ fn worker_filter() -> EonResult<BpfProgram> {
         target_arch = "x86_64"
     )
 )))]
-fn worker_filter() -> EonResult<BpfProgram> {
+fn worker_filters(_: WorkerIo<'_>) -> EonResult<Vec<BpfProgram>> {
     Err(EonError::SecurityViolation(
         "unsupported native worker ABI".into(),
     ))
 }
 
-pub(crate) enum WorkerIo {
+#[derive(Clone, Copy)]
+pub(crate) enum WorkerIo<'a> {
     ClosedInput,
     StdioProtocol,
+    RustAnalyzer(&'a Path),
 }
 
 /// Runs `program` with `args` under `policy` and returns its output. Fails if confinement cannot be enforced.
@@ -194,7 +220,7 @@ pub fn run_confined(program: &str, args: &[&str], policy: &ConfinementPolicy) ->
 pub(crate) fn confine_command(
     command: &mut Command,
     policy: &ConfinementPolicy,
-    io: WorkerIo,
+    io: WorkerIo<'_>,
 ) -> EonResult<()> {
     if !Path::new(command.get_program()).is_absolute() || !policy.deny_network {
         return Err(EonError::SecurityViolation(
@@ -204,10 +230,16 @@ pub(crate) fn confine_command(
     command.env_clear().current_dir("/").stdout(Stdio::piped());
     match io {
         WorkerIo::ClosedInput => command.stdin(Stdio::null()).stderr(Stdio::piped()),
-        WorkerIo::StdioProtocol => command.stdin(Stdio::piped()).stderr(Stdio::null()),
+        WorkerIo::StdioProtocol | WorkerIo::RustAnalyzer(_) => {
+            command.stdin(Stdio::piped()).stderr(Stdio::null())
+        }
     };
-    let mut ruleset = Some(build_ruleset(policy)?);
-    let filter = worker_filter()?;
+    if let WorkerIo::RustAnalyzer(group) = io {
+        rust_analyzer::prepare(command, group)
+            .map_err(|e| sandbox_err("rust-analyzer limits", e))?;
+    }
+    let mut ruleset = Some(build_ruleset(policy, command.get_program().as_ref(), io)?);
+    let filters = worker_filters(io)?;
     // SAFETY: the closure runs in the forked child before exec. It takes prebuilt objects, calls `restrict_self`
     // (Landlock and no_new_privs) and then `apply_filter` (seccomp), without formatting errors or taking a lock.
     unsafe {
@@ -230,7 +262,9 @@ pub(crate) fn confine_command(
                     if status.ruleset == RulesetStatus::FullyEnforced && status.no_new_privs => {}
                 _ => return Err(denied()),
             }
-            seccompiler::apply_filter(&filter).map_err(|_| denied())?;
+            for filter in &filters {
+                seccompiler::apply_filter(filter).map_err(|_| denied())?;
+            }
             Ok(())
         });
     }

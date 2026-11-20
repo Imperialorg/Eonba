@@ -1,11 +1,14 @@
 //! Read-only, synchronous stdio LSP sessions for explicitly opened source snapshots.
 //! Server provisioning is a trusted host operation, not a tool parameter. Installations and
 //! runtime paths must be operator-owned and immutable to project authors. No workspace
-//! root, real file URI, environment, config discovery, shell, or command RPC is provided.
+//! root on disk, real file URI, host environment, config discovery, shell, or command RPC is provided.
 //! Servers requiring a disk-backed project or unsupported capabilities may decline queries.
 //! The native policy is for trusted workers, not arbitrary binaries. Deadlines bound
 //! protocol I/O, not kernel/filesystem latency or the worker's CPU and memory use.
 //! Helpers must remain in the worker's process group until it shuts down.
+//! The rust-analyzer profile analyzes a dependency-free 2021 library rooted at
+//! virtual `src/lib.rs`, using only opened `.rs` snapshots. It does not load Cargo
+//! metadata, sysroot, build scripts, proc macros or project configuration.
 mod capabilities;
 mod preview;
 mod wire;
@@ -108,6 +111,7 @@ pub struct OperatorServer {
     executable: PathBuf,
     runtime: Vec<PathBuf>,
     deadline: Duration,
+    rust_task_group: Option<PathBuf>,
 }
 
 impl OperatorServer {
@@ -149,7 +153,20 @@ impl OperatorServer {
             executable,
             runtime,
             deadline,
+            rust_task_group: None,
         })
+    }
+
+    /// Required for rust-analyzer only. Provision a trusted cgroup v2 with
+    /// `pids.max` in 1..=24 and permission to enroll the child. Do not move
+    /// workers or raise that limit until reaped. No controller is enabled or
+    /// reconfigured here. An unusable group fails launch, without fallback.
+    pub fn with_rust_analyzer_task_group(mut self, group: &Path) -> io::Result<Self> {
+        if self.kind != ServerKind::RustAnalyzer || !group.is_absolute() {
+            return Err(invalid("expected absolute rust-analyzer task group"));
+        }
+        self.rust_task_group = Some(group.to_owned());
+        Ok(self)
     }
 }
 
@@ -301,6 +318,7 @@ pub struct LocalLsp {
     capabilities: Capabilities,
     version: i32,
     has_closed: bool,
+    rust_ready: bool,
 }
 
 /// One preconfigured session per language. Looking up an unprovisioned kind never
@@ -383,6 +401,13 @@ impl LocalLsp {
                 "server installation and runtime must be disjoint from workspace",
             ));
         }
+        let worker_io = if config.kind == ServerKind::RustAnalyzer {
+            let group = config.rust_task_group.as_deref()
+                .ok_or_else(|| invalid("rust-analyzer requires a bounded task group"))?;
+            WorkerIo::RustAnalyzer(group)
+        } else {
+            WorkerIo::StdioProtocol
+        };
         let mut command = Command::new(&config.executable);
         command.args(args).process_group(0);
         confine_command(
@@ -391,7 +416,7 @@ impl LocalLsp {
                 read_only,
                 deny_network: true,
             },
-            WorkerIo::StdioProtocol,
+            worker_io,
         )
         .map_err(io::Error::other)?;
         let mut child = Process(Some(command.spawn().map_err(|error| {
@@ -414,19 +439,45 @@ impl LocalLsp {
             capabilities: Capabilities::default(),
             version: 0,
             has_closed: false,
+            rust_ready: false,
         };
         let end = client.end();
-        let init = client.request("initialize", json!({
+        let mut params = json!({
             "processId":null,"rootUri":null,"workspaceFolders":null,
             "capabilities":{"general":{"positionEncodings":["utf-16"]},
                 "workspace":{"applyEdit":false,"configuration":false,"workspaceFolders":false,"symbol":{}},
                 "textDocument":{"hover":{"contentFormat":["plaintext"]},"definition":{"linkSupport":true},
                     "references":{},"diagnostic":{},"publishDiagnostics":{"versionSupport":true}}}
-        }), end).map_err(|error| {
+        });
+        if client.kind == ServerKind::RustAnalyzer {
+            params["rootUri"] = json!(format!("file://{}", client.virtual_root));
+            params["capabilities"]["experimental"] = json!({"serverStatusNotification":true});
+            params["initializationOptions"] = json!({
+                "linkedProjects":[{"crates":[{"root_module":format!("{}/src/lib.rs", client.virtual_root),
+                    "edition":"2021","deps":[],"cfg":[],"is_workspace_member":true}]}],
+                "numThreads":1,"cachePriming":{"enable":false},
+                "checkOnSave":false,"procMacro":{"enable":false},
+                "cargo":{"sysroot":null,"buildScripts":{"enable":false}}
+            });
+        }
+        let init = client.request("initialize", params, end).map_err(|error| {
             io::Error::new(error.kind(), format!("confined LSP did not initialize: {error}"))
         })?;
         client.capabilities = Capabilities::parse(&init["capabilities"])?;
         client.notify("initialized", json!({}), end)?;
+        if client.kind == ServerKind::RustAnalyzer {
+            // Opening during initial crate-model setup can leave overlays in a
+            // non-local source root (RA then returns empty diagnostic reports).
+            for _ in 0..MAX_MESSAGES {
+                if client.rust_ready {
+                    break;
+                }
+                client.receive(end, None)?;
+            }
+            if !client.rust_ready {
+                return Err(invalid("rust-analyzer did not finish initial project setup"));
+            }
+        }
         Ok(client)
     }
 
@@ -491,6 +542,9 @@ impl LocalLsp {
                     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Unsupported"}}),
                     end,
                 )?;
+            } else if self.kind == ServerKind::RustAnalyzer && method == "experimental/serverStatus" {
+                self.rust_ready = msg["params"]["quiescent"] == true
+                    && matches!(msg["params"]["health"].as_str(), Some("ok" | "warning"));
             } else if method == "textDocument/publishDiagnostics" {
                 let p = &msg["params"];
                 if let Some(doc) = p["uri"].as_str().and_then(|u| self.docs.get_mut(u))

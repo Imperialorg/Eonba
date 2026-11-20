@@ -33,6 +33,7 @@ impl Fixture {
                 .map(|s| Path::new(s).canonicalize().unwrap())
                 .collect(),
             deadline,
+            rust_task_group: None,
         };
         LocalLsp::spawn(
             &config,
@@ -389,6 +390,7 @@ fn path_scope_and_document_budget_also_apply_to_previews() {
         executable: f.0.join("a.py"),
         runtime: vec![],
         deadline: Duration::from_secs(1),
+        rust_task_group: None,
     };
     assert!(LocalLsp::start(&config, &f.0).is_err());
     config.executable = PathBuf::from("/operator-only/server");

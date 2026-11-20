@@ -143,6 +143,47 @@ Automates developer tasks, builds, tests, persistent interactive debugging, and 
   - `dap.inspect_stack`: Captures stack frames, instruction pointers, and thread statuses on crash/stop events.
   - `dap.evaluate_expression`: Evaluates runtime expressions or reads live registers and heap variables, feeding the exact runtime state into Ciel's self-healing compiler loop.
 
+#### Provisioning the confined Rust LSP
+
+The verified Rust profile is a dependency-free 2021 library rooted at `src/lib.rs`.
+Only explicitly opened `.rs` snapshots are visible. It does not read the real
+workspace, run Cargo/rustc, load proc macros, or discover project configuration.
+It is not a full Cargo workspace or a cold sub-50-ms guarantee.
+
+On x86-64 glibc Linux, configure `OperatorServer::new(ServerKind::RustAnalyzer, …)`
+with the **native server** (not a rustup proxy), its individual shared libraries
+and ELF loader, and a protocol deadline. Keep the installation disjoint from the
+workspace and immutable to project authors. Call `.with_rust_analyzer_task_group(…)`
+with the absolute path of a trusted cgroup v2 with `pids.max` set to 1–24.
+The host must be able to enroll the child in `cgroup.procs`; do not move it or
+raise the ceiling while the session is live. Unsupported confinement fails
+closed. Do not grant a runtime directory or use a shell wrapper.
+
+To reproduce both gates from a trusted checkout, use Bash with `jq`, a systemd
+user manager with the pids controller delegated, and the trusted rustup component
+(`rustup component add rust-analyzer` if missing). Build outside the capped group;
+run each test binary in its own capped transient service. `ldd` here is **only**
+for the operator-installed image, never a project executable.
+
+```bash
+set -euo pipefail
+manifest=/home/runner/work/Eonba/Eonba/engine/core-rs/Cargo.toml
+exe=$(rustup which rust-analyzer)
+libs=$(ldd "$exe" | awk '$2=="=>"{print $3} $1~/^\//{print $1}' | paste -sd:)
+gate() {
+    local target=$1 test=$2 bin
+    shift 2
+    bin=$(cargo test --locked --manifest-path "$manifest" -p eon-capability "$@" \
+        --no-run --message-format=json | jq -ser --arg name "$target" \
+        'map(select(.target.name == $name and .executable != null)) | last.executable')
+    systemd-run --user --pipe --quiet --wait --collect -p TasksMax=24 -p Delegate=pids \
+        --setenv=EON_TEST_RUST_ANALYZER="$exe" --setenv=EON_TEST_RUST_ANALYZER_RUNTIME="$libs" \
+        --setenv=EON_TEST_RUST_ANALYZER_CGROUP=self "$bin" --ignored --nocapture --exact "$test"
+}
+gate eon_capability sandbox::rust_analyzer::tests::lsp_and_patcher_tests_rust_worker_kernel_denials --lib
+gate local_lsp_rust_analyzer lsp_and_patcher_tests_confined_rust_analyzer --test local_lsp_rust_analyzer
+```
+
 ### 3.3 Cyber Defense & Hardening Capabilities (`cyber.defense.*`)
 Automates host security, static taint tracking, and live patching.
 - `cyber.defense.ast_taint`: Traces untrusted user inputs to dangerous execution sinks across source code.
