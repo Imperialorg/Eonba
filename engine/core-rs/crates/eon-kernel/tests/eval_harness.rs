@@ -1,4 +1,9 @@
-//! Read back real binary journals. Replay must not need, or invoke, an executor.
+//! Offline kernel replay and source-only regression evaluations.
+#[path = "eval-harness/defensive_regressions.rs"]
+mod defensive_regressions;
+#[path = "eval-harness/replay_engine.rs"]
+mod replay_engine;
+
 use std::{collections::BTreeMap, fs, time::Instant};
 
 use eon_foundation::journal::replay;
