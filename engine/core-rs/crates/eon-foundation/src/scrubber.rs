@@ -194,13 +194,39 @@ fn redact_high_entropy(input: &str) -> String {
 fn redact_token_if_secret(text: &str, start: usize) -> String {
     let token = &text[start..];
     if is_secret_candidate(token, &text[..start]) {
-        redaction_marker(token)
+        return redaction_marker(token);
+    }
+    // '=' is also a base64 token character. Only split off an exact hex value
+    // after checking the whole token, so no previously redacted prefix is disclosed.
+    if let Some((key, value)) = token.rsplit_once('=')
+        && is_hex_token(value)
+        && shannon_bits_per_char(value) > HEX_ENTROPY_BITS
+    {
+        format!("{key}={}", redaction_marker(value))
     } else {
         token.to_string()
     }
 }
 
+fn is_hex_token(token: &str) -> bool {
+    matches!(token.len(), 40 | 64) && token.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn has_hash_label(before: &str, label: &str) -> bool {
+    before.strip_suffix(label).is_some_and(|prefix| {
+        prefix.is_empty()
+            || prefix.ends_with(|c: char| {
+                c.is_whitespace() || matches!(c, '=' | '@' | '(' | '[' | '{' | '"' | '\'' | ',' | ';')
+            })
+    })
+}
+
 fn is_secret_candidate(token: &str, before: &str) -> bool {
+    if is_hex_token(token) {
+        let labelled = (token.len() == 64 && has_hash_label(before, "sha256:"))
+            || has_hash_label(before, "commit ");
+        return !labelled && shannon_bits_per_char(token) > HEX_ENTROPY_BITS;
+    }
     if token.len() < MIN_TOKEN_LEN || looks_like_path(token) {
         return false;
     }
@@ -209,11 +235,6 @@ fn is_secret_candidate(token: &str, before: &str) -> bool {
     let has_digit = token.bytes().any(|b| b.is_ascii_digit());
     if !(has_upper && has_lower && has_digit) {
         return false;
-    }
-    let is_hex = token.bytes().all(|b| b.is_ascii_hexdigit());
-    if is_hex && (token.len() == 40 || token.len() == 64) {
-        let protected = before.ends_with("sha256:") || before.ends_with("commit ");
-        return !protected && shannon_bits_per_char(token) > HEX_ENTROPY_BITS;
     }
     shannon_bits_per_char(token) > BASE64_ENTROPY_BITS
 }
@@ -330,10 +351,77 @@ mod tests {
     }
 
     #[test]
-    fn hashes_are_exempt_when_labelled_or_commit_referenced() {
-        let sha = "3f786850e387550fdab836ed7e6dc881de23001b9f1a2e4c7d8b9a0f1e2d3c4b";
-        assert!(!scrub(&format!("sha256:{sha}")).contains("REDACTED"));
-        assert!(!scrub(&format!("commit {}", &sha[..40])).contains("REDACTED"));
+    fn hex_redaction_uses_digits_not_letter_case_and_marks_the_original_bytes() {
+        for alphabet in ["0123456789abcdef", "0123456789ABCDEF", "0123456789AbCdEf"] {
+            let digits = alphabet.repeat(4);
+            for len in [40, 64] {
+                let hex = &digits[..len];
+                for prefix in ["", "token=", "api_key=", "commit token=", "sha256:token="] {
+                    let expected = format!("{prefix}{}", redaction_marker(hex));
+                    assert_eq!(scrub(&format!("{prefix}{hex}")), expected);
+                    assert_eq!(scrub(&expected), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hex_entropy_threshold_is_strict_without_weakening_mixed_case_redaction() {
+        // Twelve digits occur four times each; two occur eight times each: exactly 3.75 bits/digit.
+        let at_limit = ["0123456789ab".repeat(4), "cd".repeat(8)].concat();
+        assert_eq!(shannon_bits_per_char(&at_limit), HEX_ENTROPY_BITS);
+        let below = at_limit.replacen('0', "c", 1);
+        let above = at_limit.replacen('c', "e", 1);
+        let mixed = below.replacen("cdcd", "cDCd", 1);
+        assert!(shannon_bits_per_char(&below) < HEX_ENTROPY_BITS);
+        assert!(shannon_bits_per_char(&mixed) > HEX_ENTROPY_BITS);
+        assert_eq!(scrub(&mixed), redaction_marker(&mixed));
+        for safe in [below, at_limit] {
+            assert_eq!(scrub(&safe), safe);
+            let assignment = format!("token={safe}");
+            assert_eq!(scrub(&assignment), assignment);
+        }
+        assert_eq!(scrub(&above), redaction_marker(&above));
+    }
+
+    #[test]
+    fn only_a_hash_with_its_own_standalone_label_is_exempt() {
+        let digest = "02468ACE13579BDF".repeat(4);
+        let commit = &digest[..40];
+        for safe in [
+            format!("sha256:{digest}"), format!("digest=sha256:{digest}"),
+            format!("(commit {commit})"), format!("git commit {digest}"),
+        ] {
+            assert_eq!(scrub(&safe), safe);
+        }
+        for prefix in [
+            "notsha256:", "metadata.sha256:", "user_sha256:", "notcommit ", "pre-commit ",
+            "sha256=", "commit=", "sha256: ", "commit  ", "commit id: ", "SHA256:",
+        ] {
+            assert_eq!(scrub(&format!("{prefix}{digest}")), format!("{prefix}{}", redaction_marker(&digest)));
+        }
+        assert_eq!(scrub(&format!("sha256:{commit}")), format!("sha256:{}", redaction_marker(commit)));
+    }
+
+    #[test]
+    fn hex_rule_does_not_extract_substrings_or_split_base64_padding() {
+        let digits = "abcdef0123456789".repeat(5);
+        for len in [39, 41, 63, 65] {
+            let value = format!("token={}", &digits[..len]);
+            assert_eq!(scrub(&value), value);
+        }
+        for (prefix, suffix) in [("id-", ""), ("src/", "/lib"), ("token=", "g"), ("", "==")] {
+            let value = format!("{prefix}{}{suffix}", &digits[..64]);
+            assert_eq!(scrub(&value), value);
+        }
+        let base64 = ["ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz", "0123456789+/=="].concat();
+        let assignment = format!("token={base64}");
+        assert_eq!(scrub(&assignment), redaction_marker(&assignment));
+
+        // Splitting first would disclose the prefix of this previously redacted mixed token.
+        let mixed = format!("GHIJKLmnopQRstUVwxyz+/1={}", &digits[..64]);
+        assert!(shannon_bits_per_char(&mixed) > BASE64_ENTROPY_BITS);
+        assert_eq!(scrub(&mixed), redaction_marker(&mixed));
     }
 
     #[test]

@@ -56,8 +56,8 @@
   - **Crate**: `eon-foundation`
   - **Files**: `src/identity.rs`, `src/permissions.rs`, `src/credentials.rs`, `src/scrubber.rs`
   - **Requirements**: Ownership identities (System, User, EphemeralAgent). Permission bitflags (`READ_WORKSPACE`, `MUTATE_WORKSPACE`, `EXECUTE_PROCESS`, `CYBER_OPERATIONS`, `NETWORK_ACCESS`, `DEVICE_CONTROL`, `SPAWN_SUBAGENT`). Opaque credential handles (`secret://<vault_key>`) with late-binding memory resolution from hardware OS enclaves (Android Keystore, Windows DPAPI, Linux Keyring). In-flight `JournalScrubber` redacting tokens and high-entropy strings ($\mathcal{H} > 4.5$) before journal disk commitment.
-  - **Unit Tests**: `cargo test -p eon-foundation identity_and_credential_tests` verifying zero secret leaks to disk frames and entropy-based redaction.
-  - **Platform status**: The Linux process keyring binds owner-scoped handles to child stdin after checking grants. The corresponding Windows DPAPI test binary cross-linked; native Windows execution remains unverified. The Android app has a separate Keystore-backed one-shot inspection proof, not a general Rust credential sink. Its device acceptance gate and hardware attestation remain open.
+  - **Journal verification**: `cargo test --locked -p eon-foundation` checks the stored frame and its replay for recognized credential fixtures, including unlabelled high-entropy hex. This does not guarantee detection of arbitrary secrets.
+  - **Platform status**: CI explicitly selects the native Linux keyring teardown test, the Windows DPAPI tests and an Android 35 emulator test. The Android test must decrypt a public fixture after force-stop with the original key, reject the old inspection handle and redeem a fresh one. The Android app does not provide a general Rust credential sink. An APK build does not verify the device tests, and an emulator does not attest physical hardware.
 
 ---
 

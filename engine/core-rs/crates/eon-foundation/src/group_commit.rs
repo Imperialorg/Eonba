@@ -165,10 +165,15 @@ mod tests {
         let key_lines = ["paper-key-line-one", "paper-key-line-two"];
         let label = "PRIVATE KEY";
         let key = format!("-----BEGIN {label}-----\r\n{}\r\n-----END {label}-----", key_lines.join("\r\n"));
-        let input = format!("deploy {token}\nauth: {bearer}\nkey: {key}\ndone");
+        let hex40 = "0123456789abcdef".repeat(2) + "01234567";
+        let hex64 = "FEDCBA9876543210".repeat(4);
+        let digest = "02468ace13579bdf".repeat(4);
+        let hashes = format!("sha256:{digest}\ncommit {}", &digest[..40]);
+        let input = format!("deploy {token}\nauth: {bearer}\nkey: {key}\ntoken={hex40}\n{hex64}\n{hashes}");
         let expected = format!(
-            "deploy {}\nauth: {}\nkey: {}\ndone",
+            "deploy {}\nauth: {}\nkey: {}\ntoken={}\n{}\n{hashes}",
             redaction_marker(&token), redaction_marker(&bearer), redaction_marker(&key),
+            redaction_marker(&hex40), redaction_marker(&hex64),
         );
 
         let dir = tempfile::tempdir().unwrap();
@@ -177,7 +182,7 @@ mod tests {
         drop(journal);
 
         let disk = std::fs::read(dir.path().join(format!("seg_{seq:020}.eonj"))).unwrap();
-        for raw in [token_body].into_iter().chain(segments).chain(key_lines) {
+        for raw in [token_body, &hex40, &hex64].into_iter().chain(segments).chain(key_lines) {
             assert!(!disk.windows(raw.len()).any(|w| w == raw.as_bytes()), "stored fixture: {raw}");
         }
         assert_eq!(&disk[HEADER_LEN..], expected.as_bytes());

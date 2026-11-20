@@ -177,45 +177,38 @@ bitflags::bitflags! {
 
 ## 6. Zero-Knowledge Credential Broker & Journal Redaction (`eon-foundation`)
 
-EON journals every event, task parameter, and execution trace to disk and synchronizes state across mesh devices via CRDTs. If raw secrets, tokens, or credentials appear in task parameters or command outputs, they will permanently leak to disk, vector embeddings, and LLM context windows. `eon-foundation` eliminates this vulnerability through an **Opaque Handle & Late-Binding Architecture**:
+Keep raw credentials out of task parameters and journal records. Schedule an opaque handle instead; only the trusted worker supplies the sink when it needs the credential. Scrubbing output provides a second layer of protection, not a guarantee that every credential can be recognized.
 
 ```mermaid
 flowchart LR
     LLMPlanner["Ciel LLM / DAG Synthesizer"] -->|Emits Opaque Handle: secret://github_pat| TaskDAG["TaskParameters in TaskScheduler"]
-    TaskDAG -->|Serialized to Disk / CRDT| DurableJournal["Append-Only Journal (Zero Raw Secrets)"]
+    TaskDAG -->|Records handle| DurableJournal["Append-Only Journal"]
     
     subgraph ExecutionEnclave["Secure In-Memory Execution Boundary"]
         TaskDAG -->|Dispatch Event| TaskWorker["Capability Execution Worker"]
-        KeystoreEnclave["Hardware OS Keystore Enclave<br/>(Android StrongBox / Windows DPAPI / Linux Keyring)"] -->|Late-Binding Memory Resolution| CredBroker["CredentialBroker (Zeroizing Memory)"]
-        CredBroker -->|Transient Memory Slice| TaskWorker
-        TaskWorker -->|Network TLS Socket / Process Pipe| TargetEndpoint["Target Host / Toolchain"]
+        KeystoreEnclave["OS store (Linux keyring / Windows DPAPI)"] -->|Late binding| CredBroker["CredentialBroker"]
+        TaskWorker -->|Identity, handle, child stdin| CredBroker
+        CredBroker -->|Writes to pipe| TargetEndpoint["Selected child"]
     end
     
-    TaskWorker -->|Execution Output| OutputScrubber["JournalScrubber (Regex + Shannon Entropy)"]
+    TaskWorker -->|Execution Output| OutputScrubber["JournalScrubber (known patterns + entropy)"]
     OutputScrubber -->|Redacted Output| DurableJournal
 ```
 
 ### 6.1 Opaque Secret Handles (`secret://<vault_key>`)
-- LLMs, DAG definitions, and state journals **never** handle raw API tokens, SSH keys, passwords, or cloud credentials.
+- Do not pass raw API tokens, SSH keys, passwords or cloud credentials to a model, DAG definition or state journal.
 - All credential references use opaque URI handles (e.g. `secret://github_pat`, `secret://aws_access_key`, `secret://id_ed25519`).
-- Any attempt by an LLM prompt to echo or print the contents of a `secret://` handle is structurally rejected by the runtime.
+- A handle is not a bearer grant. The broker's argv check rejects `secret://` references; it never substitutes plaintext into arguments.
 
-### 6.2 OS Keystore Enclave & Hardware Backing
-Actual credentials reside in hardware-backed platform keyrings managed by `eon_foundation::CredentialBroker`:
-- **Android**: `Android Keystore` backed by hardware TEE / StrongBox Keymaster with AES-GCM-256 authenticated encryption.
-- **Windows**: Windows Data Protection API (`DPAPI-NG`) backed by TPM 2.0.
-- **Linux**: Linux Secret Service API (via D-Bus / `libsecret`) or kernel keyring subsystem.
+### 6.2 Platform stores
+- **Linux**: The Rust broker holds key serials and lengths in memory. Payloads live in the Linux process keyring and are revoked on removal. This is a software store.
+- **Windows**: The Rust broker retains only current-user DPAPI ciphertext and the expected plaintext length between calls. It does not require or attest a TPM.
+- **Android**: The app host uses a non-exportable AndroidKeyStore AES-256-GCM key for a one-use inspection proof. The key can outlive the app process; proof entries and grants cannot. This is not a Rust child-stdin backend. Neither non-exportability nor an emulator test establishes TEE or StrongBox backing.
 
 ### 6.3 Late-Binding Resolution in Memory
-1. `TaskParameters` retain `secret://` handles throughout DAG scheduling, dependency resolution, and journal logging.
-2. At the exact microsecond of task invocation, the worker invokes `CredentialBroker::resolve(&secret_uri)`.
-3. The broker decrypts the secret into a transient heap buffer wrapped in `zeroize::Zeroizing<String>` or `zeroize::Zeroizing<Vec<u8>>`.
-4. The credential is injected into the TLS stream, HTTP authorization header, or process pipe. Upon completion, the transient memory is actively overwritten with zeros, leaving no residual traces in memory or crash dumps.
+The host provisions or rotates an owner-scoped handle with `MANAGE_CREDENTIALS`. At execution time it calls `CredentialBroker::bind_to_stdin` with the selected child's pipe. Both `USE_CREDENTIALS` and `EXECUTE_PROCESS` are checked before the store is read. The broker writes into the pipe and wipes its transient buffer, including on write failure. It does not return plaintext to the caller or control what the child does with it.
 
 ### 6.4 Journal Secret Scrubber & Entropy Defense
-Before any stdout, stderr, execution result, or parameter payload is appended to the binary journal (`0x454F4E4A`) or SQLite event log, it passes through `JournalScrubber`:
-- **Deterministic Token Matchers**: Scans for known token prefixes and formats (`ghp_[a-zA-Z0-9]{36}`, `github_pat_[a-zA-Z0-9_]{82}`, `sk-[a-zA-Z0-9]{48}`, `AKIA[0-9A-Z]{16}`, and PEM headers `-----BEGIN [A-Z ]*PRIVATE KEY-----`).
-- **Shannon Entropy Analysis**: Scans string fragments for high-entropy substrings:
-  $$\mathcal{H}(X) = -\sum_{i=1}^{n} P(x_i) \log_2 P(x_i)$$
-  Any token with $\mathcal{H}(X) > 4.5$ bits/symbol over a window of $> 20$ alphanumeric characters is treated as a suspected secret.
-- **Redaction Policy**: Detected credentials are automatically stripped and replaced with `[REDACTED_SECRET:<hash_prefix>]` prior to journal serialization, CRDT replication, or embedding ingestion.
+Use `GroupCommitJournal::append_scrubbed` for free text. The raw append API accepts binary records and does not apply the text scrubber. Recognized credential prefixes and private-key blocks are redacted before the entropy pass.
+
+The generic entropy rule checks mixed-class, base64-style tokens of at least 24 characters against a threshold of 4.65 bits per character; ordinary workspace paths are exempt. The hex rule checks unlabelled 40- and 64-digit values, including `key=value` assignments, without requiring mixed case. It measures the original characters and redacts above 3.75 bits per character. A 64-digit `sha256:` digest or a `commit ` hash with a standalone label stays readable. Matched values are replaced with a stable `[REDACTED_SECRET:b3_…]` marker before the frame is written.

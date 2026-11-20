@@ -141,7 +141,9 @@ python3 app/keystore_device_test.py --build-only
 python3 app/keystore_device_test.py --serial emulator-5554  # substitute a clean disposable API 28+ device
 ```
 
-JVM policy tests and the signed APK builds passed. The last command installs same-signer instrumentation, exercises authorization, key rejection/invalidation and release, force-stops the target, and checks restart isolation and alias count. Require both `PASS: issue` and `PASS: restart`. Device acceptance remains **unverified** here: no attached device, emulator or system image, and `/dev/kvm` is inaccessible to the runner. JVM tests do not verify AndroidKeyStore; instrumentation does not verify hardware backing or the system shortcut UI.
+The `android-debug` CI job runs the last command on a fresh API 35 x86_64 emulator. For a manual run, use a disposable target with neither EON package installed. Require both `PASS: issue` and `PASS: restart`. The first phase exercises authorization, invalidation and release, then encrypts a public fixture. After force-stop the second phase must decrypt that fixture with the surviving key, reject the old handle, and redeem a fresh one. An alias with the same name but a different key is not enough.
+
+JVM tests and `--build-only` do not exercise AndroidKeyStore. A passing emulator run does not attest physical hardware backing or verify the system shortcut UI.
 
 ---
 
