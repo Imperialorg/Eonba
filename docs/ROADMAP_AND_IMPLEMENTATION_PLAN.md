@@ -230,6 +230,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Requirements**: Tree-sitter AST parsing across Rust, Kotlin, C/C++, Python, TypeScript. PageRank architectural RepoMap generator. Embedded Debug Adapter Protocol (DAP) client bridge (`dev.dap`) interfacing with `codelldb`, `debugpy`, and `jdwp` to inspect live stack frames, conditional breakpoints, and heap allocations. Automated compiler diagnostic capture and localized syntax tree repair.
   - **Unit Tests**: `cargo test -p eon-cyber ast_tests`, `self_healing_tests`, `dap_tests`.
   - **Verified subset**: Across four languages, 48 of 50 benign repair cases passed independent behavior checks after one edit, 49 within three revisions. Kotlin uses guarded token edits. The separate RepoMap parses all six languages and ranks lexical membership and unambiguous syntactic call matches. Its hand-checked fixture covers 19 declarations in eight files. This is not compiler name resolution or live debugger verification.
+  - **Debugger evidence**: A separate LLVM 18 `lldb-dap` run stopped at each of two fixed conditions in an owned fixture, read the expected three source frames and exited cleanly. The bridge does not accept a PID, target, command or expression. CodeLLDB, debugpy and JDWP were not verified.
 
 - [ ] **Task 7.2: Defensive source review, repair proposals and platform telemetry**
   - **Crate**: `eon-cyber`

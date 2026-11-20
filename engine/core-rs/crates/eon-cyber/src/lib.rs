@@ -7,6 +7,12 @@ pub mod cpg;
 pub mod defense;
 pub mod function_review;
 pub mod interproc;
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_pointer_width = "64"
+))]
+pub mod owned_dap;
 pub mod remediation;
 pub mod sbom;
 #[cfg(feature = "solver")]
