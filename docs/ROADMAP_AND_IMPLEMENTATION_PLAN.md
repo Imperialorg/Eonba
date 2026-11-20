@@ -139,6 +139,7 @@
   - **Requirements**: Embedded JSON-RPC LSP client multiplexer for `rust-analyzer`, `clangd`, `kotlin-language-server`, `pyright`, and `vtsls` providing sub-50ms diagnostic queries (`goto_definition`, `find_references`, `hover_type`, `diagnostics`). Symbol-scoped AST search/replace block patcher replacing fragile line-number diffs.
   - **Unit Tests**: `cargo test -p eon-capability lsp_and_patcher_tests`.
   - **Verified subset**: On a two-file C project, confined clangd 18 and 21 answered cross-file definitions, references, hover and fresh diagnostics. Warm diagnostic p95 was below 3 ms, but cold queries exceeded 50 ms. The other four production servers have not passed this gate.
+  - **Remaining servers**: Confined rust-analyzer exited during initialization when the worker denied `clone3`. Node exited before loading Pyright when the worker denied `fcntl(0, F_GETFL)`. Neither produced diagnostics; Kotlin Language Server and vtsls remain untested. The worker policy was not relaxed.
 
 ---
 
