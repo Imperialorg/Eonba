@@ -119,13 +119,24 @@ EON maintains a unified memory and task state across all devices using **Conflic
 
 ### 6.1 Cognitive State CRDT Primitives
 1. **Working Context Ledger (LWW-Element-Set CRDT)**:
-   - Stores active conversational context, clipboard items, and focused application state.
+   - The paired history records the speaker of an utterance, the fact of a clipboard event, or the focused application. Utterance and clipboard text never enter that history.
    - Updates use Lamport logical timestamps for deterministic merge resolution.
 2. **Semantic Knowledge Graph (Loro Tree & Map CRDT)**:
    - Additions of entity nodes and relationship edges are commutative and associative.
    - Simultaneous fact additions on the phone and desktop merge deterministically without merge conflicts.
 3. **Task & Execution Journal (PNCounter & ORSet CRDT)**:
    - Distributed task tracking. If a background download finishes on the server while the user is using the phone, the task completion event propagates immediately.
+
+The Rust paired service negotiates `eon/mesh/paired/3`. Upgrade both peers together:
+v2 does not understand paged acknowledgements, and there is no fallback to the
+unpaired public document. A peer first pulls the missing protected operations, then
+pushes what the responder lacks. Each page must fit a 1 MiB transport frame
+including metadata. New protected writes are limited to 512 KiB for the UTF-8
+key and encoded value together; rejection leaves the history unchanged.
+Acknowledgements describe **applied** history, not the last
+page sent. After a disconnect, restart the exchange from the two actual version
+vectors; no saved network cursor is needed. A single legacy record too large for
+a page is reported rather than skipped.
 
 ### 6.2 Projection into SQLite
 CRDTs serve as the append-only replication log. On each local node, a background projection worker materializes the CRDT state into relational **SQLite (FTS5 + `sqlite-vec`)** tables, enabling sub-5ms hybrid BM25 and vector similarity queries.

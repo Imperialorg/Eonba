@@ -6,17 +6,24 @@
 
 #[cfg(test)]
 mod privacy_tests;
+mod pages;
+pub(crate) use pages::Page;
 mod projections;
 pub use projections::{ContextEntry, ContextRecord, Entity, KnowledgeGraph, Relation, Speaker, WorkingContext};
 
 use loro::{
-    ContainerID, ContainerType, EncodedBlobMode, ExportMode, JsonMapOp, JsonOpContent, LoroDoc, LoroValue,
-    VersionVector,
+    ContainerID, ContainerType, EncodedBlobMode, ExportMode, ImportBlobMetadata, JsonMapOp, JsonOpContent,
+    LoroDoc, LoroValue, VersionVector,
 };
 
 use eon_primitives::{EonError, EonResult};
 
 const PROJECTION: &str = "projection";
+
+/// Local protected writes (UTF-8 key plus postcard-encoded value) reserve
+/// half a frame for Loro metadata and paired framing. This admission limit is
+/// not retroactive: larger legacy records can still travel in a fitting page.
+pub const MAX_PROTECTED_RECORD_BYTES: usize = crate::transport::MAX_FRAME_BYTES / 2;
 
 pub struct Replica {
     public: LoroDoc,
@@ -78,14 +85,16 @@ impl Replica {
         })
     }
 
-    pub(crate) fn paired_version(&self) -> Vec<u8> {
-        self.protected.oplog_vv().encode()
+    pub(crate) fn paired_version(&self) -> VersionVector {
+        self.protected.oplog_vv()
     }
 
+    #[cfg(test)]
     pub(crate) fn paired_export_since(&self, version: &[u8]) -> EonResult<Vec<u8>> {
         export_since(&self.protected, version)
     }
 
+    #[cfg(test)]
     pub(crate) fn paired_apply(&self, update: &[u8]) -> EonResult<()> {
         import_checked(&self.protected, update, projections::allowed)
     }
@@ -105,6 +114,15 @@ fn rejected() -> EonError {
 // reconstruct the validated operations in the live document; never import opaque
 // snapshot state, dictionaries or unchecked bytes there.
 fn import_checked(doc: &LoroDoc, bytes: &[u8], allowed: impl Fn(&str, &JsonMapOp) -> bool) -> EonResult<()> {
+    import_checked_range(doc, bytes, allowed, |_, _, _| true)
+}
+
+fn import_checked_range(
+    doc: &LoroDoc,
+    bytes: &[u8],
+    mut allowed: impl FnMut(&str, &JsonMapOp) -> bool,
+    valid_range: impl FnOnce(&ImportBlobMetadata, &VersionVector, &VersionVector) -> bool,
+) -> EonResult<()> {
     let meta = LoroDoc::decode_import_blob_meta(bytes, true).map_err(|_| rejected())?;
     if !matches!(meta.mode, EncodedBlobMode::Updates | EncodedBlobMode::Snapshot) {
         return Err(rejected());
@@ -114,9 +132,11 @@ fn import_checked(doc: &LoroDoc, bytes: &[u8], allowed: impl Fn(&str, &JsonMapOp
     if scratch.import(bytes).map_err(|_| rejected())?.pending.is_some() {
         return Err(rejected());
     }
-    let ops = scratch
-        .export_json_updates(&before, &scratch.oplog_vv())
-        .map_err(|_| rejected())?;
+    let after = scratch.oplog_vv();
+    if !valid_range(&meta, &before, &after) {
+        return Err(rejected());
+    }
+    let ops = scratch.export_json_updates(&before, &after).map_err(|_| rejected())?;
     for change in &ops.changes {
         if change.msg.is_some() {
             return Err(rejected());
@@ -138,6 +158,9 @@ fn import_checked(doc: &LoroDoc, bytes: &[u8], allowed: impl Fn(&str, &JsonMapOp
         }
     }
     if !ops.changes.is_empty() && doc.import_json_updates(ops).map_err(|_| rejected())?.pending.is_some() {
+        return Err(rejected());
+    }
+    if !doc.oplog_vv().includes_vv(&after) {
         return Err(rejected());
     }
     Ok(())

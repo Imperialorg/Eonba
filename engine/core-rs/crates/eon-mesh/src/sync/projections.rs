@@ -4,7 +4,7 @@ use eon_primitives::{EonError, EonResult};
 use loro::{JsonMapOp, LoroValue};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use super::{Replica, loro_err};
+use super::{MAX_PROTECTED_RECORD_BYTES, Replica, loro_err};
 
 // Each record, not the whole projection, is one Loro LWW register. Version the roots
 // because changing a postcard enum's discriminants would reinterpret existing history.
@@ -79,6 +79,13 @@ fn schema_err(reason: impl std::fmt::Display) -> EonError {
     EonError::ValidationError(format!("mesh projection: {reason}"))
 }
 
+fn check_local_record_size(key: &str, value_bytes: usize) -> EonResult<()> {
+    if key.len().saturating_add(value_bytes) > MAX_PROTECTED_RECORD_BYTES {
+        return Err(schema_err("protected key + encoded value exceeds the local record limit"));
+    }
+    Ok(())
+}
+
 fn decode<T: DeserializeOwned>(value: &LoroValue) -> EonResult<T> {
     let LoroValue::Binary(bytes) = value else {
         return Err(schema_err("expected binary record"));
@@ -148,6 +155,7 @@ impl Replica {
     }
 
     fn put_record(&self, root: &str, id: &str, record: &impl Serialize) -> EonResult<()> {
+        check_local_record_size(id, postcard::experimental::serialized_size(record).map_err(schema_err)?)?;
         let bytes = postcard::to_allocvec(record).map_err(schema_err)?;
         self.protected.get_map(root).insert(id, bytes).map_err(loro_err)?;
         self.protected.commit();
@@ -155,6 +163,7 @@ impl Replica {
     }
 
     fn remove_record(&self, root: &str, id: &str) -> EonResult<()> {
+        check_local_record_size(id, 0)?;
         self.protected.get_map(root).delete(id).map_err(loro_err)?;
         self.protected.commit();
         Ok(())
@@ -166,6 +175,13 @@ impl Replica {
         map.iter()
             .map(|(key, value)| Ok((key.clone(), decode(value)?)))
             .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_legacy_entity(&self, id: &str, entity: &Entity) {
+        let bytes = postcard::to_allocvec(entity).unwrap();
+        self.protected.get_map(ENTITIES).insert(id, bytes).unwrap();
+        self.protected.commit();
     }
 }
 
@@ -213,7 +229,7 @@ mod tests {
             .get_map(CONTEXT)
             .insert("bad", "not a typed entry")
             .unwrap();
-        let delta = sender.paired_export_since(&receiver.paired_version()).unwrap();
+        let delta = sender.paired_export_since(&receiver.paired_version().encode()).unwrap();
         assert!(receiver.paired_apply(&delta).is_err());
         assert!(receiver.working_context().unwrap().is_empty());
         assert!(receiver.knowledge_graph().unwrap().entities.is_empty());

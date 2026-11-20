@@ -50,14 +50,12 @@ async fn nodes(edge_key: &SecretKey, desk_key: &SecretKey) -> (PeerNode, PeerNod
 }
 
 async fn round(edge: &PeerNode, a: &Replica, addr: EndpointAddr, desk: &PeerNode, b: &Replica) {
-    let serve = async {
-        paired::serve_one(desk, b).await?;
-        paired::serve_one(desk, b).await
-    };
-    timeout(LIMIT, async { tokio::try_join!(exchange(edge, addr, a), serve) })
-        .await
-        .unwrap()
-        .unwrap();
+    timeout(LIMIT, async {
+        tokio::select! {
+            result = exchange(edge, addr, a) => result.unwrap(),
+            () = async { loop { paired::serve_one(desk, b).await.unwrap(); } } => unreachable!(),
+        }
+    }).await.unwrap();
 }
 
 fn note(text: &str) -> ContextEntry {
@@ -207,7 +205,7 @@ async fn crdt_tests_interrupted_push_resumes_without_resending_shared_history() 
     for c in &mut text {
         *c = b' ' + *c % 90;
     }
-    for label in text.chunks(MAX_FRAME_BYTES / 2) {
+    for label in text.chunks(MAX_FRAME_BYTES / 3) {
         a.put_entity("large", &entity(std::str::from_utf8(label).unwrap()))
             .unwrap();
         round(&edge, &a, desk.addr(), &desk, &b).await;
