@@ -2527,11 +2527,14 @@ dependencies = [
  "blake3",
  "bytes",
  "eon-primitives",
+ "eon-voice",
  "iroh",
  "iroh-blobs",
  "loro",
  "postcard",
  "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "tokio",
 ]
 

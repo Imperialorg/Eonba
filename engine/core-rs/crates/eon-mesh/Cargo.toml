@@ -5,15 +5,25 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+native-zipformer = ["dep:eon-voice", "dep:sha2", "dep:serde_json", "tokio/sync"]
+
 [dependencies]
 blake3 = "1"
 bytes = "1"
 eon-primitives = { path = "../eon-primitives" }
+eon-voice = { path = "../eon-voice", optional = true, default-features = false, features = ["onnx-speech"] }
 iroh = "1.4"
 loro = "1"
 postcard = { version = "1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
+sha2 = { version = "0.10", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 
 [dev-dependencies]
 iroh-blobs = "0.105"
+
+[[test]]
+name = "split_zipformer"
+required-features = ["native-zipformer"]

@@ -2,6 +2,11 @@
 //! frame scores, run greedy CTC on the paired workstation or on the edge. Nothing
 //! is played or executed. Verification deliberately trades duplicate work for
 //! not having to trust the workstation's claimed tokens.
+//!
+//! The separate, opt-in `zipformer` service offloads actual acoustic inference.
+
+#[cfg(feature = "native-zipformer")]
+pub mod zipformer;
 
 use std::time::Duration;
 
