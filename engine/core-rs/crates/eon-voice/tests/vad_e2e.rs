@@ -127,6 +127,10 @@ fn vad_tests_invalid_stream_geometry_and_gaps_are_not_silence() {
 }
 
 #[cfg(all(feature = "native", target_os = "linux"))]
+#[path = "common/private_monitor.rs"]
+mod private_monitor;
+
+#[cfg(all(feature = "native", target_os = "linux"))]
 #[test]
 #[ignore = "use tests/vad_private_monitor.py --private-monitor; never opens an ambient microphone"]
 fn vad_tests_private_monitor() {
@@ -138,45 +142,7 @@ fn vad_tests_private_monitor() {
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
-    assert_eq!(
-        std::env::var("EON_VOICE_TEST_VIRTUAL_MONITOR").as_deref(),
-        Ok("1"),
-        "opt in only after configuring local virtual loopback"
-    );
-    // Fail before CPAL can ask ALSA for its default. This private configuration
-    // has exactly one local Pulse server, no fallback devices or host includes.
-    let server = std::env::var("PULSE_SERVER").expect("missing private server");
-    let socket = server
-        .strip_prefix("unix:/")
-        .expect("expected an absolute local socket");
-    assert!(!socket.contains(['"', '\n', '\r']));
-    let conf =
-        std::fs::read_to_string(std::env::var_os("ALSA_CONFIG_PATH").expect("missing private ALSA config")).unwrap();
-    assert_eq!(conf, format!("pcm.!default {{ type pulse server \"{server}\" }}\n"));
-    for (kind, env, name) in [
-        ("sources", "PULSE_SOURCE", "eon_vad.monitor"),
-        ("sinks", "PULSE_SINK", "eon_vad"),
-    ] {
-        assert_eq!(std::env::var(env).as_deref(), Ok(name));
-        let list = std::process::Command::new("pactl")
-            .args(["--server", &server, "list", "short", kind])
-            .output()
-            .unwrap();
-        assert!(list.status.success(), "private server unavailable");
-        let entries = String::from_utf8(list.stdout).unwrap();
-        let names: Vec<_> = entries
-            .lines()
-            .map(|line| {
-                let mut fields = line.split('\t').skip(1);
-                (fields.next(), fields.next())
-            })
-            .collect();
-        assert_eq!(
-            names,
-            [(Some(name), Some("module-null-sink.c"))],
-            "unexpected {kind} on dedicated server"
-        );
-    }
+    private_monitor::require_null_sink();
 
     // Repeat the same second of the digest-pinned recording with 1.5 s of
     // explicit digital silence after each copy. No microphone is a fixture.

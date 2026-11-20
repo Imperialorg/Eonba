@@ -4,10 +4,13 @@
 //! ASR. Enough content words must come back, so the test fails on silence or on speech that is not intelligible.
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[path = "common/kokoro_release.rs"]
 mod kokoro_release;
+#[cfg(target_os = "linux")]
+#[path = "common/private_monitor.rs"]
+mod private_monitor;
 
 use eon_voice::asr::ZipformerAsr;
 use eon_voice::resample::resample_mono;
@@ -15,7 +18,7 @@ use eon_voice::tts::{KokoroTts, SAMPLE_RATE_HZ};
 use eon_voice::{
     LeaseId,
     barge_in::BargeIn,
-    commitment::{Bridge, BridgeCache, CommitmentGate, ReplyRenderer},
+    commitment::{Bridge, BridgeCache, CommitmentGate},
 };
 
 fn repo_models() -> PathBuf {
@@ -147,12 +150,16 @@ fn check_synthesis_budgets(mut tts: KokoroTts) {
 }
 
 /// Output only, never opens a microphone. Start a private virtual sink explicitly.
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "requires private virtual output, espeak-ng and the verified upstream release graph"]
 fn alternate_release_prefix_and_claim_reach_the_cpal_render_reference() {
+    use eon_voice::commitment::ReplyRenderer;
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     assert_eq!(std::env::var("EON_VOICE_TEST_PRIVATE_OUTPUT").as_deref(), Ok("1"));
+    private_monitor::require_null_sink();
     let mut tts = kokoro_release::load(&repo_models());
     let (mut worker, device, mut reference) = ReplyRenderer::open_default(1).unwrap();
     let rate = device.sample_rate;
@@ -171,6 +178,7 @@ fn alternate_release_prefix_and_claim_reach_the_cpal_render_reference() {
         if buf[..n].iter().any(|s| s.abs() > 0.01) {
             break;
         }
+
         std::thread::sleep(Duration::from_micros(500));
     }
     let first = start.elapsed();
@@ -216,4 +224,27 @@ fn alternate_release_prefix_and_claim_reach_the_cpal_render_reference() {
         first < Duration::from_millis(170),
         "cached prefix to virtual callback, not acoustic TTFA"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn private_output_flags_alone_do_not_enable_playback() {
+    // Exercise the actual entry point in a child, before model loading or CPAL.
+    // Empty ALSA config, nonexistent model and socket: no host fallback in this check.
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "alternate_release_prefix_and_claim_reach_the_cpal_render_reference",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("EON_VOICE_TEST_PRIVATE_OUTPUT", "1")
+        .env("EON_VOICE_TEST_VIRTUAL_MONITOR", "1")
+        .env("ALSA_CONFIG_PATH", "/dev/null")
+        .env("PULSE_SERVER", "unix:/dev/null/no-server")
+        .env("EON_KOKORO_RELEASE_INT8", "/dev/null/no-model")
+        .output()
+        .unwrap();
+    assert!(!child.status.success());
+    assert!(String::from_utf8_lossy(&child.stderr).contains("ALSA default must route exclusively"));
 }

@@ -80,11 +80,12 @@ pub fn capture_default_frames<const N: usize>() -> EonResult<(CaptureFrames<N>, 
     Ok((CaptureFrames::new(reader, device.sample_rate)?, device))
 }
 
-fn short_period(config: &cpal::SupportedStreamConfig) -> cpal::StreamConfig {
+fn short_period(config: &cpal::SupportedStreamConfig, periods_per_second: u32) -> cpal::StreamConfig {
     let mut stream_config = config.config();
     // A request, not a guarantee of the backend's period or acoustic latency.
     if let cpal::SupportedBufferSize::Range { min, max } = config.buffer_size() {
-        stream_config.buffer_size = cpal::BufferSize::Fixed((config.sample_rate() / 250).clamp(*min, *max));
+        stream_config.buffer_size =
+            cpal::BufferSize::Fixed((config.sample_rate() / periods_per_second).clamp(*min, *max));
     }
     stream_config
 }
@@ -100,7 +101,7 @@ where
     f32: FromSample<T>,
 {
     let channels = usize::from(config.channels());
-    let stream_config = short_period(config);
+    let stream_config = short_period(config, 250);
     let data_counters = Arc::clone(&counters);
     let error_counters = Arc::clone(&counters);
     let mut mono = [0.0; SCRATCH_FRAMES];
@@ -196,7 +197,14 @@ where
     T: SizedSample + FromSample<f32>,
 {
     let channels = usize::from(config.channels());
-    let stream_config = short_period(config);
+    // ALSA queues two CPAL periods. Two 4 ms periods can keep playing after
+    // the callback has muted. Budget 3 ms for both periods on Linux.
+    let periods = if cfg!(target_os = "linux") && owner.source().reference.is_some() {
+        667
+    } else {
+        250
+    };
+    let stream_config = short_period(config, periods);
     let data_counters = Arc::clone(&counters);
     let error_counters = Arc::clone(&counters);
     let mut mono = [0.0; SCRATCH_FRAMES];

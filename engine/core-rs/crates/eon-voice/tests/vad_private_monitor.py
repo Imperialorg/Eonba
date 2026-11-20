@@ -1,4 +1,4 @@
-"""Run the Linux VAD acceptance test without discovering or opening a physical audio device."""
+"""Run a Linux voice acceptance test without discovering or opening a physical audio device."""
 
 import argparse
 import os
@@ -13,7 +13,10 @@ import uuid
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--private-monitor", required=True, action="store_true")
-    parser.parse_args()
+    case = parser.add_mutually_exclusive_group()
+    case.add_argument("--barge-in", action="store_true", help="measure committed Kokoro output at the sink monitor")
+    case.add_argument("--kokoro-prefix", action="store_true", help="run the shared renderer's prefix regression")
+    args = parser.parse_args()
     if sys.platform != "linux":
         parser.error("this gate requires Linux ALSA, PulseAudio and CPAL")
     workspace = Path(__file__).resolve().parents[3]
@@ -28,7 +31,8 @@ def main():
                  PULSE_RUNTIME_PATH=str(root), XDG_RUNTIME_DIR=str(root), PULSE_COOKIE=str(root / "cookie"),
                  DBUS_SESSION_BUS_ADDRESS=f"unix:path={root / 'no-bus'}",
                  PULSE_SERVER=server, PULSE_SOURCE="eon_vad.monitor", PULSE_SINK="eon_vad",
-                 ALSA_CONFIG_PATH=str(root / "asound.conf"), EON_VOICE_TEST_VIRTUAL_MONITOR="1")
+                 ALSA_CONFIG_PATH=str(root / "asound.conf"), EON_VOICE_TEST_VIRTUAL_MONITOR="1",
+                 EON_VOICE_TEST_PRIVATE_OUTPUT="1")
     try:
         # No system ALSA include, no fallback PCM, no Pulse default startup file/hardware discovery.
         (root / "asound.conf").write_text(f'pcm.!default {{ type pulse server "{server}" }}\n')
@@ -47,9 +51,15 @@ def main():
                     if (root / "native").is_socket():
                         break
                     time.sleep(0.05)
+                if args.barge_in:
+                    profile, suite, test = [], "speaker_e2e", "kokoro_stop::private_monitor_stop"
+                elif args.kokoro_prefix:
+                    profile, suite, test = [], "tts_e2e", "alternate_release_prefix_and_claim_reach_the_cpal_render_reference"
+                else:
+                    profile, suite, test = ["--release"], "vad_e2e", "vad_tests_private_monitor"
                 subprocess.run([
-                    "cargo", "test", "--locked", "--release", "-j4", "-p", "eon-voice", "--features", "native", "--test", "vad_e2e",
-                    "vad_tests_private_monitor", "--", "--ignored", "--exact", "--nocapture", "--test-threads=1",
+                    "cargo", "test", "--locked", *profile, "-j4", "-p", "eon-voice", "--features", "native", "--test", suite,
+                    test, "--", "--ignored", "--exact", "--nocapture", "--test-threads=1",
                 ], env=audio, cwd=workspace, check=True)
             finally:
                 pulse.terminate()

@@ -10,6 +10,12 @@ use std::path::PathBuf;
 mod common;
 #[path = "common/kokoro_release.rs"]
 mod kokoro_release;
+#[cfg(target_os = "linux")]
+#[path = "speaker/kokoro_stop.rs"]
+mod kokoro_stop;
+#[cfg(target_os = "linux")]
+#[path = "common/private_monitor.rs"]
+mod private_monitor;
 
 use eon_voice::resample::{CaptureFrames, resample_mono};
 use eon_voice::speaker::{SpeakerEmbedder, SpeakerGate, cosine};
@@ -112,6 +118,7 @@ fn recorded_capture_and_render_rings_make_one_auditable_owner_decision() {
 
 /// Route the default output to a *private virtual sink* and the default input to its monitor.
 /// A second CPAL stream injects released speech into that mixer, not into the AEC reference.
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "requires an explicitly configured virtual monitor; never run against an ambient microphone"]
 fn virtual_cpal_capture_verifies_speech_and_mutes_the_reply() {
@@ -120,11 +127,7 @@ fn virtual_cpal_capture_verifies_speech_and_mutes_the_reply() {
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
-    assert_eq!(
-        std::env::var("EON_VOICE_TEST_VIRTUAL_MONITOR").as_deref(),
-        Ok("1"),
-        "opt in only after configuring local virtual loopback"
-    );
+    private_monitor::require_null_sink();
     let speech = owner_recording();
     let half = speech.len() / 2;
     let mut speaker = SpeakerEmbedder::load(models().join("speaker/wespeaker_resnet34.onnx")).unwrap();

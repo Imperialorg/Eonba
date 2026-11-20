@@ -166,11 +166,12 @@
   - **Unit Tests**: `cargo test -p eon-voice tts_tests`, `commitment_gate_tests`.
   - **Verified backend**: On Linux, the explicitly selected v1.0 release INT8 graph with the pinned voice rendered a cached bridge and then an authorized clause into CPAL. First non-silent callback reference: 27.8 ms. Uncached clause RTF: 0.124. This is a warmed software/render test, not the physical TTFA gate in Task 10.2. The default profile graph could not be fetched; it was not silently replaced.
 
-- [ ] **Task 5.4: Acoustic Reflex & Full Duplex Barge-In**
+- [x] **Task 5.4: Acoustic Reflex & Full Duplex Barge-In**
   - **Crate**: `eon-voice`
   - **Files**: `src/barge_in.rs`, `src/coordinator.rs`
   - **Requirements**: Detects user voice while TTS is playing; aborts audio output driver in < 5ms; logs `INTERRUPTED_BY_USER`.
   - **Unit Tests**: `cargo test -p eon-voice barge_in_tests` verifying instantaneous buffer flush.
+  - **Verified backend**: While committed Kokoro speech was playing, a held-out owner recording triggered `INTERRUPTED_BY_USER`. An independent 48 kHz Linux null-sink monitor matched the interrupted waveform and observed sustained silence within 2.48 ms of authorization in all three trials. Authorization itself took 3.300 seconds of recorded speech. Not an onset-to-stop or physical speaker latency claim.
 
 - [ ] **Task 5.5: AEC Loopback & Biometric Speaker Verification**
   - **Crate**: `eon-voice`
