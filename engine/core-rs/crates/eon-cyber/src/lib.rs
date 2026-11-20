@@ -1,6 +1,7 @@
 //! EON Cyber Engine: program analysis, taint slicing, and armor checks.
 #[cfg(feature = "solver")]
 pub mod branches;
+pub mod benign_repair;
 pub mod cpg;
 pub mod defense;
 pub mod function_review;
