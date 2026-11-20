@@ -114,6 +114,82 @@ execute(f"{private_label}")
 }
 
 #[test]
+fn python_templates_do_not_hide_the_first_formatted_query() {
+    let templates =
+        "db.execute(t'{first}')\ndb.execute(RT\"{second}\")\ndb.execute(Tr'''{third}''')\n";
+    let report = review_source(Lang::Python, templates);
+    assert_gap(&report, Rule::InterpolatedQuery, Gap::OutsideRule);
+    for prefix in ["f", "F", "rf", "Rf", "fr", "FR"] {
+        let call = format!("db.execute({prefix}'''{{label}}''')");
+        let source = format!("{templates}{call}");
+        let report = review_source(Lang::Python, &source);
+        assert_eq!(
+            evidence(&report, Rule::InterpolatedQuery),
+            &first_span(&source, &call)
+        );
+    }
+}
+
+#[test]
+fn malformed_python_layout_suppresses_evidence_for_the_whole_unit() {
+    let call = "db.execute(f'{label}')";
+    for (label, source) in [
+        ("initial indent", format!("  {call}")),
+        ("unexpected indent", format!("{call}\n  value = 0")),
+        ("empty at EOF", format!("{call}\ndef helper():\n")),
+        (
+            "comment-only suite",
+            format!("if ready:\n    # note\n{call}"),
+        ),
+        (
+            "missing nested suite",
+            format!("if ready:\n    if busy:\n    {call}"),
+        ),
+        (
+            "inconsistent dedent",
+            format!("if ready:\n    {call}\n  other()"),
+        ),
+        (
+            "misaligned clause",
+            format!("if ready:\n    {call}\n  else:\n    other()"),
+        ),
+    ] {
+        let report = review_source(Lang::Python, &source);
+        for check in report.checks {
+            assert_eq!(
+                check.evidence,
+                Assessment::Unverified(Gap::InvalidInput),
+                "{label}"
+            );
+        }
+    }
+}
+
+#[test]
+fn python_layouts_outside_the_space_indented_profile_are_unverified() {
+    for source in [
+        "if ready: db.execute(f'{label}')",
+        "if ready:\n\tdb.execute(f'{label}')",
+        "pass; db.execute(f'{label}')",
+        "db.execute(\\\n f'{label}')",
+    ] {
+        let report = review_source(Lang::Python, source);
+        assert_gap(&report, Rule::InterpolatedQuery, Gap::OutsideRule);
+    }
+}
+
+#[test]
+fn python_space_indented_suites_allow_comments_and_continuation_lines() {
+    let call = "db.execute(\n        f'{label}'\n    )";
+    let source = format!("def run():\n  if ready:\n    pass\n  else:\n # note\n    {call}\n");
+    let report = review_source(Lang::Python, &source);
+    assert_eq!(
+        evidence(&report, Rule::InterpolatedQuery),
+        &first_span(&source, call)
+    );
+}
+
+#[test]
 fn token_review_reports_the_guarded_branch_location_only() {
     let manual = include_str!("fixtures/token_check/manual.py")
         .replace("presented", "private_fixture_token");

@@ -1,5 +1,8 @@
 //! Bounded structural review of one caller-supplied source unit. Locations are
 //! byte ranges in that unit, not snippets, names, runtime traces or proof of a CWE.
+//! Python layout checks cover space-indented statements in modules and multiline
+//! suites, not arbitrary CPython syntax. Tabs in statement indentation, inline
+//! suites, same-line sibling statements and backslash-newline spellings are outside this profile.
 
 use std::ops::Range;
 
@@ -134,9 +137,64 @@ fn python_query(call: Node<'_>, src: &str) -> Option<Rule> {
     if !matches!(&src[name.byte_range()], "execute" | "executemany") || arg.kind() != "string" {
         return None;
     }
+    // Both f-strings and Python 3.14 template strings have interpolation nodes.
+    let start = arg.named_child(0)?;
+    let prefix = src[start.byte_range()].trim_end_matches(['\'', '"']);
+    if start.kind() != "string_start"
+        || !["f", "rf", "fr"]
+            .iter()
+            .any(|p| prefix.eq_ignore_ascii_case(p))
+    {
+        return None;
+    }
     arg.named_children(&mut arg.walk())
         .any(|n| n.kind() == "interpolation")
         .then_some(Rule::InterpolatedQuery)
+}
+
+fn statement_indent(node: Node<'_>, src: &str) -> Result<usize, Gap> {
+    let start = node.start_byte();
+    let column = node.start_position().column;
+    src.as_bytes()[start - column..start]
+        .iter()
+        .all(|&b| b == b' ')
+        .then_some(column)
+        .ok_or(Gap::OutsideRule)
+}
+
+// Tree-sitter can produce an error-free tree with an empty suite or misplaced
+// statements. Check statement heads, not raw lines (comments, strings and
+// parenthesized expressions need not follow the enclosing indentation).
+fn python_layout(node: Node<'_>, src: &str, budget: &mut usize) -> Result<(), Gap> {
+    let parent_indent = || statement_indent(node.parent().ok_or(Gap::InvalidInput)?, src);
+    let (mut expected, parent) = match node.kind() {
+        "module" => (Some(0), None),
+        "block" => (None, Some(parent_indent()?)),
+        "decorated_definition" => (Some(statement_indent(node, src)?), None),
+        "elif_clause"
+        | "else_clause"
+        | "except_clause"
+        | "except_group_clause"
+        | "finally_clause" => {
+            return (statement_indent(node, src)? == parent_indent()?)
+                .then_some(())
+                .ok_or(Gap::InvalidInput);
+        }
+        _ => return Ok(()),
+    };
+    for stmt in node.named_children(&mut node.walk()) {
+        *budget = budget.checked_sub(1).ok_or(Gap::LimitExceeded)?;
+        if stmt.is_extra() {
+            continue;
+        }
+        let indent = statement_indent(stmt, src)?;
+        if expected.is_some_and(|e| indent != e) || parent.is_some_and(|p| indent <= p) {
+            return Err(Gap::InvalidInput);
+        }
+        expected = Some(indent);
+    }
+    // A module may be empty; a block needs at least one actual statement.
+    expected.map(|_| ()).ok_or(Gap::InvalidInput)
 }
 
 pub fn review_source(language: Lang, source: &str) -> SourceReport {
@@ -164,6 +222,11 @@ pub fn review_source(language: Lang, source: &str) -> SourceReport {
     if root.has_error() {
         return unverified(Gap::InvalidInput);
     }
+    // The grammar can consume a line continuation as trivia. Decline the
+    // spelling even in comments/strings instead of implementing a second lexer.
+    if language == Lang::Python && (source.contains("\\\n") || source.contains("\\\r\n")) {
+        return unverified(Gap::OutsideRule);
+    }
     let mut report = unverified(Gap::Unsupported);
     for check in &mut report.checks {
         check.evidence = match (language, check.rule) {
@@ -178,11 +241,17 @@ pub fn review_source(language: Lang, source: &str) -> SourceReport {
         };
     }
     let mut cursor = root.walk();
+    let mut layout_budget = MAX_TREE_NODES;
     for _ in 0..MAX_TREE_NODES {
         let node = cursor.node();
         let rule = match language {
             Lang::Rust => rust_rule(node, source),
-            Lang::Python => python_query(node, source),
+            Lang::Python => {
+                if let Err(gap) = python_layout(node, source, &mut layout_budget) {
+                    return unverified(gap);
+                }
+                python_query(node, source)
+            }
         };
         if let Some(check) = rule.and_then(|r| report.checks.iter_mut().find(|c| c.rule == r))
             && !matches!(check.evidence, Assessment::Observed(_))
