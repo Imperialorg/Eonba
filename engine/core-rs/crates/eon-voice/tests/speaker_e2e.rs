@@ -7,6 +7,8 @@
 
 use std::path::PathBuf;
 
+mod common;
+
 use eon_voice::resample::resample_mono;
 use eon_voice::speaker::{SpeakerEmbedder, SpeakerGate, cosine};
 use eon_voice::tts::{KokoroTts, SAMPLE_RATE_HZ as TTS_RATE};
@@ -26,22 +28,7 @@ fn models() -> PathBuf {
 }
 
 fn fixture() -> Vec<f32> {
-    let bytes = std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/en.wav")).unwrap();
-    let mut pos = 12;
-    while pos + 8 <= bytes.len() {
-        let id = &bytes[pos..pos + 4];
-        let size = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()) as usize;
-        if id == b"data" {
-            return bytes[pos + 8..pos + 8 + size]
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|c| i16::from_le_bytes(*c) as f32 / 32768.0)
-                .collect();
-        }
-        pos += 8 + size + (size & 1);
-    }
-    panic!("no data chunk");
+    common::read_pcm16_mono_16k(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/en.wav"))
 }
 
 #[test]

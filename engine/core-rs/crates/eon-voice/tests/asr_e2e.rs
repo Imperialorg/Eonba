@@ -8,7 +8,7 @@ use std::path::PathBuf;
 mod common;
 
 use common::read_pcm16_mono_16k;
-use eon_voice::asr::ZipformerAsr;
+use eon_voice::asr::{MAX_UTTERANCE_SAMPLES, ZipformerAsr};
 
 fn model_dir() -> PathBuf {
     if let Ok(path) = std::env::var("EON_ZIPFORMER_DIR") {
@@ -44,6 +44,25 @@ fn silence_yields_no_text() {
     let mut asr = load_model();
     let text = asr.transcribe(&vec![0.0; 16_000]).expect("transcription must succeed");
     assert!(text.is_empty(), "silence produced {text:?}");
+}
+
+#[test]
+fn rejected_chunks_do_not_advance_the_utterance() {
+    let mut asr = load_model();
+    let mut stream = asr.start_utterance().unwrap();
+    assert!(stream.push(&[0.0; 320]).unwrap().is_none());
+    assert!(stream.push(&vec![0.0; MAX_UTTERANCE_SAMPLES - 319]).is_err());
+    for bad in [f32::NAN, f32::INFINITY, -1.01, 1.01] {
+        assert!(stream.push(&[0.0, bad]).is_err());
+    }
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/en.wav");
+    for samples in read_pcm16_mono_16k(&fixture).chunks(317) {
+        stream.push(samples).unwrap();
+    }
+    assert_eq!(
+        stream.finish().unwrap(),
+        "THE DRIBAL CHIEFTAIN CALLED FOR THE BOY AND PRESENTED HIM THE FIFTY PIECES OF GOLD"
+    );
 }
 
 #[test]

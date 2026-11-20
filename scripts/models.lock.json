@@ -105,6 +105,34 @@
       "notes": "Pinned from the upstream k2-fsa release tarball; the same-named Hugging Face mirror has different bytes."
     },
     {
+      "id": "voice-test-zipformer-0",
+      "dest": "engine/core-rs/crates/eon-voice/tests/fixtures/0.wav",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
+      "sha256": "6bc58a4efdf20daac252b6b1502632601a71efe0308f6757dc1eda34891a7e4f",
+      "size_bytes": 212044,
+      "archive": {
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
+        "sha256": "639e25b578e9e997131402199419c13a941f8e4e198e2da1ce57dbf5cf401282",
+        "size_bytes": 310414022,
+        "member": "0.wav"
+      },
+      "notes": "Upstream Zipformer test recording. Not shipped with the app or included in hardware profiles."
+    },
+    {
+      "id": "voice-test-sensevoice-en",
+      "dest": "engine/core-rs/crates/eon-voice/tests/fixtures/en.wav",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
+      "sha256": "eb1eb008904465b74c304aad8342e8c7d3c6e61ffe9f66adcaca9cf0f76a93f4",
+      "size_bytes": 228908,
+      "archive": {
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
+        "sha256": "7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e",
+        "size_bytes": 163002883,
+        "member": "en.wav"
+      },
+      "notes": "Upstream SenseVoice test recording. Not shipped with the app or included in hardware profiles."
+    },
+    {
       "id": "silero-vad-v5",
       "dest": "perception/models/vad/silero_vad.onnx",
       "url": "https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx",

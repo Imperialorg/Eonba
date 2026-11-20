@@ -25,6 +25,8 @@ const ENCODER_FILE: &str = "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx";
 const DECODER_FILE: &str = "decoder-epoch-99-avg-1-chunk-16-left-128.onnx";
 const JOINER_FILE: &str = "joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx";
 const TOKENS_FILE: &str = "tokens.txt";
+/// The feature extractor retains an utterance's history until endpointing.
+pub const MAX_UTTERANCE_SAMPLES: usize = 120 * 16_000;
 
 enum CacheData {
     F32(Vec<f32>),
@@ -147,6 +149,7 @@ impl ZipformerAsr {
             context,
             decoder_out,
             tokens: Vec::new(),
+            input_samples: 0,
         })
     }
 }
@@ -160,11 +163,19 @@ pub struct ZipformerStream<'a> {
     context: [i64; CONTEXT_SIZE],
     decoder_out: Vec<f32>,
     tokens: Vec<i64>,
+    input_samples: usize,
 }
 
 impl ZipformerStream<'_> {
     /// Returns the current partial transcript only when new tokens were emitted.
     pub fn push(&mut self, samples: &[f32]) -> EonResult<Option<PartialTranscript>> {
+        if samples.len() > MAX_UTTERANCE_SAMPLES - self.input_samples {
+            return Err(onnx_err("input", "utterance exceeds the two-minute limit"));
+        }
+        if !samples.iter().all(|s| (-1.0..=1.0).contains(s)) {
+            return Err(onnx_err("input", "expected finite, normalized mono PCM"));
+        }
+        self.input_samples += samples.len();
         self.features.accept_waveform(SAMPLE_RATE_HZ, samples);
         let old_len = self.tokens.len();
         self.decode_ready()?;

@@ -208,6 +208,19 @@ graph TD
     LinuxEP -->|Generic Linux| VulkanLinux["Vulkan Compute + OpenBLAS"]
 ```
 
+### Reproducing the native speech tests
+
+The two reference recordings are test inputs, not dependencies of the app. From the repository root, install them with the same digest checks as the models:
+
+```sh
+python3 scripts/download_models.py --ids voice-test-sensevoice-en voice-test-zipformer-0 silero-vad-v5 \
+  zipformer-en-2023-06-26-encoder-int8 zipformer-en-2023-06-26-decoder \
+  zipformer-en-2023-06-26-joiner-int8 zipformer-en-2023-06-26-tokens
+cargo test --locked --manifest-path engine/core-rs/Cargo.toml -p eon-voice --test asr_e2e --test vad_e2e
+```
+
+The fetcher checks the release archives and the extracted WAV files. These two suites need the native build dependencies, but neither an audio device nor Kokoro or WeSpeaker. They test inference on recorded input, not microphone-to-speaker latency.
+
 ### 7.1 Cross-Platform Acceleration Matrix
 
 | Target Architecture | Neural Subsystem | Primary Hardware Provider | Fallback Provider | Key Compilation Flags / Libraries |

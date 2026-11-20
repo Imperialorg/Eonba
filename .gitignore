@@ -49,6 +49,7 @@ perception/models/
 data/cache/
 *.pcm
 *.wav
+*.wav.part
 
 .z3-trace
 
