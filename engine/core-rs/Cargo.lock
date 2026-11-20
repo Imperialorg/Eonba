@@ -2741,6 +2741,7 @@ dependencies = [
 name = "eon-voice"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "cpal",
  "eon-primitives",
  "kaldi-native-fbank",
@@ -2748,6 +2749,7 @@ dependencies = [
  "rtrb",
  "rubato",
  "serde_json",
+ "sha2 0.10.9",
  "webrtc-audio-processing",
  "webrtc-audio-processing-config",
 ]

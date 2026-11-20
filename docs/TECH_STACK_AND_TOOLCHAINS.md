@@ -197,6 +197,29 @@ cargo test --locked --manifest-path engine/core-rs/Cargo.toml -p eon-mesh \
 
 The fetcher checks the release archives and the extracted WAV files. `onnx-speech` builds Zipformer and Silero without CPAL, WebRTC AEC, ALSA, Kokoro or WeSpeaker. The default `native` feature still includes the full audio stack. The `recorded-speech` CI job shows how to supply a digest-verified ONNX Runtime CPU library on x86-64 Linux. These tests measure inference on recorded input, not microphone-to-speaker latency.
 
+#### Optional Sherpa C++ online recognizer (x86-64 Linux)
+
+The `sherpa-onnx` feature selects Sherpa's **online C ABI** for `ZipformerAsr::load`. It uses the same four `2023-06-26` Zipformer files and `0.wav` installed above. The recognizer checks the hashes from `scripts/models.lock.json` before loading. Keep the local model directory read-only during use. Neither the build script nor the recognizer downloads anything. A C compiler and the following SDK are needed only for this feature.
+
+```sh
+# From the repository root; the SDK lives in the ignored build directory.
+set -e
+sdk=sherpa-onnx-v1.12.20-linux-x64-shared
+dir="$PWD/engine/core-rs/target/sherpa-sdk"
+mkdir -p "$dir"
+curl -fL "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.12.20/$sdk.tar.bz2" -o "$dir/$sdk.tar.bz2"
+(cd "$dir" && echo "13a2c502f5ef373f514a5fc5c5ad03cc0798dcb564a6f8cbd54f8f6ce9e47462  $sdk.tar.bz2" | sha256sum -c -)
+tar -xjf "$dir/$sdk.tar.bz2" -C "$dir" "$sdk/include" "$sdk/lib"
+export SHERPA_ONNX_DIR="$dir/$sdk"
+export LD_LIBRARY_PATH="$SHERPA_ONNX_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+cargo test --locked --manifest-path engine/core-rs/Cargo.toml -p eon-voice \
+  --no-default-features --features sherpa-onnx --test sherpa_e2e
+```
+
+For the in-process comparison, **keep the SDK's own `libonnxruntime.so` beside `libsherpa-onnx-c-api.so`**. Sherpa needs its versioned 1.17.1 symbols. Set `ORT_LIB_PATH` separately to the CI-pinned **1.31.0** CPU runtime directory (including its `libonnxruntime.so` link), `ORT_PREFER_DYNAMIC_LINK=1`, and add `"$ORT_LIB_PATH"` to `LD_LIBRARY_PATH`. Repeat the test command with `--features sherpa-onnx,onnx-speech --test sherpa_e2e --test asr_e2e`; `ZipformerAsr::load_ort` selects the independent direct decoder.
+
+Push normalized 16 kHz mono samples into one `start_utterance()` stream per utterance. Each changed partial contains a replaceable, local intent preview; it cannot end the utterance or authorize an action. `finish()` alone flushes end padding. Dropping the stream discards an unfinished utterance. The tests use 20 ms pushes, not a 20 ms model latency claim.
+
 ### 7.1 Cross-Platform Acceleration Matrix
 
 | Target Architecture | Neural Subsystem | Primary Hardware Provider | Fallback Provider | Key Compilation Flags / Libraries |
@@ -209,3 +232,26 @@ The fetcher checks the release archives and the extracted WAV files. `onnx-speec
 
 ### 7.2 Mobile audio boundary
 The packaged `libeon_uniffi.so` uses the portable voice features. Its test input is one PCM frame supplied by the caller. The acceleration matrix above describes target backends, not a verified Android microphone connection to AAudio, Sherpa or a hardware execution provider.
+
+### Local still-image text grounding (`eon-vision`, opt-in)
+
+The `paddle-ocr` feature runs the PP-OCRv4 detector and recognizer on CPU. `PaddleOcr::from_models` checks the **exact model bytes** and reads the character dictionary from the recognizer. The pins are from the two model entries in the `RECORD` of [RapidOCR's 1.4.4 wheel on PyPI](https://pypi.org/project/rapidocr-onnxruntime/1.4.4/#files). To provision the graphs from the repository root (Bash; no Python package is installed or imported):
+
+```bash
+set -e
+models=perception/models/vision/ppocr-v4
+mkdir -p "$models"
+python3 -m pip download --only-binary=:all: --no-deps --require-hashes --dest "$models" \
+  -r <(echo 'rapidocr-onnxruntime==1.4.4 --hash=sha256:971d7d5f223a7a808662229df1ef69893809d8457d834e6373d3854bc1782cbf')
+unzip -jo "$models/rapidocr_onnxruntime-1.4.4-py3-none-any.whl" \
+  'rapidocr_onnxruntime/models/ch_PP-OCRv4_det_infer.onnx' \
+  'rapidocr_onnxruntime/models/ch_PP-OCRv4_rec_infer.onnx' -d "$models"
+CARGO_BUILD_JOBS=6 cargo test --locked --manifest-path engine/core-rs/Cargo.toml \
+  -p eon-vision --features paddle-ocr
+```
+
+Use the same ONNX Runtime 1.31 CPU library as the native speech tests above (`ORT_LIB_PATH`, `ORT_PREFER_DYNAMIC_LINK=1` and `LD_LIBRARY_PATH` for a pre-provisioned Linux library). After setup, inference needs no network. The feature is off by default.
+
+Call `recognize_jpeg(bytes, budget)` with an authorized still, or on Linux pass the result of `LiveSharedVisualMemory::select(sequence)` to `recognize_selected`. The latter reads only that sealed descriptor and checks the JPEG dimensions against the selected frame. Neither API captures a screen, accepts a JPEG filename, acts on text, or grants access. Results are untrusted horizontal text lines, in reading order, with half-open pixel bounds in the stored raster, not EXIF-rotated display coordinates. A blank image returns an empty list; selectors are never returned. This is not OmniParser widget/icon detection, VLM reasoning, or a click dispatcher.
+
+Each call accepts at most 8 MiB of JPEG, 4,096 pixels per axis and 4,194,304 pixels total. The detector input is at most 960×960; more than 64 text candidates is an error. Recognition runs one crop at a time (at most 960×48). A caller deadline of up to 10 seconds covers the whole frame; ORT cancellation is cooperative and bounded decode/resize steps can finish after the deadline. A timeout does not return a partial page. The real-model tests compare text and all four edges against independently rendered JPEGs and exercise an older sealed selection after its capture history stops.

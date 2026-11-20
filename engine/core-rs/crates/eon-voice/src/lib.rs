@@ -1,7 +1,7 @@
 //! EON Voice Pipeline: frame geometry, endpointing, VAD and ASR inference, and ASR gain control.
 #[cfg(feature = "native")]
 pub mod aec;
-#[cfg(feature = "onnx-speech")]
+#[cfg(any(feature = "onnx-speech", feature = "sherpa-onnx"))]
 pub mod asr;
 pub mod barge_in;
 #[cfg(feature = "native")]
@@ -17,6 +17,7 @@ pub mod features;
 pub mod gain;
 pub mod geometry;
 pub mod linear_echo;
+pub mod pre_cognition;
 pub mod resample;
 pub mod ring;
 #[cfg(feature = "onnx-speech")]

@@ -9,6 +9,7 @@ mod common;
 
 use common::read_pcm16_mono_16k;
 use eon_voice::asr::{MAX_UTTERANCE_SAMPLES, ZipformerAsr};
+use eon_voice::pre_cognition::IntentPreview;
 
 fn model_dir() -> PathBuf {
     if let Ok(path) = std::env::var("EON_ZIPFORMER_DIR") {
@@ -24,7 +25,7 @@ fn load_model() -> ZipformerAsr {
         "missing Zipformer models in {}; run: python3 scripts/download_models.py --ids zipformer-en-2023-06-26-encoder-int8 zipformer-en-2023-06-26-decoder zipformer-en-2023-06-26-joiner-int8 zipformer-en-2023-06-26-tokens",
         dir.display()
     );
-    ZipformerAsr::load(dir).expect("pinned Zipformer models must load")
+    ZipformerAsr::load_ort(dir).expect("pinned Zipformer models must load")
 }
 
 #[test]
@@ -76,13 +77,18 @@ fn released_recording_emits_partials_before_end_of_input() {
     let mut asr = load_model();
     let mut stream = asr.start_utterance().unwrap();
     let mut first_partial = None;
+    let mut first_intent = None;
     for (i, chunk) in samples.chunks(320).enumerate() {
         if let Some(partial) = stream.push(chunk).unwrap() {
             assert!(!partial.text.is_empty());
             first_partial.get_or_insert(i * 320 + chunk.len());
+            if partial.intent == Some(IntentPreview::OpenSpeech) {
+                first_intent.get_or_insert(i * 320 + chunk.len());
+            }
         }
     }
     assert!(first_partial.expect("expected a partial transcript") < samples.len() / 2);
+    assert!(first_intent.expect("expected an open-speech preview") < samples.len() / 2);
     let transcript = stream.finish().unwrap();
     assert_eq!(
         transcript,
