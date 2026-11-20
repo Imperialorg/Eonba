@@ -25,7 +25,11 @@ use crate::{EonError, EonResult};
 #[derive(Debug)]
 pub struct SharedJpeg(File);
 
-#[cfg(any(feature = "paddle-ocr", feature = "omniparser-icons"))]
+#[cfg(any(
+    feature = "paddle-ocr",
+    feature = "omniparser-icons",
+    feature = "qwen-vl"
+))]
 impl SharedJpeg {
     pub(crate) fn read_limited(&self, limit: usize) -> EonResult<Vec<u8>> {
         let failed = |e: std::io::Error| EonError::OperationFailed {

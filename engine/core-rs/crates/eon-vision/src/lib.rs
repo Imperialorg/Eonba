@@ -5,9 +5,15 @@ pub mod keyframes;
 pub mod ocr;
 #[cfg(feature = "omniparser-icons")]
 pub mod omniparser;
+#[cfg(all(target_os = "linux", feature = "qwen-vl"))]
+pub mod qwen_vl;
 #[cfg(target_os = "linux")]
 pub mod shared;
-#[cfg(any(feature = "paddle-ocr", feature = "omniparser-icons"))]
+#[cfg(any(
+    feature = "paddle-ocr",
+    feature = "omniparser-icons",
+    all(target_os = "linux", feature = "qwen-vl")
+))]
 mod still;
 
 pub use eon_primitives::*;

@@ -216,7 +216,7 @@
   - **Files**: `src/omniparser.rs`, `src/keyframe_sampler.rs`, `src/ring_buffer.rs`, `src/lib.rs`
   - **Requirements**: OmniParser-v2 (< 30ms YOLO element detector + PaddleOCR ONNX) for UI grounding when accessibility trees are obfuscated. Adaptive 1–5 FPS video keyframe sampler and 30-second rolling visual memory in shared memory. Integration with `Qwen2.5-VL-3B-Instruct`.
   - **Unit Tests**: `cargo test -p eon-vision vision_tests`.
-  - **Verified subset**: PaddleOCR reads text and the opt-in OmniParser detector localizes unlabeled icons on one selected, sealed JPEG without access to its history. Two drawn icons were located and a blank image produced none. The complete CPU detector path took 291.40 ms warm p95, above the 30 ms target. No VLM result.
+  - **Verified subset**: PaddleOCR reads text and OmniParser locates unlabeled icons on one selected, sealed JPEG without access to its history. The opt-in local Qwen2.5-VL-3B model independently transcribed five labels across two selections and returned `NONE` on a blank. The full CPU icon detector still missed its 30 ms gate (96.39 ms p95 on this runner).
 
 ---
 

@@ -1,8 +1,10 @@
 use std::io::Cursor;
+#[cfg(any(feature = "paddle-ocr", feature = "omniparser-icons"))]
 use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits, RgbImage};
+#[cfg(any(feature = "paddle-ocr", feature = "omniparser-icons"))]
 use ort::session::RunOptions;
 
 use crate::{EonError, EonResult};
@@ -44,7 +46,7 @@ pub(crate) fn check_time(end: Instant) -> EonResult<()> {
     }
 }
 
-fn decode(bytes: &[u8], expected: Option<(u32, u32)>) -> EonResult<RgbImage> {
+pub(crate) fn decode(bytes: &[u8], expected: Option<(u32, u32)>) -> EonResult<RgbImage> {
     if bytes.len() > MAX_JPEG {
         return Err(limited("JPEG bytes", bytes.len() as u64, MAX_JPEG as u64));
     }
@@ -77,6 +79,7 @@ fn decode(bytes: &[u8], expected: Option<(u32, u32)>) -> EonResult<RgbImage> {
 
 /// One budget covers reading (if selected), decoding, preprocessing, all native
 /// runs and postprocessing. ORT termination is cooperative at kernel boundaries.
+#[cfg(any(feature = "paddle-ocr", feature = "omniparser-icons"))]
 pub(crate) fn run<T>(
     bytes: &[u8],
     expected: Option<(u32, u32)>,

@@ -2764,6 +2764,7 @@ version = "0.1.0"
 dependencies = [
  "eon-primitives",
  "image",
+ "llama-cpp-2",
  "ort",
  "rustix 1.1.6",
  "sha2 0.10.9",

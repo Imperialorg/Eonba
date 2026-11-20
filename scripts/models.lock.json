@@ -233,6 +233,24 @@
       "notes": "Opt-in only (not in any profile). Upstream README: icon_detect is AGPL. Pulling it into a distributed build triggers AGPL source obligations."
     },
     {
+      "id": "qwen2.5-vl-3b-instruct-q4_k_m",
+      "dest": "perception/models/vlm/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf",
+      "url": "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/5037fcf163dd95d1e41d1974465f0898ed108ca2/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf",
+      "sha256": "d02fe9b69ad8cadbbd228e387667af66612c44bed29ffc8eb1e7caf9ac486c12",
+      "size_bytes": 1929901056,
+      "license": "Qwen Research License Agreement",
+      "notes": "Opt-in evaluation, not in any hardware profile. ggml-org conversion of Qwen/Qwen2.5-VL-3B-Instruct; use with qwen2.5-vl-3b-mmproj-f16. The original weights' LICENSE is non-commercial research/evaluation, notwithstanding the conversion card's apache-2.0 tag: https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct/blob/66285546d2b821cf421d4f5eb2576359d3770cd3/LICENSE"
+    },
+    {
+      "id": "qwen2.5-vl-3b-mmproj-f16",
+      "dest": "perception/models/vlm/mmproj-Qwen2.5-VL-3B-Instruct-f16.gguf",
+      "url": "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/5037fcf163dd95d1e41d1974465f0898ed108ca2/mmproj-Qwen2.5-VL-3B-Instruct-f16.gguf",
+      "sha256": "b9160fe9d814d1fadf68395677468534778b39ac33c2e7561b7b218626e60d5e",
+      "size_bytes": 1338428128,
+      "license": "Qwen Research License Agreement",
+      "notes": "Matching vision tower/projector from the same ggml-org revision as qwen2.5-vl-3b-instruct-q4_k_m. Same upstream non-commercial research/evaluation restriction; outside hardware profiles."
+    },
+    {
       "id": "omniparser-v2-icon-detect-onnx",
       "dest": "perception/models/vision/omniparser/icon_detect/model.onnx",
       "url": "https://huggingface.co/onnx-community/OmniParser-v2.0_icon_detect/resolve/f0fbccdf5f56c2a689f669b95cb4f67bcf4e12b1/onnx/model.onnx",
