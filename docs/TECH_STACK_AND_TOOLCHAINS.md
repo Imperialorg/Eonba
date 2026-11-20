@@ -149,7 +149,7 @@ JVM tests and `--build-only` do not exercise AndroidKeyStore. A passing emulator
 
 ## 6. Desktop & CLI Workspace (`clients/cli`, `clients/canvas` & `clients/daemon`)
 
-To review a recorded sequence, run `cargo run --locked -p eon-canvas --example scrub -- 1250 a.jpg 1480 b.jpg` in the Rust workspace with your own timestamps (milliseconds) and JPEG files. The slider follows elapsed time, not frame number. Input is limited to 150 frames in a 30-second window, 30 MiB compressed in total, and 4096 pixels per side. The viewer keeps thumbnails up to 256 pixels per side and neither opens a capture device nor writes the source files.
+To review a recorded sequence, run `cargo run --locked -p eon-canvas --example scrub -- 1250 a.jpg 1480 b.jpg` in the Rust workspace with your own timestamps (milliseconds) and JPEG files. The slider follows elapsed time, not frame number. Input is limited to 150 frames in a 30-second window, 30 MiB compressed in total, and 4096 pixels per side. There is also a pixel-area limit before decoding to account for progressive JPEG buffers (1080p fits; 4K does not). The viewer keeps thumbnails up to 256 pixels per side and neither opens a capture device nor writes the source files.
 
 For desktop workstations and servers:
 - **Interactive Terminal**: Authored in Rust using `ratatui` + `crossterm` + `ratatui-image`. Displays live audio wave visualizers, active DAG task graphs, inline terminal graphics (Kitty/Sixel), and interactive slash commands (`/menu`, `/capabilities`, `/cyber`, `/mesh`, `/vision`).
