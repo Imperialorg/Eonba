@@ -11,6 +11,9 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use super::{AppraisalMemory, EmbeddingSpace, RecallHit, database, graph, invalid, validate_key};
 use crate::memory::{Provenance, UntrustedNote};
 
+#[path = "paired_vectors.rs"]
+mod paired_vectors;
+
 const ENTITIES: &str = "knowledge.entities.v2";
 const RELATIONS: &str = "knowledge.relations.v2";
 const FIELD: usize = 128;
@@ -36,8 +39,8 @@ impl PairedGraphMemory {
     /// Projection deletion is logical forgetting, not forensic erasure.
     pub fn open(path: impl AsRef<Path>, document: Provenance, capacity: usize) -> EonResult<Self> {
         validate_key(document.reference(), 192)?;
-        // Zero width marks a lexical-only index. No public EmbeddingSpace can
-        // open this file for appraisal, and a different source cannot replace it.
+        // Zero width reserves this file for the paired projector, even when
+        // a separate local encoder is bound. Appraisal cannot write its notes.
         let space = EmbeddingSpace {
             revision: format!(
                 "paired-graph-v2:{}",

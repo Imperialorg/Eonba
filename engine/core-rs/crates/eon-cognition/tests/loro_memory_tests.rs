@@ -349,3 +349,125 @@ fn sqlite_failure_mid_refresh_rolls_back_bodies_edges_and_fts() {
     assert_eq!(db.recall_references("previous", 1).unwrap(), old);
     assert!(db.recall_references("replacement", 1).unwrap().is_empty());
 }
+
+#[test]
+fn paired_hybrid_recall_fuses_local_vectors_and_survives_reopen() {
+    let file = Fixture::new("hybrid");
+    let doc = LoroDoc::new();
+    entity(&doc, "a", "doc", "invoice invoice invoice");
+    entity(&doc, "b", "doc", "receipt");
+    entity(&doc, "c", "doc", "details of an invoice payment");
+    relation(&doc, "a", "hidden", "absent");
+    let mut buffer = [0; 128];
+    let context = postcard::to_slice(&(2_u8, PRIVATE), &mut buffer).unwrap();
+    doc.get_map("context.entries.v2")
+        .insert("focused", context.to_vec())
+        .unwrap();
+    doc.commit();
+    let frontier = doc.state_frontiers();
+    let mut db = open(file.db(), 4);
+    db.refresh(&doc).unwrap();
+
+    // Controlled encoder outputs exercise the index, not a downloaded model.
+    let space = EmbeddingSpace::new("fixture/model+tokenizer:v1", 2).unwrap();
+    let query = space.quantize(&[1., 0.]).unwrap();
+    let close = space.quantize(&[0.8, 0.6]).unwrap();
+    assert!(db.pending_embeddings(1).is_err());
+    db.bind_embedding_space(space.clone()).unwrap();
+    assert!(db.pending_embeddings(usize::MAX).is_err());
+    assert!(db.pending_embeddings(0).unwrap().is_empty());
+    let batch = db.pending_embeddings(4).unwrap();
+    assert_eq!(batch.len(), 3); // No orphan or private context.
+    assert_eq!(db.pending_embeddings(1).unwrap(), batch[..1]);
+    let semantic = batch.iter().find(|n| n.text() == "receipt").unwrap();
+    let both = batch.iter().find(|n| n.text().contains("payment")).unwrap();
+    let other_body =
+        UntrustedNote::new(both.id(), both.provenance().clone(), "different body").unwrap();
+    assert!(!db.store_embedding(&other_body, &query).unwrap());
+    assert!(db.store_embedding(semantic, &query).unwrap());
+    assert!(db.store_embedding(both, &close).unwrap());
+    assert!(!db.store_embedding(both, &query).unwrap());
+    assert_eq!(db.pending_embeddings(4).unwrap().len(), 1);
+    assert_eq!(
+        db.recall_references("invoice", 1).unwrap()[0].note.text(),
+        "invoice invoice invoice"
+    );
+    assert_eq!(
+        db.recall_with_embedding("", &query, 1).unwrap()[0].note,
+        *semantic
+    );
+    let hits = db.recall_with_embedding("invoice", &query, 1).unwrap();
+    assert_eq!(hits[0].note, *both);
+    assert_eq!(hits[0].note.label(), UntrustedNote::LABEL);
+    assert_eq!(doc.state_frontiers(), frontier);
+
+    drop(db);
+    assert!(AppraisalMemory::open(file.db(), space.clone(), 4).is_err());
+    let mut restored = open(file.db(), 4);
+    assert!(restored.recall_with_embedding("", &query, 1).is_err());
+    for other in [
+        EmbeddingSpace::new("different/model", 2).unwrap(),
+        EmbeddingSpace::new("fixture/model+tokenizer:v1", 3).unwrap(),
+    ] {
+        assert!(restored.bind_embedding_space(other).is_err());
+    }
+    restored.bind_embedding_space(space).unwrap();
+    assert!(!restored.refresh(&doc).unwrap());
+    assert_eq!(
+        restored
+            .recall_with_embedding("invoice", &query, 1)
+            .unwrap(),
+        hits
+    );
+}
+
+#[test]
+fn late_vectors_cannot_resurrect_replaced_or_hidden_paired_evidence() {
+    let file = Fixture::new("late-vector");
+    let doc = LoroDoc::new();
+    entity(&doc, "a", "old-kind", "alpha");
+    entity(&doc, "b", "tool", "beta");
+    relation(&doc, "a", "uses", "b");
+    doc.commit();
+    let mut projector = open(file.db(), 3);
+    projector.refresh(&doc).unwrap();
+
+    let mut db = open(file.db(), 3);
+    let space = EmbeddingSpace::new("fixture/v1", 1).unwrap();
+    let vector = space.quantize(&[1.]).unwrap();
+    db.bind_embedding_space(space).unwrap();
+    let batch = db.pending_embeddings(3).unwrap();
+    assert_eq!(batch.len(), 3);
+    let wrong = EmbeddingSpace::new("fixture/v2", 1)
+        .unwrap()
+        .quantize(&[1.])
+        .unwrap();
+    assert!(db.store_embedding(&batch[0], &wrong).is_err());
+    assert!(db.recall_with_embedding("", &wrong, 1).is_err());
+    for note in &batch {
+        assert!(db.store_embedding(note, &vector).unwrap());
+    }
+    assert_eq!(db.recall_with_embedding("", &vector, 3).unwrap().len(), 3);
+
+    // Same id AND body, different winning register. The old evidence hash
+    // must not match, even though a previous encoder job has the right shape.
+    entity(&doc, "a", "new-kind", "alpha");
+    doc.get_map(ENTITIES).delete("b").unwrap();
+    doc.commit();
+    projector.refresh(&doc).unwrap();
+    for note in &batch {
+        assert!(!db.store_embedding(note, &vector).unwrap());
+    }
+    assert!(db.recall_with_embedding("", &vector, 3).unwrap().is_empty());
+    let pending = db.pending_embeddings(3).unwrap();
+    assert_eq!(pending.len(), 1);
+    let corrected = &pending[0];
+    let previous = batch.iter().find(|n| n.text() == "alpha").unwrap();
+    assert_eq!(corrected.id(), previous.id());
+    assert_ne!(corrected.provenance(), previous.provenance());
+    assert!(db.store_embedding(corrected, &vector).unwrap());
+    assert_eq!(
+        db.recall_with_embedding("", &vector, 1).unwrap()[0].note,
+        *corrected
+    );
+}
