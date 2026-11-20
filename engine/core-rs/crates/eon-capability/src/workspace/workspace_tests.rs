@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
+mod recovery_tests;
+
 struct Fixture(PathBuf);
 
 impl Fixture {

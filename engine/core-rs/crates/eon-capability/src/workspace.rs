@@ -20,6 +20,8 @@ use rustix::fs::{self, AtFlags, Mode, OFlags, ResolveFlags};
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
 
+mod recovery;
+
 pub const MAX_READ_BYTES: usize = 1024 * 1024;
 pub const MAX_EDIT_BYTES: usize = 1024 * 1024;
 const STORE: &str = ".eon-workspace-snapshots";
@@ -174,14 +176,11 @@ impl Workspace {
         // RDWR checks actual write authorization without truncating or writing the inode.
         let (file, before) = self.source(path, OFlags::RDWR)?;
         owned_unshared(&before)?;
-        if before.mode() & 0o7600 != 0o0600 || before.len() > MAX_EDIT_BYTES as u64 {
+        if before.mode() & 0o7600 != 0o0600 {
             return Err(WorkspaceError::Invalid("not an editable workspace file"));
         }
-        let mut preimage = Vec::new();
-        (&file)
-            .take(MAX_EDIT_BYTES as u64 + 1)
-            .read_to_end(&mut preimage)?;
-        if before.len() != preimage.len() as u64 || digest(&preimage) != expected_sha256 {
+        let preimage = read_edit_bytes(&file, &before)?;
+        if digest(&preimage) != expected_sha256 {
             return Err(WorkspaceError::Conflict);
         }
         self.unchanged(path, &before)?;
@@ -193,18 +192,14 @@ impl Workspace {
         let mut stage = PrivateFile::create(&store, "stage")?;
         let owner_mode = Mode::from_bits_truncate(before.mode() & 0o700);
         let stage_version = stage.persist_bytes(replacement, owner_mode)?;
-        let new_digest = Sha256::digest(replacement);
-        let new_sha256: [u8; 32] = new_digest.into();
-        let root_meta = self.root.metadata()?;
-        let record = serde_json::json!({
-            "type": "workspace.edit.prepared.v1",
-            "root_dev": root_meta.dev(),
-            "root_ino": root_meta.ino(),
-            "path_sha256": format!("{:x}", Sha256::digest(path.as_bytes())),
-            "before_sha256": format!("{:x}", Sha256::digest(&preimage)),
-            "after_sha256": format!("{new_digest:x}"),
-            "snapshot_id": snapshot.name,
-        });
+        let new_sha256 = digest(replacement);
+        let record = preparation(
+            &self.root.metadata()?,
+            path,
+            &hex_digest(expected_sha256),
+            new_sha256,
+            &snapshot.name,
+        );
         // A failed journal sync may still have written a frame. Keep its preimage.
         snapshot.remove_on_drop = false;
         let journal_seq =
@@ -275,6 +270,12 @@ impl Workspace {
             Err(Errno::EXIST) => (),
             result => result?,
         }
+        let dir = self.open_snapshot_directory()?;
+        self.root.sync_all()?;
+        Ok(dir)
+    }
+
+    fn open_snapshot_directory(&self) -> Result<File> {
         let dir = beneath(&self.root, STORE, DIR)?;
         let meta = dir.metadata()?;
         owned_unshared(&meta)?;
@@ -283,36 +284,11 @@ impl Workspace {
                 "snapshot directory must be private",
             ));
         }
-        self.root.sync_all()?;
         Ok(dir)
     }
 
-    // O_PATH doesn't invoke special-file open handlers. After checking fstat,
-    // reopen only our live regular-file descriptor via kernel-owned procfs.
     fn source(&self, path: &str, access: OFlags) -> Result<(File, Metadata)> {
-        let pin = beneath(&self.root, path, OFlags::PATH)?;
-        let meta = pin.metadata()?;
-        if !meta.is_file() || meta.nlink() != 1 {
-            return Err(WorkspaceError::Invalid(
-                "source must be a singly linked regular file",
-            ));
-        }
-        self.reject_store_alias(path)?;
-        let procfd = fs::open("/proc/self/fd", DIR, Mode::empty())?;
-        if fs::fstatfs(&procfd)?.f_type != fs::PROC_SUPER_MAGIC {
-            return Err(WorkspaceError::Invalid("procfs required for safe reopen"));
-        }
-        let file: File = fs::openat(
-            procfd,
-            pin.as_raw_fd().to_string(),
-            access | OFlags::CLOEXEC,
-            Mode::empty(),
-        )?
-        .into();
-        if !same_version(&meta, &file.metadata()?) {
-            return Err(WorkspaceError::Conflict);
-        }
-        Ok((file, meta))
+        open_regular_at(&self.root, path, access, |_| self.reject_store_alias(path))
     }
 
     fn unchanged(&self, path: &str, original: &Metadata) -> Result<()> {
@@ -348,6 +324,74 @@ impl Workspace {
 
 fn digest(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
+}
+
+fn hex_digest(sha256: [u8; 32]) -> String {
+    format!("{:x}", sha2::digest::Output::<Sha256>::from(sha256))
+}
+
+fn preparation(
+    root: &Metadata,
+    path: &str,
+    before_hex: &str,
+    after: [u8; 32],
+    snapshot_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "workspace.edit.prepared.v1",
+        "root_dev": root.dev(),
+        "root_ino": root.ino(),
+        "path_sha256": format!("{:x}", Sha256::digest(path.as_bytes())),
+        "before_sha256": before_hex,
+        "after_sha256": hex_digest(after),
+        "snapshot_id": snapshot_id,
+    })
+}
+
+fn read_edit_bytes(file: &File, meta: &Metadata) -> Result<Vec<u8>> {
+    if meta.len() > MAX_EDIT_BYTES as u64 {
+        return Err(WorkspaceError::Invalid("file exceeds edit limit"));
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.take(MAX_EDIT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 != meta.len() {
+        return Err(WorkspaceError::Conflict);
+    }
+    Ok(bytes)
+}
+
+// O_PATH doesn't invoke special-file open handlers. After checking fstat,
+// reopen only our live regular-file descriptor via kernel-owned procfs.
+fn open_regular_at(
+    dir: &File,
+    path: &str,
+    access: OFlags,
+    check: impl FnOnce(&Metadata) -> Result<()>,
+) -> Result<(File, Metadata)> {
+    let pin = beneath(dir, path, OFlags::PATH)?;
+    let meta = pin.metadata()?;
+    if !meta.is_file() || meta.nlink() != 1 {
+        return Err(WorkspaceError::Invalid(
+            "source must be a singly linked regular file",
+        ));
+    }
+    check(&meta)?;
+    let procfd = fs::open("/proc/self/fd", DIR, Mode::empty())?;
+    if fs::fstatfs(&procfd)?.f_type != fs::PROC_SUPER_MAGIC {
+        return Err(WorkspaceError::Invalid("procfs required for safe reopen"));
+    }
+    let file: File = fs::openat(
+        procfd,
+        pin.as_raw_fd().to_string(),
+        access | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?
+    .into();
+    if !same_version(&meta, &file.metadata()?) {
+        return Err(WorkspaceError::Conflict);
+    }
+    Ok((file, meta))
 }
 
 fn beneath(dir: &File, path: &str, flags: OFlags) -> io::Result<File> {
