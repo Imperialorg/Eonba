@@ -2,6 +2,9 @@
 
 use crate::persona::{SpeechAct, format_speech};
 use eon_primitives::{EonError, EonResult};
+use std::time::Instant;
+
+use super::{Route, SpeechBudget};
 
 const OPEN: &[u8] = b"<think>";
 const CLOSE: &[u8] = b"</think>";
@@ -22,22 +25,46 @@ pub struct SpeechRouter {
 
 /// Backend write-only sink. Each call consumes one generated (non-EOG) token,
 /// including hidden and special tokens. Ignoring a rejected write cannot release speech.
-pub struct SpeechTokens {
+pub struct SpeechTokens<'a> {
     router: SpeechRouter,
     remaining_tokens: usize,
     remaining_bytes: usize,
+    route: Route,
+    budget: &'a SpeechBudget,
 }
 
-impl SpeechTokens {
-    pub(super) fn new(act: SpeechAct, max_tokens: usize) -> Self {
+impl<'a> SpeechTokens<'a> {
+    pub(super) fn new(
+        act: SpeechAct,
+        max_tokens: usize,
+        route: Route,
+        budget: &'a SpeechBudget,
+    ) -> Self {
         Self {
             router: SpeechRouter::new(act),
             remaining_tokens: max_tokens,
             remaining_bytes: MAX_TURN_BYTES,
+            route,
+            budget,
         }
     }
 
+    pub fn deadline(&self) -> Instant {
+        self.budget.deadline
+    }
+
+    /// Also available during prompt evaluation, before there are tokens to write.
+    pub fn check_active(&self) -> EonResult<()> {
+        self.budget
+            .check(self.route)
+            .map_err(|why| EonError::OperationFailed {
+                operation: "speech".into(),
+                reason: why.to_string(),
+            })
+    }
+
     pub fn push_token(&mut self, bytes: &[u8]) -> EonResult<()> {
+        self.check_active()?;
         if self.remaining_tokens == 0 || bytes.len() > self.remaining_bytes {
             self.router.failed = true;
             return Err(invalid());

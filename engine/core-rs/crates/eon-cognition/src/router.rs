@@ -5,6 +5,7 @@ mod speech;
 pub use speech::{SpeechRouter, SpeechTokens};
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::persona::{SpeechAct, format_speech};
@@ -13,6 +14,8 @@ use eon_primitives::{EonError, EonResult};
 
 pub const MAX_REQUEST_BYTES: usize = 16 * 1024;
 pub const MAX_OUTPUT_TOKENS: usize = 2048;
+/// Full-turn safety timeout, not a time-to-first-token target.
+pub const DEFAULT_TURN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A final text turn, not speculative ASR or an authorization to act.
 #[derive(Clone, Copy)]
@@ -48,6 +51,8 @@ pub enum RouteError {
     Unavailable(Route),
     BackendFailed(Route),
     InvalidSpeech(Route),
+    Cancelled(Route),
+    DeadlineExceeded(Route),
 }
 
 impl fmt::Display for RouteError {
@@ -57,15 +62,48 @@ impl fmt::Display for RouteError {
             Self::Unavailable(route) => write!(f, "{route:?}: backend unavailable"),
             Self::BackendFailed(route) => write!(f, "{route:?}: generation did not complete"),
             Self::InvalidSpeech(route) => write!(f, "{route:?}: verbal turn rejected"),
+            Self::Cancelled(route) => write!(f, "{route:?}: turn cancelled"),
+            Self::DeadlineExceeded(route) => write!(f, "{route:?}: turn deadline exceeded"),
         }
     }
 }
 
 impl std::error::Error for RouteError {}
 
+/// Host-owned, one-way stop signal and absolute monotonic deadline. Create it
+/// before queuing the turn; another thread can cancel it without waiting for inference.
+pub struct SpeechBudget {
+    deadline: Instant,
+    cancelled: AtomicBool,
+}
+
+impl SpeechBudget {
+    pub fn until(deadline: Instant) -> Self {
+        Self {
+            deadline,
+            cancelled: AtomicBool::new(false),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    fn check(&self, route: Route) -> Result<(), RouteError> {
+        if self.cancelled.load(Ordering::Acquire) {
+            Err(RouteError::Cancelled(route))
+        } else if Instant::now() >= self.deadline {
+            Err(RouteError::DeadlineExceeded(route))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// An already-configured speech generator, not a tool dispatcher. Stream raw
 /// token pieces to `out`; return Ok only after end-of-generation, never on a
-/// timeout, truncation or partial response. Implementations own transport deadlines.
+/// timeout, truncation or partial response. Poll `out.check_active()` between
+/// units of work and cap any blocking I/O at `out.deadline()`.
 pub trait SpeechBackend: Sync {
     fn generate(&self, request: SpeechRequest<'_>, out: &mut SpeechTokens) -> EonResult<()>;
 }
@@ -139,6 +177,7 @@ impl<'a> CognitiveRouter<'a> {
         };
         Ok(SpeechPlan {
             selected,
+            started: start,
             route_elapsed: start.elapsed(),
         })
     }
@@ -190,6 +229,7 @@ impl<'a> Selected<'a> {
 
 pub struct SpeechPlan<'a> {
     selected: Selected<'a>,
+    started: Instant,
     route_elapsed: Duration,
 }
 
@@ -214,14 +254,24 @@ impl SpeechPlan<'_> {
     /// Consumes the plan. At most one backend is called; generation or speech
     /// validation failure is terminal, never a reason to try a remote backend.
     pub fn execute(self) -> Result<RoutedSpeech, RouteError> {
+        let budget = SpeechBudget::until(self.started + DEFAULT_TURN_TIMEOUT);
+        self.execute_with_budget(&budget)
+    }
+
+    /// The caller can set the deadline relative to end-of-utterance and cancel
+    /// on interruption. No worker is detached. A blocking backend may return
+    /// late, but cannot publish its output past the final budget check.
+    pub fn execute_with_budget(self, budget: &SpeechBudget) -> Result<RoutedSpeech, RouteError> {
         let route = self.route();
+        budget.check(route)?;
         let (speech, backend_elapsed) = match self.selected {
             Selected::Reflex(speech) => (speech, None),
             Selected::Model(_, backend, request) => {
-                let mut out = SpeechTokens::new(request.act, request.max_tokens);
+                let mut out = SpeechTokens::new(request.act, request.max_tokens, route, budget);
                 let start = Instant::now();
                 let completion = backend.generate(request, &mut out);
                 let elapsed = start.elapsed();
+                budget.check(route)?;
                 // Adapter diagnostics can contain the prompt or raw completion.
                 completion.map_err(|error| match error {
                     EonError::ValidationError(_) => RouteError::InvalidSpeech(route),
@@ -233,6 +283,7 @@ impl SpeechPlan<'_> {
                 )
             }
         };
+        budget.check(route)?;
         Ok(RoutedSpeech {
             route,
             speech,

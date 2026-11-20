@@ -2,9 +2,11 @@
 //! llama.cpp with greedy decoding.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use eon_cognition::backend::LocalModel;
 use eon_cognition::persona::SpeechAct;
+use eon_cognition::router::{CognitiveRouter, Route, SpeechRequest, Workload};
 
 fn model_path() -> PathBuf {
     if let Ok(path) = std::env::var("EON_QWEN_MODEL") {
@@ -54,7 +56,32 @@ fn qwen_public_speech_uses_the_ciel_contract() {
         "Report: Local tactical backend configured."
     );
     let request = "The battery sensor reads 84 percent. Report this reading.";
-    let speech = model.generate_speech(SpeechAct::Report, request, 96).unwrap();
+    let router = CognitiveRouter {
+        tactical_local: Some(&model),
+        ..Default::default()
+    };
+    let start = Instant::now();
+    let reply = router
+        .plan(
+            SpeechRequest {
+                act: SpeechAct::Report,
+                text: request,
+                max_tokens: 96,
+            },
+            Workload::Interactive,
+        )
+        .unwrap()
+        .execute()
+        .unwrap();
+    let validated = start.elapsed();
+    assert_eq!(reply.route, Route::TacticalLocal);
+    eprintln!(
+        "preloaded local model, one text turn: selection={:?}, backend through EOG={:?}, \
+         request to validated speech={validated:?} (not TTFT or audio latency)",
+        reply.route_elapsed,
+        reply.backend_elapsed.unwrap(),
+    );
+    let speech = reply.speech;
     assert!(speech.starts_with("Report: "));
     assert_eq!(speech.matches("Report:").count(), 1);
     assert!(!speech.contains(['<', '>']));

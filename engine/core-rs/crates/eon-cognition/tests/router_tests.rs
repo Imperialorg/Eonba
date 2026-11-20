@@ -7,7 +7,7 @@ mod router_tests {
     use eon_cognition::profile::ModelProfile;
     use eon_cognition::router::{
         CognitiveRouter, MAX_OUTPUT_TOKENS, MAX_REQUEST_BYTES, Route, RouteError, SpeechBackend,
-        SpeechRequest, SpeechTokens, Workload,
+        SpeechBudget, SpeechRequest, SpeechTokens, Workload,
     };
     use eon_cognition::{EonError, EonResult};
 
@@ -326,6 +326,126 @@ mod router_tests {
                 .unwrap_err(),
             RouteError::InvalidSpeech(Route::TacticalLocal)
         );
+    }
+
+    #[test]
+    fn queued_turn_cannot_speak_or_dispatch_after_stop() {
+        let never_called = Fixture::new(|_| panic!("stopped plan contacted a backend"));
+        let router = CognitiveRouter {
+            tactical_local: Some(&never_called),
+            strategic_remote: Some(&never_called),
+            ..Default::default()
+        };
+        let expired = SpeechBudget::until(Instant::now());
+        let cancelled = SpeechBudget::until(Instant::now() + Duration::from_secs(60));
+        cancelled.cancel();
+        for (budget, expected) in [
+            (
+                &expired,
+                RouteError::DeadlineExceeded as fn(Route) -> RouteError,
+            ),
+            (&cancelled, RouteError::Cancelled),
+        ] {
+            for (text, intent, route) in [
+                ("router status", Workload::Interactive, Route::Reflex),
+                ("readout", Workload::Interactive, Route::TacticalLocal),
+                (
+                    "private",
+                    Workload::StrategicAllowRemote {
+                        approved_text: "approved",
+                    },
+                    Route::StrategicRemote,
+                ),
+            ] {
+                let result = router
+                    .plan(report(text), intent)
+                    .unwrap()
+                    .execute_with_budget(budget);
+                assert_eq!(result.unwrap_err(), expected(route));
+            }
+        }
+        assert_eq!(never_called.count(), 0);
+    }
+
+    #[test]
+    fn cancelling_in_flight_discards_buffered_speech_and_does_not_escalate() {
+        use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+
+        struct Paused {
+            ready: SyncSender<()>,
+            resume: Mutex<Receiver<()>>,
+        }
+        impl SpeechBackend for Paused {
+            fn generate(&self, _: SpeechRequest<'_>, out: &mut SpeechTokens) -> EonResult<()> {
+                public_turn(out)?;
+                self.ready.send(()).unwrap();
+                self.resume
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+                assert!(out.check_active().is_err());
+                assert!(out.push_token(b" More.").is_err());
+                Ok(()) // even a backend ignoring the stop cannot release its buffered answer
+            }
+        }
+        let (ready, entered) = sync_channel(1);
+        let (wake, resume) = sync_channel(1);
+        let local = Paused {
+            ready,
+            resume: Mutex::new(resume),
+        };
+        let remote = Fixture::new(|_| panic!("cancelled local turn escalated"));
+        let router = CognitiveRouter {
+            strategic_local: Some(&local),
+            strategic_remote: Some(&remote),
+            ..Default::default()
+        };
+        let plan = router
+            .plan(
+                report("private"),
+                Workload::StrategicAllowRemote {
+                    approved_text: "approved",
+                },
+            )
+            .unwrap();
+        let budget = SpeechBudget::until(Instant::now() + Duration::from_secs(60));
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| plan.execute_with_budget(&budget));
+            entered.recv_timeout(Duration::from_secs(5)).unwrap();
+            budget.cancel();
+            wake.send(()).unwrap();
+            assert_eq!(
+                worker.join().unwrap().unwrap_err(),
+                RouteError::Cancelled(Route::StrategicLocal)
+            );
+        });
+        assert_eq!(remote.count(), 0);
+    }
+
+    #[test]
+    fn late_success_with_no_more_writes_cannot_release_an_answer() {
+        let local = Fixture::new(|out| {
+            out.push_token(b"Report: A complete public answer.")?;
+            // Model a blocking EOG/transport operation that doesn't poll the sink.
+            std::thread::sleep(
+                out.deadline().saturating_duration_since(Instant::now()) + Duration::from_millis(1),
+            );
+            Ok(())
+        });
+        let router = CognitiveRouter {
+            tactical_local: Some(&local),
+            ..Default::default()
+        };
+        let plan = router
+            .plan(report("readout"), Workload::Interactive)
+            .unwrap();
+        let budget = SpeechBudget::until(Instant::now() + Duration::from_millis(100));
+        assert_eq!(
+            plan.execute_with_budget(&budget).unwrap_err(),
+            RouteError::DeadlineExceeded(Route::TacticalLocal)
+        );
+        assert_eq!(local.count(), 1);
     }
 
     #[test]

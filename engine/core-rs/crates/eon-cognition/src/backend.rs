@@ -6,6 +6,7 @@
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use eon_primitives::{EonError, EonResult};
 use llama_cpp_2::context::params::LlamaContextParams;
@@ -18,10 +19,14 @@ use llama_cpp_2::token::LlamaToken;
 use crate::persona::SpeechAct;
 use crate::prompts::{QWEN_VOICE_REPLY, qwen_voice_header};
 use crate::router::{
-    CognitiveRouter, RouteError, SpeechBackend, SpeechRequest, SpeechTokens, Workload,
+    CognitiveRouter, DEFAULT_TURN_TIMEOUT, RouteError, SpeechBackend, SpeechBudget, SpeechRequest,
+    SpeechTokens, Workload,
 };
 
 const CONTEXT_TOKENS: u32 = 2048;
+// The safe binding does not interrupt an in-flight llama_decode. Do not hand it
+// the whole voice prompt in one uninterruptible call.
+const SPEECH_PREFILL_BATCH: usize = 32;
 
 /// llama.cpp allows one backend initialization per process, so every model shares this one.
 fn shared_backend() -> EonResult<&'static LlamaBackend> {
@@ -89,13 +94,24 @@ impl LocalModel {
         request: &str,
         max_tokens: usize,
     ) -> EonResult<String> {
+        let budget = SpeechBudget::until(Instant::now() + DEFAULT_TURN_TIMEOUT);
+        self.generate_speech_with_budget(act, request, max_tokens, &budget)
+    }
+
+    pub fn generate_speech_with_budget(
+        &self,
+        act: SpeechAct,
+        request: &str,
+        max_tokens: usize,
+        budget: &SpeechBudget,
+    ) -> EonResult<String> {
         let router = CognitiveRouter {
             tactical_local: Some(self),
             ..Default::default()
         };
         let request = SpeechRequest { act, text: request, max_tokens };
         router.plan(request, Workload::Interactive)
-            .and_then(|plan| plan.execute())
+            .and_then(|plan| plan.execute_with_budget(budget))
             .map(|reply| reply.speech)
             .map_err(|error| match error {
                 RouteError::InvalidRequest | RouteError::InvalidSpeech(_) => {
@@ -115,6 +131,7 @@ impl LocalModel {
                 "unsupported model for Qwen3.5 speech template".into(),
             ));
         }
+        out.check_active()?;
         let vocab = self.model.vocab();
         let mut tokens = vocab.tokenize(qwen_voice_header(request.act).as_bytes(), true, true);
         tokens.extend(vocab.tokenize(request.text.as_bytes(), false, false));
@@ -125,8 +142,16 @@ impl LocalModel {
                 "invalid speech generation token budget".into(),
             ));
         }
+        out.check_active()?;
         let mut ctx = self.new_context()?;
-        let logits = Self::decode_from(&mut ctx, &tokens, 0)?;
+        let logits = Self::decode_checked(
+            &tokens,
+            0,
+            SPEECH_PREFILL_BATCH,
+            || out.check_active(),
+            |batch| ctx.decode(batch).map_err(|e| llm_err("decode", e)),
+        )?;
+        out.check_active()?;
         let complete = self.sample_into(
             &mut ctx,
             LlamaSampler::greedy(),
@@ -166,15 +191,39 @@ impl LocalModel {
         tokens: &[llama_cpp_2::token::LlamaToken],
         from: usize,
     ) -> EonResult<i32> {
+        Self::decode_checked(
+            tokens,
+            from,
+            tokens.len(),
+            || Ok(()),
+            |batch| ctx.decode(batch).map_err(|e| llm_err("decode", e)),
+        )
+    }
+
+    fn decode_checked(
+        tokens: &[LlamaToken],
+        from: usize,
+        batch_size: usize,
+        mut check: impl FnMut() -> EonResult<()>,
+        mut submit: impl FnMut(&mut LlamaBatch<'_>) -> EonResult<()>,
+    ) -> EonResult<i32> {
         if from >= tokens.len() {
             return Err(EonError::ValidationError("at least one token must follow the cached prefix".into()));
         }
-        let mut batch = LlamaBatch::new(tokens.len() - from, 1);
+        let mut batch = LlamaBatch::new(batch_size.min(tokens.len() - from), 1);
         let last = tokens.len() - 1;
-        for (i, token) in tokens.iter().enumerate().skip(from) {
-            batch.add(*token, i as i32, &[0], i == last).map_err(|e| llm_err("batch", e))?;
+        for (chunk, pieces) in tokens[from..].chunks(batch_size).enumerate() {
+            check()?;
+            batch.clear();
+            let start = from + chunk * batch_size;
+            for (offset, token) in pieces.iter().enumerate() {
+                let i = start + offset;
+                batch
+                    .add(*token, i as i32, &[0], i == last)
+                    .map_err(|e| llm_err("batch", e))?;
+            }
+            submit(&mut batch)?;
         }
-        ctx.decode(&mut batch).map_err(|e| llm_err("decode", e))?;
         Ok(batch.n_tokens() - 1)
     }
 
@@ -282,5 +331,51 @@ impl LocalModel {
 impl SpeechBackend for LocalModel {
     fn generate(&self, request: SpeechRequest<'_>, out: &mut SpeechTokens) -> EonResult<()> {
         self.stream_speech(request, out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    // Exercise native batch construction and the prefill stop points, not inference.
+    #[test]
+    fn speech_prefill_checks_before_each_bounded_batch() {
+        let tokens = vec![LlamaToken(0); 2 * SPEECH_PREFILL_BATCH + 3];
+        let mut lengths = Vec::new();
+        let logits = LocalModel::decode_checked(
+            &tokens,
+            0,
+            SPEECH_PREFILL_BATCH,
+            || Ok(()),
+            |b| {
+                lengths.push(b.n_tokens());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(lengths, [32, 32, 3]);
+        assert_eq!(logits, 2, "index must be relative to the final batch");
+
+        let submitted = Cell::new(0);
+        let stopped = LocalModel::decode_checked(
+            &tokens,
+            0,
+            SPEECH_PREFILL_BATCH,
+            || {
+                if submitted.get() == 0 {
+                    Ok(())
+                } else {
+                    Err(llm_err("test", "stopped"))
+                }
+            },
+            |_| {
+                submitted.set(submitted.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(stopped.is_err());
+        assert_eq!(submitted.get(), 1);
     }
 }
