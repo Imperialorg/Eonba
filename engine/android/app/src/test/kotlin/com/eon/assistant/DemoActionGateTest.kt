@@ -31,7 +31,8 @@ class DemoActionGateTest {
         var onCheck: () -> Unit = {}
         var onDispatch: () -> Boolean = { true }
         var updateState = true
-        val gate = DemoActionGate(count, samples, { slot ->
+        val gate = DemoActionGate(count, samples, { action ->
+            val slot = if (action == DemoAction.CLICK_COUNTER) 0 else 1
             reads.add(slot)
             root.children.getOrNull(slot)
         }, { node, action ->

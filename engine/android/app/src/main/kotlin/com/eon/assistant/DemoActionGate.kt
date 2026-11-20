@@ -12,7 +12,7 @@ internal data class DemoOffer(val route: DemoRoute, val before: Int, val maxDelt
 internal class DemoActionGate<N : Any>(
     private val counter: N,
     private val samples: N,
-    private val childAt: (Int) -> N?,
+    private val findControl: (DemoAction) -> N?,
     private val offer: (N, DemoAction) -> DemoOffer?,
     private val scope: () -> DemoScope?,
     private val now: () -> Long,
@@ -31,8 +31,8 @@ internal class DemoActionGate<N : Any>(
     fun cancel() { current = null; generation++ }
 
     private fun resolve(action: DemoAction): N? = when (action) {
-        DemoAction.CLICK_COUNTER -> childAt(0)?.takeIf { it === counter }
-        DemoAction.SCROLL_SAMPLES_FORWARD -> childAt(1)?.takeIf { it === samples }
+        DemoAction.CLICK_COUNTER -> findControl(action)?.takeIf { it === counter }
+        DemoAction.SCROLL_SAMPLES_FORWARD -> findControl(action)?.takeIf { it === samples }
     }
 
     fun review(action: DemoAction): Review? {

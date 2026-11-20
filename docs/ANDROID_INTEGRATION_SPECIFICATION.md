@@ -58,6 +58,21 @@ its accessibility service and shortcut. Leave the device unlocked and the test A
 uninstalled. Neither gate sets roles or enables services. They are separate tests:
 passing the clean-device denial gate is not evidence that the allowed gate ran.
 
+On the API 35 Google APIs image, Android reported that EON's assigned accessibility
+button was not *shown*. That does not mean the user revoked the shortcut. For this
+private demo only, check the exact component in the current user's
+`accessibility_button_targets`, the enabled service's button flag and the existing
+role, lock and window checks. If Android does not expose the setting, refuse the
+action. A change to the assignment invalidates pending review. The shortcut inspector
+itself remains read-only.
+
+Lookup starts at the private sample group's `AccessibilityNodeInfo` and matches the
+window, package, resource ID and class of each expected child, not its position in
+the view list. It does not enumerate other windows. Two fresh API 35 AVDs passed
+`demo=PASS-allowed` and `demo=PASS-denied` with the same signed APK: cancel left
+the counter at 0, the native click produced 1, the local fallback produced 2, and
+both scroll routes advanced the rendered list by at most one viewport.
+
 ---
 
 ## 2. Android Manifest & Permissions (`AndroidManifest.xml`)

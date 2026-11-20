@@ -2,12 +2,14 @@ package com.eon.assistant
 
 import android.app.Activity
 import android.app.KeyguardManager
+import android.database.ContentObserver
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
@@ -34,6 +36,10 @@ class DemoActionActivity : Activity() {
     private val expire = Runnable { clearReview("Review expired. No action was taken.") }
     private var observation: Runnable? = null
     private var resumed = false
+    private var observingShortcut = false
+    private val shortcutChanges = object : ContentObserver(handler) {
+        override fun onChange(selfChange: Boolean) = clearReview("Shortcut changed. No action is approved.")
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -73,7 +79,7 @@ class DemoActionActivity : Activity() {
         targets.addView(counter)
         targets.addView(samples, -1, dp(104))
         column.addView(targets)
-        gate = DemoActionGate<View>(counter, samples, targets::getChildAt, ::offer,
+        gate = DemoActionGate<View>(counter, samples, { DemoNodeLookup.findView(targets, it) }, ::offer,
             ::liveScope, SystemClock::elapsedRealtime, ::readValue, ::dispatch)
         controls.addView(sampleModeButton())
         controls.addView(reviewButton(R.id.demo_review_click, "Review counter click", DemoAction.CLICK_COUNTER))
@@ -151,7 +157,7 @@ class DemoActionActivity : Activity() {
         if (!resumed || isFinishing || isDestroyed || !hasWindowFocus() || isInMultiWindowMode ||
             isInPictureInPictureMode || !targets.isAttachedToWindow || targets.rootView !== window.decorView ||
             !targets.isShown || getSystemService(KeyguardManager::class.java)?.isDeviceLocked != false ||
-            !InspectionAccess.eligible(this)) return null
+            !observingShortcut || !DemoShortcut.eligible(this)) return null
         return DemoScope(InspectionAccess.environmentEpoch, window.decorView.windowToken ?: return null)
     }
 
@@ -160,7 +166,8 @@ class DemoActionActivity : Activity() {
     private fun safeNode(view: View): AccessibilityNodeInfo? {
         if (view.context !== this || view.parent !== targets || view.windowToken !== window.decorView.windowToken ||
             !view.isAttachedToWindow || !view.isShown || !view.isEnabled || view.isAccessibilityDataSensitive) return null
-        return view.createAccessibilityNodeInfo()?.takeIf { node ->
+        val action = if (view === counter) DemoAction.CLICK_COUNTER else DemoAction.SCROLL_SAMPLES_FORWARD
+        return DemoNodeLookup.find(targets, action)?.takeIf { it.first === view }?.second?.takeIf { node ->
             node.packageName == packageName && node.isVisibleToUser && node.isEnabled &&
                 !node.isAccessibilityDataSensitive && !node.isPassword && !node.isEditable && node.inputType == 0
         }
@@ -299,13 +306,26 @@ class DemoActionActivity : Activity() {
         if (observation != null) clearReview("Verification interrupted. No retry or approval remains.")
     }
 
-    override fun onResume() { super.onResume(); resumed = true }
+    override fun onResume() {
+        super.onResume()
+        resumed = true
+        try {
+            contentResolver.registerContentObserver(Settings.Secure.getUriFor(DemoShortcut.SETTING), false, shortcutChanges)
+            observingShortcut = true
+        } catch (_: SecurityException) {
+            observingShortcut = false
+        }
+    }
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (!hasFocus) clearReview("Review cleared. No action is approved.")
     }
     override fun onPause() {
         resumed = false
+        if (observingShortcut) {
+            contentResolver.unregisterContentObserver(shortcutChanges)
+            observingShortcut = false
+        }
         clearReview("Review cleared. No action is approved.")
         super.onPause()
     }

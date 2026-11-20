@@ -89,7 +89,7 @@ public final class DemoActionAcceptance extends Instrumentation {
             if ("denied".equals(mode)) {
                 step = "authority-denied";
                 main(() -> {
-                    check(!InspectionAccess.INSTANCE.eligible(activity));
+                    check(!DemoShortcut.INSTANCE.eligible(activity));
                     for (int i = 0; i < 2; i++) {
                         if (i == 1) tap(R.id.demo_sample_mode);
                         for (int review : new int[]{R.id.demo_review_click, R.id.demo_review_scroll}) {
@@ -114,12 +114,27 @@ public final class DemoActionAcceptance extends Instrumentation {
                 await(() -> visibleOffset() != null && visibleOffset() > 0);
                 main(() -> {
                     samples().getChildAt(0).setVisibility(View.INVISIBLE);
-                    check(visibleOffset() == null && !reviewing() && !InspectionAccess.INSTANCE.eligible(activity));
+                    check(visibleOffset() == null && !reviewing() && !DemoShortcut.INSTANCE.eligible(activity));
+                    return null;
+                });
+                step = "local-node-discovery";
+                main(() -> {
+                    // This is a read-only test on the demo's own two widgets, not an action grant.
+                    ScrollView scroll = samples();
+                    Button counter = button(R.id.demo_counter);
+                    LinearLayout group = (LinearLayout) counter.getParent();
+                    group.removeView(counter);
+                    group.addView(counter); // counter is now last; neither lookup may rely on a slot.
+                    check(DemoNodeLookup.INSTANCE.findView(group, DemoAction.CLICK_COUNTER) == counter);
+                    check(DemoNodeLookup.INSTANCE.findView(group, DemoAction.SCROLL_SAMPLES_FORWARD) == scroll);
+                    scroll.setId(R.id.demo_counter); // mismatched class/ambiguous ID
+                    check(DemoNodeLookup.INSTANCE.findView(group, DemoAction.CLICK_COUNTER) == null);
+                    scroll.setId(R.id.demo_samples);
                     return null;
                 });
             } else {
                 step = "operator-prerequisites";
-                await(() -> InspectionAccess.INSTANCE.eligible(activity));
+                await(() -> DemoShortcut.INSTANCE.eligible(activity));
                 step = "cancel-and-click";
                 main(() -> {
                     tap(R.id.demo_review_click);

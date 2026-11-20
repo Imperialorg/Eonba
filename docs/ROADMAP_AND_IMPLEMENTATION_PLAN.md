@@ -304,7 +304,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/main/kotlin/com/eon/android/accessibility/EonAccessibilityService.kt`, `ScreenInspector.kt`
   - **Requirements**: Traverses active `AccessibilityNodeInfo` hierarchy, finds target buttons/inputs, executes clicks/scrolls, provides coordinate fallback.
   - **Unit Tests**: Android test harness with simulated UI hierarchies.
-  - **Verified subset**: A private EON demo can review one counter click or list scroll, use a local hit test if the native action is absent, and check the resulting change. It never retries an attempted action or dispatches gestures outside the activity. The clean API 35 denied scenario passed. On a user-configured AVD the sample's widgets visibly moved, but the foreground demo reported unavailable before confirmation despite the selected role, bound service and assigned shortcut. Neither native nor fallback dispatch passed on device.
+  - **Device evidence**: A private EON demo locates its own counter and sample list by accessible resource ID, class and window rather than child order. On separate API 35 AVDs, the same signed APK passed the denied scenario and the operator-approved native and fallback click/scroll scenario. Cancellation produced no change. No foreign windows, arbitrary text access or global gestures.
 
 - [ ] **Task 9.4: Persistent Overlay HUD & Visualizer**
   - **Directory**: `clients/android/overlay/`
