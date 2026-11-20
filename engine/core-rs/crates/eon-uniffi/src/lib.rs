@@ -1,10 +1,16 @@
 //! Permissionless, in-process mobile decision surface. No capture, capability registry or journal handle.
 
 use eon_cognition::profile::ModelProfile;
-use eon_primitives::{MonotonicInstant, TaskId, id::generate_ulid_string};
+use eon_primitives::{
+    ClaimId, ExecutionId, IdentityId, LeaseId, MacroId, MonotonicInstant, ObjectiveId, QueryId,
+    SessionId, TaskId, WorkflowId, id::generate_ulid_string,
+};
 use eon_voice::endpoint::{Completeness as VoiceCompleteness, silence_threshold_ms};
 use eon_voice::{gain::PcmGainController, geometry::VAD_FRAME_SAMPLES};
 use std::sync::OnceLock;
+
+mod dag;
+pub use dag::{DagNode, validate_task_dag};
 
 uniffi::include_scaffolding!("eon_core");
 
@@ -64,7 +70,16 @@ pub fn endpoint_silence_ms(completeness: Completeness) -> u32 {
 pub fn generate_ulid(prefix: String) -> Result<String, BridgeError> {
     if !matches!(
         prefix.as_str(),
-        "obj" | "task" | "wf" | "lease" | "id" | "exec" | "claim" | "sess" | "query" | "macro"
+        ObjectiveId::PREFIX
+            | TaskId::PREFIX
+            | WorkflowId::PREFIX
+            | LeaseId::PREFIX
+            | IdentityId::PREFIX
+            | ExecutionId::PREFIX
+            | ClaimId::PREFIX
+            | SessionId::PREFIX
+            | QueryId::PREFIX
+            | MacroId::PREFIX
     ) {
         return Err(invalid("unknown kernel ID prefix"));
     }
@@ -123,32 +138,48 @@ pub fn execute_task_sync(
     operation: String,
     parameters_json: String,
 ) -> Result<TaskResultDto, BridgeError> {
-    if capability != "diagnostics" || operation != "select_model_profile" {
-        return Err(BridgeError::UnsupportedTask {
-            reason: "only diagnostics/select_model_profile is available".into(),
-        });
-    }
-    task_id
-        .parse::<TaskId>()
-        .map_err(|_| invalid("invalid task ID"))?;
-    if parameters_json.len() > 1024 {
-        return Err(invalid("diagnostic input exceeds 1024 bytes"));
-    }
-    let params: serde_json::Value =
-        serde_json::from_str(&parameters_json).map_err(|_| invalid("invalid parameters JSON"))?;
-    let memory = params
-        .as_object()
-        .filter(|o| o.len() == 1)
-        .and_then(|o| o.get("memory_gb"))
-        .and_then(|x| x.as_f64())
-        .ok_or_else(|| invalid("expected {\"memory_gb\": <number>}"))?;
-    let profile = select_model_profile(memory)?;
+    let task_id = TaskId::from_raw(task_id).map_err(|_| invalid("invalid task ID"))?;
+    let outcome = match (capability.as_str(), operation.as_str()) {
+        ("diagnostics", "select_model_profile") => {
+            let memory = diagnostic_parameter(&parameters_json, "memory_gb")?
+                .as_f64()
+                .ok_or_else(|| invalid("expected numeric memory_gb"))?;
+            serde_json::json!({"profile": select_model_profile(memory)?})
+        }
+        ("diagnostics", "endpoint_silence_ms") => {
+            let tier = match diagnostic_parameter(&parameters_json, "completeness")?.as_str() {
+                Some("complete") => Completeness::Complete,
+                Some("ambiguous") => Completeness::Ambiguous,
+                Some("incomplete") => Completeness::Incomplete,
+                _ => return Err(invalid("expected a lowercase completeness tier")),
+            };
+            serde_json::json!({"silence_ms": endpoint_silence_ms(tier)})
+        }
+        _ => {
+            return Err(BridgeError::UnsupportedTask {
+                reason: "unsupported read-only diagnostic".into(),
+            });
+        }
+    };
     Ok(TaskResultDto {
-        task_id,
+        task_id: task_id.to_string(),
         status: "completed".into(),
-        outcome_json: serde_json::json!({"profile": profile}).to_string(),
+        outcome_json: outcome.to_string(),
         error_code: None,
     })
+}
+
+fn diagnostic_parameter(input: &str, name: &str) -> Result<serde_json::Value, BridgeError> {
+    if input.len() > 1024 {
+        return Err(invalid("diagnostic input exceeds 1024 bytes"));
+    }
+    let mut params: serde_json::Value =
+        serde_json::from_str(input).map_err(|_| invalid("invalid parameters JSON"))?;
+    params
+        .as_object_mut()
+        .filter(|o| o.len() == 1)
+        .and_then(|o| o.remove(name))
+        .ok_or_else(|| invalid(format!("expected only {name}")))
 }
 
 #[cfg(test)]
@@ -189,6 +220,8 @@ mod codegen_tests {
     fn test_frame_is_bounded_and_limited() {
         assert!(inject_audio_pcm_for_testing(vec![]).is_err());
         assert!(inject_audio_pcm_for_testing(vec![0; VAD_FRAME_SAMPLES + 1]).is_err());
+        let silence = inject_audio_pcm_for_testing(vec![0; VAD_FRAME_SAMPLES]).unwrap();
+        assert_eq!(silence.output_peak, 0.0);
         let probe = inject_audio_pcm_for_testing(vec![i16::MIN; VAD_FRAME_SAMPLES]).unwrap();
         assert_eq!(probe.sample_count, 512);
         assert!((probe.output_peak - 0.95).abs() < 1e-6);
@@ -213,10 +246,45 @@ mod codegen_tests {
         ] {
             assert!(run("select_model_profile", bad).is_err());
         }
+        assert!(matches!(
+            execute_task_sync(
+                WorkflowId::new().to_string(),
+                "diagnostics".into(),
+                "select_model_profile".into(),
+                r#"{"memory_gb":8}"#.into()
+            ),
+            Err(BridgeError::InvalidInput { .. })
+        ));
         let result = run("select_model_profile", r#"{"memory_gb":16}"#).unwrap();
         assert_eq!(result.task_id, id);
         assert_eq!(result.status, "completed");
         assert_eq!(result.outcome_json, r#"{"profile":"p3_workstation_heavy"}"#);
         assert!(result.error_code.is_none());
+        assert_eq!(
+            run("endpoint_silence_ms", r#"{"completeness":"ambiguous"}"#)
+                .unwrap()
+                .outcome_json,
+            r#"{"silence_ms":800}"#
+        );
+        for bad in [
+            r#"{"completeness":"unknown"}"#,
+            r#"{"memory_gb":4}"#,
+            r#"{"completeness":"complete","command":"other"}"#,
+            &" ".repeat(1025),
+        ] {
+            assert!(matches!(
+                run("endpoint_silence_ms", bad),
+                Err(BridgeError::InvalidInput { .. })
+            ));
+        }
+        assert!(matches!(
+            execute_task_sync(
+                id,
+                "workspace.read@v1".into(),
+                "read_range".into(),
+                "{}".into()
+            ),
+            Err(BridgeError::UnsupportedTask { .. })
+        ));
     }
 }

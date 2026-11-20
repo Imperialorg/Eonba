@@ -7,16 +7,27 @@ namespace eon_uniffi {
     string generate_ulid(string prefix);
     i64 get_monotonic_time_nanos();
 
+    // Structural validation only. Returns dependency-first task IDs without dispatching anything.
+    // Up to 256 nodes and 4096 dependency entries; input order is immaterial.
+    [Throws=BridgeError]
+    sequence<string> validate_task_dag(sequence<DagNode> tasks);
+
     // Processes one caller-supplied synthetic VAD frame; never opens an audio device.
     [Throws=BridgeError]
     PcmProbe inject_audio_pcm_for_testing(sequence<i16> samples);
 
-    // Only the side-effect-free diagnostics operations implemented by this build.
+    // Only capability "diagnostics": select_model_profile({"memory_gb": number}) or
+    // endpoint_silence_ms({"completeness": "complete" | "ambiguous" | "incomplete"}).
     [Throws=BridgeError]
     TaskResultDto execute_task_sync(string task_id, string capability, string operation, string parameters_json);
 };
 
 enum Completeness { "Complete", "Ambiguous", "Incomplete" };
+
+dictionary DagNode {
+    string task_id;
+    sequence<string> dependencies;
+};
 
 [Error]
 interface BridgeError {

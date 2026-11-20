@@ -1,11 +1,13 @@
 import uniffi.eon_uniffi.BridgeException
 import uniffi.eon_uniffi.Completeness
+import uniffi.eon_uniffi.DagNode
 import uniffi.eon_uniffi.endpointSilenceMs
 import uniffi.eon_uniffi.executeTaskSync
 import uniffi.eon_uniffi.generateUlid
 import uniffi.eon_uniffi.getMonotonicTimeNanos
 import uniffi.eon_uniffi.injectAudioPcmForTesting
 import uniffi.eon_uniffi.selectModelProfile
+import uniffi.eon_uniffi.validateTaskDag
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -52,6 +54,16 @@ class EonBindingsTest {
     }
 
     @Test
+    fun dagValidationReturnsDependencyOrderNotSubmissionOrder() {
+        val child = generateUlid("task")
+        val root = generateUlid("task")
+        val node = DagNode(child, listOf(root))
+        assertEquals(listOf(root, child), validateTaskDag(listOf(node, DagNode(root, emptyList()))))
+        assertFailsWith<BridgeException.InvalidInput> { validateTaskDag(listOf(node)) }
+        assertFailsWith<BridgeException.InvalidInput> { validateTaskDag(listOf(node, DagNode(root, listOf(child)))) }
+    }
+
+    @Test
     fun onlyReadOnlyDiagnosticTasksExecute() {
         val id = generateUlid("task")
         val operation = "select_model_profile"
@@ -63,5 +75,7 @@ class EonBindingsTest {
         assertEquals(null, result.errorCode)
         assertFailsWith<BridgeException.InvalidInput> { executeTaskSync(id, "diagnostics", operation, "[]") }
         assertFailsWith<BridgeException.UnsupportedTask> { executeTaskSync(id, "shell", operation, params) }
+        val timing = executeTaskSync(id, "diagnostics", "endpoint_silence_ms", """{"completeness":"complete"}""")
+        assertEquals("""{"silence_ms":300}""", timing.outcomeJson)
     }
 }

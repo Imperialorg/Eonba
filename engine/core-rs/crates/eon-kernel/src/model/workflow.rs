@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 
-use eon_primitives::{EonError, EonResult, ObjectiveId, TaskId, WorkflowId};
+use eon_primitives::{
+    EonError, EonResult, ObjectiveId, TaskId, WorkflowId, dag::topological_order,
+};
 use serde::{Deserialize, Serialize, Serializer};
 
 use super::Task;
-use crate::workflow::topological_order;
 
 /// A validated submission. On the wire, tasks are a sequence in ID order:
 /// each node declares its own ID, and duplicate nodes cannot be lost to map decoding.

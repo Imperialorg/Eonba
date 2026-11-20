@@ -15,6 +15,13 @@ func smoke() throws {
     let id = try generateUlid(prefix: "task")
     let next = try generateUlid(prefix: "task")
     precondition(id.hasPrefix("task_") && id.count == 31 && id < next)
+    let order = try validateTaskDag(tasks: [DagNode(taskId: id, dependencies: [next]),
+                                             DagNode(taskId: next, dependencies: [])])
+    precondition(order == [next, id])
+    do {
+        _ = try validateTaskDag(tasks: [DagNode(taskId: id, dependencies: [next])])
+        fatalError("accepted unknown dependency")
+    } catch BridgeError.InvalidInput(_) {}
     let before = getMonotonicTimeNanos()
     precondition(getMonotonicTimeNanos() >= before)
     let probe = try injectAudioPcmForTesting(samples: Array(repeating: Int16.min, count: 512))
@@ -27,6 +34,9 @@ func smoke() throws {
                                      parametersJson: #"{"memory_gb":12}"#)
     precondition(result.taskId == id && result.status == "completed" && result.errorCode == nil)
     precondition(result.outcomeJson == #"{"profile":"p2_workstation_16g"}"#)
+    let timing = try executeTaskSync(taskId: id, capability: "diagnostics", operation: "endpoint_silence_ms",
+                                     parametersJson: #"{"completeness":"ambiguous"}"#)
+    precondition(timing.outcomeJson == #"{"silence_ms":800}"#)
     do {
         _ = try executeTaskSync(taskId: id, capability: "shell", operation: "run", parametersJson: "{}")
         fatalError("accepted an unknown capability")
@@ -34,4 +44,4 @@ func smoke() throws {
 }
 
 try smoke()
-print("eon-uniffi Swift smoke: all six generated functions OK")
+print("eon-uniffi Swift smoke: OK")

@@ -2,6 +2,7 @@
 
 import argparse
 from pathlib import Path
+import re
 import subprocess
 from zipfile import ZipFile
 
@@ -24,12 +25,22 @@ def main():
         return {name: (destination / name).read_bytes() for name in files}
 
     expected = generate("host", args.host)
+    # Bindgen reads metadata; it doesn't check that the corresponding call targets are exported.
+    functions = set(re.findall(rb"\b(uniffi_eon_uniffi_(?:fn|checksum)_func_\w+)\(",
+                               expected["eon_uniffiFFI.h"]))
+    if not functions:
+        raise ValueError("no UniFFI functions in generated host header")
     with ZipFile(args.apk) as apk:
         for abi in ("arm64-v8a", "armeabi-v7a", "x86_64"):
             library = args.out / abi / "libeon_uniffi.so"
             library.parent.mkdir(parents=True, exist_ok=True)
             library.write_bytes(apk.read(f"lib/{abi}/{library.name}"))
             try:
+                symbols = subprocess.check_output(["readelf", "--dyn-syms", "-W", library])
+                exports = {fields[-1] for line in symbols.splitlines() if len(fields := line.split()) >= 8
+                           and fields[3:5] == [b"FUNC", b"GLOBAL"] and fields[6] != b"UND"}
+                if missing := functions - exports:
+                    raise ValueError(f"{abi}: missing generated function exports {sorted(missing)}")
                 actual = generate(abi, library)
                 for name in expected:
                     if actual[name] != expected[name]:
