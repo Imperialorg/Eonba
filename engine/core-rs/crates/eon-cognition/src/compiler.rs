@@ -8,17 +8,29 @@
 //! `read file` requests the first 4096 bytes; `at offset` defaults to zero.
 //! Unrecognized input is never forwarded to an inference engine, shell or tool.
 
+#[cfg(target_os = "linux")]
+mod candidates;
 mod preview;
+#[cfg(target_os = "linux")]
+mod snapshot;
+#[cfg(target_os = "linux")]
+mod workspace;
 
 use eon_kernel::model::{Objective, Task, TaskSpec, TaskType, Workflow};
 use eon_kernel::resource::{CanonicalResourceKey, Demand, Requirement, ResourceRank};
 use eon_primitives::{EonError, EonResult, TaskId, WorkflowId};
 use serde_json::json;
 
+#[cfg(target_os = "linux")]
+pub use candidates::{CandidateDecision, CandidatePreview, preview_candidates};
 pub use preview::{
     Attention, CONFIRMATION_WINDOW, Confirmation, ConfirmedPreview, Decision, ShadowRead,
     StagedPreview,
 };
+#[cfg(target_os = "linux")]
+pub use snapshot::ReadSnapshot;
+#[cfg(target_os = "linux")]
+pub use workspace::ReadWorkspace;
 
 pub const MAX_INTENT_BYTES: usize = 2048;
 pub const MAX_READS: usize = 8;
@@ -49,12 +61,18 @@ impl CompiledObjective {
 /// Compile the whole objective or reject it. No partial plan escapes, even if a
 /// later clause is unsupported. Only IDs are freshly allocated on each submission.
 pub fn compile(objective: &Objective) -> EonResult<CompiledObjective> {
-    let intent = &objective.description;
+    compile_words(objective, &intent_words(&objective.description)?)
+}
+
+fn intent_words(intent: &str) -> EonResult<Vec<&str>> {
     if intent.len() > MAX_INTENT_BYTES || !intent.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
     {
         return Err(invalid("expected a bounded single-line ASCII intent"));
     }
-    let words: Vec<_> = intent.split_ascii_whitespace().collect();
+    Ok(intent.split_ascii_whitespace().collect())
+}
+
+fn compile_words(objective: &Objective, words: &[&str]) -> EonResult<CompiledObjective> {
     let mut reads = Vec::new();
     let mut tasks = Vec::new();
     let workflow_id = WorkflowId::new();
@@ -130,8 +148,10 @@ fn parse_read(words: &[&str]) -> EonResult<ReadRequest> {
     };
     // Keep the emitted relative path unambiguous on Unix and Windows. No dot
     // components, hidden files, device names, escape sequences or URI schemes.
-    if path.len() > 240 || !path.split('/').all(valid_component) {
-        return Err(invalid("expected a portable relative workspace file path"));
+    if !public_path(path) {
+        return Err(invalid(
+            "expected a non-protected relative workspace file path",
+        ));
     }
     Ok(ReadRequest {
         task_id: TaskId::new(),
@@ -139,6 +159,47 @@ fn parse_read(words: &[&str]) -> EonResult<ReadRequest> {
         offset,
         length,
     })
+}
+
+fn public_path(path: &str) -> bool {
+    path.len() <= 240
+        && path
+            .split('/')
+            .all(|c| valid_component(c) && !protected_name(c))
+}
+
+// Defense in depth, not a way to classify arbitrary contents as non-secret.
+// The filesystem entry point also requires independent, exact host approval.
+fn protected_name(component: &str) -> bool {
+    let name = component.to_ascii_lowercase();
+    name.starts_with('.')
+        || name.ends_with(".git")
+        || name.starts_with("id_rsa")
+        || name.starts_with("id_dsa")
+        || name.starts_with("id_ecdsa")
+        || name.starts_with("id_ed25519")
+        || name.starts_with("ssh_host_")
+        || name.split(['.', '-', '_']).any(|part| {
+            matches!(
+                part,
+                "env"
+                    | "credential"
+                    | "credentials"
+                    | "secret"
+                    | "secrets"
+                    | "password"
+                    | "passwd"
+                    | "token"
+                    | "tokens"
+                    | "key"
+                    | "pem"
+                    | "p12"
+                    | "pfx"
+                    | "keystore"
+                    | "jks"
+                    | "netrc"
+            )
+        })
 }
 
 fn valid_component(s: &str) -> bool {

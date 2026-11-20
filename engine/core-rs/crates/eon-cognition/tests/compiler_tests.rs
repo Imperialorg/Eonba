@@ -1,4 +1,7 @@
 mod compiler_tests {
+    #[cfg(target_os = "linux")]
+    mod filesystem;
+
     use std::path::Path;
 
     use eon_cognition::compiler::{

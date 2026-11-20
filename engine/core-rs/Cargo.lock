@@ -2445,11 +2445,16 @@ dependencies = [
 name = "eon-cognition"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "eon-capability",
  "eon-kernel",
  "eon-primitives",
  "llama-cpp-2",
+ "loro",
+ "memmap2",
+ "postcard",
  "rusqlite",
+ "rustix 1.1.6",
  "serde_json",
 ]
 

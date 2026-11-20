@@ -63,14 +63,19 @@ impl CompiledObjective {
                 request,
             });
         }
-        Ok(StagedPreview(ConfirmedPreview {
-            workflow: self.workflow,
-            reads,
-        }))
+        Ok(StagedPreview::new(self.workflow, reads))
     }
 }
 
 impl StagedPreview {
+    pub(super) fn new(workflow: Workflow, reads: Vec<ShadowRead>) -> Self {
+        Self(ConfirmedPreview { workflow, reads })
+    }
+
+    pub(super) fn into_confirmed(self) -> ConfirmedPreview {
+        self.0
+    }
+
     /// Operation summaries for the UI; neither file bytes nor a submittable workflow.
     pub fn requests(&self) -> impl Iterator<Item = &ReadRequest> {
         self.0.reads.iter().map(|read| &read.request)
@@ -79,24 +84,29 @@ impl StagedPreview {
     /// Start a single window when the trusted UI actually presents the proposal.
     /// Drop any outstanding window on attention loss or withdrawal of the proposal.
     pub fn present(self, attention: Attention) -> EonResult<Confirmation> {
-        verify_attention(attention)?;
-        Ok(Confirmation {
-            preview: self,
-            presented_at: Instant::now(),
-        })
+        Confirmation::start(self, attention)
     }
 }
 
 // Neither the window nor the staged plan can be cloned or deserialized.
-pub struct Confirmation {
-    preview: StagedPreview,
+pub struct Confirmation<T = StagedPreview> {
+    preview: T,
     presented_at: Instant,
 }
 
-impl Confirmation {
-    /// Dropping or declining the window releases nothing. Both fresh attention and
-    /// affirmative consent are required strictly before expiry. No timer activates work.
-    pub fn respond(self, decision: Decision, attention: Attention) -> EonResult<ConfirmedPreview> {
+impl<T> Confirmation<T> {
+    pub(super) fn start(preview: T, attention: Attention) -> EonResult<Self> {
+        verify_attention(attention)?;
+        Ok(Self {
+            preview,
+            presented_at: Instant::now(),
+        })
+    }
+
+    /// Withdraw this presentation (e.g. on focus loss). It cannot be resumed.
+    pub fn cancel(self) {}
+
+    pub(super) fn approve(self, decision: Decision, attention: Attention) -> EonResult<T> {
         verify_attention(attention)?;
         if decision != Decision::Confirm {
             return Err(EonError::SecurityViolation(
@@ -108,7 +118,15 @@ impl Confirmation {
                 "confirmation window expired".into(),
             ));
         }
-        Ok(self.preview.0)
+        Ok(self.preview)
+    }
+}
+
+impl Confirmation {
+    /// Dropping or declining the window releases nothing. Both fresh attention and
+    /// affirmative consent are required strictly before expiry. No timer activates work.
+    pub fn respond(self, decision: Decision, attention: Attention) -> EonResult<ConfirmedPreview> {
+        Ok(self.approve(decision, attention)?.into_confirmed())
     }
 }
 

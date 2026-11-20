@@ -18,6 +18,8 @@ mod graph;
 mod hybrid;
 #[cfg(feature = "sqlite-memory")]
 pub use hybrid::{AppraisalMemory, Embedding, EmbeddingSpace, RecallHit};
+#[cfg(feature = "loro-memory")]
+pub use hybrid::PairedGraphMemory;
 
 pub const RRF_K: f64 = 60.0;
 

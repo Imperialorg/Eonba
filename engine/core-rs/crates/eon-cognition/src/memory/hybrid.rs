@@ -9,6 +9,12 @@ use super::{
     graph, reciprocal_rank_fusion,
 };
 
+#[cfg(feature = "loro-memory")]
+#[path = "loro_graph.rs"]
+mod loro_graph;
+#[cfg(feature = "loro-memory")]
+pub use loro_graph::PairedGraphMemory;
+
 /// A model/tokenizer revision and its output width. Equal widths alone do not
 /// make embeddings from different models comparable.
 #[derive(Clone, Debug, PartialEq, Eq)]
