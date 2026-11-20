@@ -56,8 +56,6 @@ impl PeerNode {
     ) -> EonResult<(Self, SocketAddrV4)> {
         let builder = Endpoint::builder(Minimal)
             .clear_ip_transports()
-            .portmapper_config(PortmapperConfig::Disabled)
-            .net_report_config(NetReportConfig::minimal())
             .bind_addr_with_opts(
                 (local.ip, 0),
                 BindOpts::default().set_prefix_len(local.prefixlen).set_is_default_route(false),
@@ -72,7 +70,11 @@ impl PeerNode {
     }
 
     async fn bind(builder: Builder, alpn: &[u8], secret: Option<SecretKey>, paired: Option<EndpointId>) -> EonResult<Self> {
-        let mut builder = builder.alpns(vec![alpn.to_vec()]).relay_mode(RelayMode::Disabled);
+        let mut builder = builder
+            .alpns(vec![alpn.to_vec()])
+            .relay_mode(RelayMode::Disabled)
+            .portmapper_config(PortmapperConfig::Disabled)
+            .net_report_config(NetReportConfig::minimal());
         if let Some(secret) = secret {
             builder = builder.secret_key(secret);
         }
@@ -204,7 +206,7 @@ impl PeerNode {
 /// An established connection to one peer. Audio frames go out as datagrams, so a frame that cannot be delivered in
 /// time is dropped rather than retransmitted.
 pub struct Link {
-    connection: Connection,
+    pub(crate) connection: Connection,
 }
 
 impl Link {

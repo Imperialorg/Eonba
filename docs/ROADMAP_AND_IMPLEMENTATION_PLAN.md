@@ -57,7 +57,7 @@
   - **Files**: `src/identity.rs`, `src/permissions.rs`, `src/credentials.rs`, `src/scrubber.rs`
   - **Requirements**: Ownership identities (System, User, EphemeralAgent). Permission bitflags (`READ_WORKSPACE`, `MUTATE_WORKSPACE`, `EXECUTE_PROCESS`, `CYBER_OPERATIONS`, `NETWORK_ACCESS`, `DEVICE_CONTROL`, `SPAWN_SUBAGENT`). Opaque credential handles (`secret://<vault_key>`) with late-binding memory resolution from hardware OS enclaves (Android Keystore, Windows DPAPI, Linux Keyring). In-flight `JournalScrubber` redacting tokens and high-entropy strings ($\mathcal{H} > 4.5$) before journal disk commitment.
   - **Journal verification**: `cargo test --locked -p eon-foundation` checks the stored frame and its replay for recognized credential fixtures, including unlabelled high-entropy hex. This does not guarantee detection of arbitrary secrets.
-  - **Platform status**: CI explicitly selects the native Linux keyring teardown test, the Windows DPAPI tests and an Android 35 emulator test. The Android test must decrypt a public fixture after force-stop with the original key, reject the old inspection handle and redeem a fresh one. The Android app does not provide a general Rust credential sink. An APK build does not verify the device tests, and an emulator does not attest physical hardware.
+  - **Platform status**: The Linux native keyring test passed. The Android Rust broker retains owner-scoped encrypted entries and binds only to child stdin through a dedicated AndroidKeyStore alias, separate from inspection grants. Signed debug APKs and three ABI builds passed. CI selects the Windows DPAPI tests, the two-phase Android inspection test and the native vault instrumentation. Native Windows and device execution remain unverified; an emulator does not attest physical hardware.
 
 ---
 
@@ -125,7 +125,7 @@
   - **Files**: `src/providers/workspace.rs`, `src/providers/process.rs`, `src/providers/pty.rs`
   - **Requirements**: Range reads, atomic temp-file writes, SHA-256 digest validation, pre-write journal snapshots. Persistent bidirectional PTY session multiplexer (`portable-pty`) exposing `process.pty_open`, `process.pty_write`, `process.pty_read_ring`, and `process.pty_signal` with in-memory 10,000-line circular ring buffer and 300s idle watchdog.
   - **Unit Tests**: `cargo test -p eon-capability workspace_tests`, `process_tests`, `pty_tests`.
-  - **Verified subset**: Linux has workflow-owned PTY sessions with bounded reads, writes, signals, and idle cleanup. The single allowed program is a confined byte loopback, not a command interpreter. Workspace writes retain private file preimages, not directory snapshots.
+  - **Verified subset**: Linux has workflow-owned PTYs with bounded reads, writes, signals and idle cleanup. Host-approved operations can transform or count supplied bytes without exposing a shell, caller-controlled arguments or file operands. This is a devpts backend, not a cross-platform `portable-pty` provider. Workspace writes retain private file preimages, not directory snapshots.
 
 - [x] **Task 4.3: Network & Web Research Providers**
   - **Crate**: `eon-capability`
@@ -191,12 +191,12 @@
   - **Unit Tests**: `cargo test -p eon-cognition appraisal_tests`.
   - **Verified on Linux**: The opt-in `bge-memory` backend tokenizes and embeds visible Loro records using the pinned local BGE model. After reopening SQLite, a query retrieved a related note with no shared keywords. Selecting a current note compacted the bounded working ledger. A correction invalidated the old hit and its late embedding without writing either back into the paired document.
 
-- [ ] **Task 6.3: Objective Workflow Compiler & Speculative Shadow Sandbox**
+- [x] **Task 6.3: Objective Workflow Compiler & Speculative Shadow Sandbox**
   - **Crate**: `eon-cognition`
   - **Files**: `src/compiler.rs`, `src/shadow_sandbox.rs`
   - **Requirements**: Translates natural language intent into verified `Workflow` DAGs. Spawns CoW shadow worktrees for ambiguous goals with attention-gated 5-second NACK confirmation.
   - **Unit Tests**: `cargo test -p eon-cognition compiler_tests`.
-  - **Verified subset**: On Linux, two approved read ranges, or two variants of one range, can have isolated copy-on-write edits. The host can stage one bounded literal overwrite per alternative. Presentation freezes both; only an explicit selection with fresh attention within five seconds releases the chosen bytes. There is no workspace writeback, arbitrary goal compilation or executable working directory.
+  - **Verified backend**: The Linux compiler accepts bounded read intents and materializes ambiguous alternatives as private copy-on-write worktrees containing only the authorized file ranges. Presentation freezes them. Only an explicit selection with fresh attention in the original five-second window exports the chosen read-only directory interface and validated DAG. No shell, arbitrary goal execution or source writeback. The ext4 test exercised the copy-on-first-write fallback, not successful reflinking.
 
 - [x] **Task 6.4: Ciel Persona & Verbal Output Formatter**
   - **Crate**: `eon-cognition`
@@ -269,6 +269,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/transport/iroh_node.rs`, `src/transport/qos_lanes.rs`
   - **Requirements**: `iroh` integration for Ed25519 node addressing, zero-config STUN hole-punching and DERP relay routing across 5G/Wi-Fi roaming. 4-class QUIC QoS prioritization using RFC 9221 datagrams for Class 0 voice/barge-in (< 5ms) and reliable streams for Class 1/2/3. Wire serialization via `proto/eon.proto`.
   - **Unit Tests**: `cargo test -p eon-mesh iroh_and_qos_tests`.
+  - **Verified subset**: A private relay carried all four traffic classes between mutually pinned peers, including audio, an epoch event, a Loro delta and verified bulk chunks. Relay counters confirmed actual transit. There was no public discovery, STUN, external TLS relay test or carrier roaming measurement.
 
 ---
 
@@ -314,7 +315,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/main.rs`, `src/ui.rs`, `src/terminal.rs`, `clients/canvas/src/main.rs`
   - **Requirements**: Interactive console interface with welcome panel, status dock, live slash commands (`/menu`, `/capabilities`, `/cyber`, `/mesh`, `/vision`), Tab completion, and live audio visualizer. Terminal graphics via `ratatui-image` (Kitty/Sixel). Graphical canvas for live AST diffs, reverse engineering CFGs, and video scrubbing (`wgpu` / Compose).
   - **Unit Tests**: `cargo test -p eon-cli terminal_tests`.
-  - **Verified subset**: Build `eon-cli` with `--features audio-input`, run `eon watch <journal-dir>`, open `/audio` and press `m`. The peak meter uses the default input only while enabled in that view. It keeps at most 48 level readings and no PCM. A dedicated Linux virtual input delivered a known half-scale tone; no physical microphone, terminal image protocol or live mesh feed was tested.
+  - **Verified subset**: Build `eon-cli` with `--features audio-input`, run `eon watch <journal-dir>`, open `/audio` and press F2. Pasted text cannot start capture. F2, `/`, leaving the view or quitting stops it. The meter keeps at most 48 peak readings and no PCM. A dedicated Linux null-sink monitor delivered a 50% peak; its recording stream disappeared on `/` before the process exited. This test did not use a physical microphone.
 
 - [ ] **Task 10.2: Sub-170ms Time-To-First-Audio (TTFA) Benchmark**
   - **Directory**: `tests/latency-benchmarks/`

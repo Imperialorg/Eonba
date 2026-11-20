@@ -9,5 +9,6 @@ pub mod qos;
 pub mod split_inference;
 pub mod sync;
 pub mod transport;
+pub mod wan;
 
 pub use eon_primitives::*;
