@@ -125,6 +125,18 @@ jobs:
             zipformer-en-2023-06-26-{encoder-int8,decoder,joiner-int8,tokens}
       - run: cargo test --locked -p eon-voice --no-default-features --features onnx-speech --test asr_e2e --test vad_e2e
       - run: cargo test --locked -p eon-mesh --features native-zipformer --test split_zipformer
+      - name: Compare native Sherpa and direct ONNX partials on the same recorded speech
+        shell: bash
+        run: |
+          dir="$(mktemp -d "$RUNNER_TEMP/sherpa.XXXXXXXX")"
+          sdk=sherpa-onnx-v1.12.20-linux-x64-shared
+          curl --fail --location --silent --show-error --max-time 180 \
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.12.20/$sdk.tar.bz2" -o "$dir/sdk.tar.bz2"
+          (cd "$dir" && echo '13a2c502f5ef373f514a5fc5c5ad03cc0798dcb564a6f8cbd54f8f6ce9e47462  sdk.tar.bz2' | sha256sum --check)
+          tar -xjf "$dir/sdk.tar.bz2" -C "$dir" "$sdk/include" "$sdk/lib"
+          export SHERPA_ONNX_DIR="$dir/$sdk"
+          export LD_LIBRARY_PATH="$ORT_LIB_PATH:$SHERPA_ONNX_DIR/lib"
+          cargo test --locked -p eon-voice --no-default-features --features sherpa-onnx,onnx-speech --test sherpa_e2e
 
   windows-credentials:
     runs-on: windows-latest
@@ -136,7 +148,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: cargo test --locked -p eon-foundation --lib windows_dpapi
+      - name: Require both native DPAPI tests to execute
+        shell: bash
+        run: |
+          cargo test --locked -p eon-foundation --lib windows_dpapi -- --color never | tr -d '\r' | tee dpapi-result.txt
+          for case_name in windows_dpapi_owner_grants_and_child_stdin windows_dpapi_broker_lifetime_and_invalid_ciphertext; do
+            grep -Fx "test credentials::platform::identity_and_credential_tests::$case_name ... ok" dpapi-result.txt
+          done
 
   wasm-containment:
     runs-on: ubuntu-latest
