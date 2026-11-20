@@ -2,6 +2,8 @@ use eon_primitives::EonResult;
 use rusqlite::{TransactionBehavior, params};
 
 use super::{AppraisalMemory, EmbeddingSpace, PairedGraphMemory, RecallHit, UntrustedNote};
+#[cfg(feature = "bge-memory")]
+use crate::memory::{BgeMicroV2, hybrid::literal_fts_query};
 use crate::memory::{
     appraisal::invalid,
     graph,
@@ -105,5 +107,55 @@ impl PairedGraphMemory {
         limit: usize,
     ) -> EonResult<Vec<RecallHit>> {
         self.index.recall_references(text, Some(vector), limit)
+    }
+}
+
+#[cfg(feature = "bge-memory")]
+impl PairedGraphMemory {
+    fn use_bge(&mut self, model: &BgeMicroV2) -> EonResult<()> {
+        if self.index.space != *model.space() {
+            self.bind_embedding_space(model.space().clone())?;
+        }
+        Ok(())
+    }
+
+    /// Encode at most `limit` pending graph rows, outside any DB transaction.
+    /// Returns rows actually installed; racing edits/completions can reduce
+    /// this count. Earlier successes remain committed if a later row fails.
+    pub fn index_bge(&mut self, model: &mut BgeMicroV2, limit: usize) -> EonResult<usize> {
+        if limit > AppraisalMemory::MAX_RESULTS {
+            return Err(invalid("memory result limit exceeded"));
+        }
+        if limit == 0 {
+            return Ok(0);
+        }
+        self.use_bge(model)?;
+        let notes = self.pending_embeddings(limit)?;
+        let mut stored = 0;
+        for note in notes {
+            let vector = model.embed(note.text())?;
+            stored += usize::from(self.store_embedding(&note, &vector)?);
+        }
+        Ok(stored)
+    }
+
+    /// Encode a local query and fuse its positive cosine hits with BM25 in
+    /// the same SQLite snapshot. Neither query nor hits enter working context.
+    pub fn recall_bge(
+        &mut self,
+        model: &mut BgeMicroV2,
+        text: &str,
+        limit: usize,
+    ) -> EonResult<Vec<RecallHit>> {
+        let query = literal_fts_query(text)?;
+        if limit > AppraisalMemory::MAX_RESULTS {
+            return Err(invalid("memory result limit exceeded"));
+        }
+        if limit == 0 || text.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        self.use_bge(model)?;
+        let vector = model.embed(text)?;
+        self.index.recall_ranked(query, Some(&vector), limit)
     }
 }

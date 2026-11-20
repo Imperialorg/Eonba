@@ -471,3 +471,124 @@ fn late_vectors_cannot_resurrect_replaced_or_hidden_paired_evidence() {
         *corrected
     );
 }
+
+#[cfg(feature = "bge-memory")]
+#[test]
+fn released_bge_indexes_reopens_and_recalls_without_keyword_overlap() {
+    use eon_cognition::memory::{BgeMicroV2, WorkingForm, WorkingLedger};
+
+    let dir = std::env::var_os("EON_BGE_MODEL_DIR").map_or_else(
+        || {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../../perception/models/embeddings/bge-micro-v2")
+        },
+        PathBuf::from,
+    );
+    let mut model = BgeMicroV2::load(dir).expect("install the pinned BGE graph and tokenizer");
+    let file = Fixture::new("bge");
+    let doc = LoroDoc::new();
+    let manual = "Repairing a car engine at the garage. ".repeat(140);
+    entity(&doc, "a", "manual", &manual);
+    entity(&doc, "b", "recipe", "Baking sourdough bread in a hot oven.");
+    relation(&doc, "a", "mentions", "b");
+    relation(&doc, "a", "hidden", "absent");
+    doc.get_map("context.entries.v2")
+        .insert("focused", PRIVATE)
+        .unwrap();
+    doc.commit();
+    let frontier = doc.state_frontiers();
+    let mut projector = open(file.db(), 4);
+    projector.refresh(&doc).unwrap();
+    let mut db = open(file.db(), 4);
+    assert!(
+        db.index_bge(&mut model, AppraisalMemory::MAX_RESULTS + 1)
+            .is_err()
+    );
+    assert_eq!(db.index_bge(&mut model, 1).unwrap(), 1);
+    assert_eq!(db.index_bge(&mut model, 4).unwrap(), 2);
+    assert_eq!(db.index_bge(&mut model, 4).unwrap(), 0);
+    assert_eq!(doc.state_frontiers(), frontier);
+    let disk = Connection::open(file.db()).unwrap();
+    assert_eq!(
+        disk.query_row::<usize, _, _>(
+            "SELECT count(*) FROM memory_v1_notes WHERE length(vector)=384",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        3
+    );
+
+    let query = "automobile maintenance";
+    assert!(db.recall_references(query, 4).unwrap().is_empty());
+    let best = db.recall_bge(&mut model, query, 1).unwrap();
+    assert_eq!(best[0].note.text(), manual);
+    assert_eq!(best[0].note.label(), UntrustedNote::LABEL);
+    drop(db);
+    let mut db = open(file.db(), 4);
+    assert!(
+        db.bind_embedding_space(EmbeddingSpace::new("some-other-384d-model", 384).unwrap())
+            .is_err()
+    );
+    assert_eq!(db.recall_bge(&mut model, query, 1).unwrap(), best);
+    let mut ledger = WorkingLedger::default();
+    assert!(db.observe_current(&mut ledger, 5, &best[0].note).unwrap());
+    {
+        let mut entries = ledger.references(5).unwrap();
+        let selected = entries.next().unwrap();
+        assert_eq!(selected.form(), WorkingForm::Excerpt);
+        assert_eq!(selected.note().provenance(), best[0].note.provenance());
+        assert!(entries.next().is_none());
+    }
+
+    // Same body but new evidence on a second SQLite connection. Neither a
+    // late ONNX completion nor an old hit offered to the ledger may win.
+    let late = model.embed(&manual).unwrap();
+    entity(&doc, "a", "new-kind", &manual);
+    doc.commit();
+    assert!(projector.refresh(&doc).unwrap());
+    assert!(!db.store_embedding(&best[0].note, &late).unwrap());
+    assert!(!db.observe_current(&mut ledger, 6, &best[0].note).unwrap());
+    assert_eq!(db.pending_embeddings(4).unwrap().len(), 1);
+    assert_eq!(db.index_bge(&mut model, 4).unwrap(), 1);
+    let current = db.recall_bge(&mut model, query, 1).unwrap();
+    assert_ne!(best[0].note.provenance(), current[0].note.provenance());
+    assert!(
+        db.observe_current(&mut ledger, 7, &current[0].note)
+            .unwrap()
+    );
+    assert_eq!(ledger.references(7).unwrap().count(), 1);
+    assert_eq!(
+        ledger
+            .references(7 + WorkingLedger::WINDOW_MS)
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[cfg(feature = "bge-memory")]
+#[test]
+fn absent_or_tampered_bge_artifacts_fail_closed() {
+    use eon_cognition::memory::BgeMicroV2;
+    let empty = Fixture::new("bad-bge");
+    assert!(
+        BgeMicroV2::load(&empty.0)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("missing")
+    );
+    // Correct length is not sufficient. No unverified JSON enters the tokenizer.
+    std::fs::File::create(empty.0.join("tokenizer.json"))
+        .unwrap()
+        .set_len(711_661)
+        .unwrap();
+    assert!(
+        BgeMicroV2::load(&empty.0)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("digest mismatch")
+    );
+}

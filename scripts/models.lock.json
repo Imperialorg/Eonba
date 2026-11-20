@@ -45,6 +45,24 @@
   },
   "models": [
     {
+      "id": "bge-micro-v2-int8",
+      "dest": "perception/models/embeddings/bge-micro-v2/model_quantized.onnx",
+      "url": "https://huggingface.co/TaylorAI/bge-micro-v2/resolve/3edf6d7de0faa426b09780416fe61009f26ae589/onnx/model_quantized.onnx",
+      "sha256": "ed65e36025aa94cb74207dab863c85452919ec0ab7df3512092932aa22c9a33a",
+      "size_bytes": 17409774,
+      "license": "MIT",
+      "notes": "Also verified byte-for-byte in the public tomlm/LottaDB test-assets-v1 release, bge-micro-v2.tar.gz (SHA256 132204045640c19ca555942dcaf82687dbf1cf8b38e1038121d2b6add76ec6e2). Opt-in; not included in hardware profiles."
+    },
+    {
+      "id": "bge-micro-v2-tokenizer",
+      "dest": "perception/models/embeddings/bge-micro-v2/tokenizer.json",
+      "url": "https://huggingface.co/TaylorAI/bge-micro-v2/resolve/3edf6d7de0faa426b09780416fe61009f26ae589/tokenizer.json",
+      "sha256": "cb374d6bc042c22455946f4e09a89d29882a199fdaf8fb25be00dc8b8857a448",
+      "size_bytes": 711661,
+      "license": "MIT",
+      "notes": "Complete tokenizer pipeline for bge-micro-v2-int8; also verified in the same test-assets-v1 release."
+    },
+    {
       "id": "zipformer-en-2023-06-26-encoder-int8",
       "dest": "perception/models/asr/encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
       "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",

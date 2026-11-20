@@ -12,6 +12,10 @@ pub use appraisal::{
     Provenance, ReferenceKind, TaskDiagnostic, UntrustedNote, WorkingEntry, WorkingForm, WorkingLedger,
 };
 
+#[cfg(feature = "bge-memory")]
+mod bge;
+#[cfg(feature = "bge-memory")]
+pub use bge::BgeMicroV2;
 #[cfg(feature = "sqlite-memory")]
 mod graph;
 #[cfg(feature = "sqlite-memory")]

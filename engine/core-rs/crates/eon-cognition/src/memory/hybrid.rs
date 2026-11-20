@@ -333,6 +333,15 @@ impl AppraisalMemory {
         limit: usize,
     ) -> EonResult<Vec<RecallHit>> {
         let query = literal_fts_query(text)?;
+        self.recall_ranked(query, vector, limit)
+    }
+
+    fn recall_ranked(
+        &mut self,
+        query: String,
+        vector: Option<&Embedding>,
+        limit: usize,
+    ) -> EonResult<Vec<RecallHit>> {
         check_space(&self.space, vector)?;
         if limit > Self::MAX_RESULTS {
             return Err(invalid("memory result limit exceeded"));

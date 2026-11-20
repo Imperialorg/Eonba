@@ -184,12 +184,12 @@
   - **Requirements**: Route latency < 20ms for Tier 0 reflex, < 120ms for Tier 1 local SLM. Dual-stream split: silent `<think>...</think>` scratchpad routed to HUD/CLI, post-`</think>` tokens to TTS.
   - **Unit Tests**: `cargo test -p eon-cognition router_tests`.
 
-- [ ] **Task 6.2: Appraisal Engine & Hybrid Cognitive Memory**
+- [x] **Task 6.2: Appraisal Engine & Hybrid Cognitive Memory**
   - **Crate**: `eon-cognition`
   - **Files**: `src/appraisal.rs`, `src/context_ledger.rs`, `src/graph_memory.rs`, `src/vector_store.rs`
   - **Requirements**: Working Context Ledger (bounded to 4k tokens with auto-compactor), Loro CRDT source-of-truth projected into local SQLite entity/relation tables, local vector embedding search (`bge-micro-v2` ONNX).
   - **Unit Tests**: `cargo test -p eon-cognition appraisal_tests`.
-  - **Verified subset**: A local encoder can attach vectors to visible Loro graph records without writing to the paired document or working context. Hybrid recall combines these vectors with lexical matches; corrections and deletions reject late encoder results. The index tests use controlled vectors, not BGE inference.
+  - **Verified on Linux**: The opt-in `bge-memory` backend tokenizes and embeds visible Loro records using the pinned local BGE model. After reopening SQLite, a query retrieved a related note with no shared keywords. Selecting a current note compacted the bounded working ledger. A correction invalidated the old hit and its late embedding without writing either back into the paired document.
 
 - [ ] **Task 6.3: Objective Workflow Compiler & Speculative Shadow Sandbox**
   - **Crate**: `eon-cognition`
@@ -209,7 +209,7 @@
   - **Files**: `src/omniparser.rs`, `src/keyframe_sampler.rs`, `src/ring_buffer.rs`, `src/lib.rs`
   - **Requirements**: OmniParser-v2 (< 30ms YOLO element detector + PaddleOCR ONNX) for UI grounding when accessibility trees are obfuscated. Adaptive 1–5 FPS video keyframe sampler and 30-second rolling visual memory in shared memory. Integration with `Qwen2.5-VL-3B-Instruct`.
   - **Unit Tests**: `cargo test -p eon-vision vision_tests`.
-  - **Verified subset**: Each accepted Linux shared frame gets a separate sealed anonymous file. Live histories expire producer descriptors while idle and join their worker on stop; the timestamp-driven history remains available for offline use. A selected descriptor contains one frame, but does not sandbox a same-user reader or revoke copies already delivered. Screen capture, OCR, object detection and VLM inference are not verified.
+  - **Verified subset**: Each accepted Linux shared frame gets a separate sealed anonymous file. Live histories expire producer descriptors while idle. The opt-in CPU PaddleOCR backend recognized five labels on two independently rendered JPEGs and located them in pixel coordinates. It can read one selected frame without access to the ring. Screen capture, icon detection, VLM inference and the 30 ms detector target remain unverified.
 
 ---
 

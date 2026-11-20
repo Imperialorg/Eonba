@@ -9,7 +9,7 @@ use loro::{Container, Frontiers, Index, LoroDoc, LoroMap, LoroValue, ValueOrCont
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::{AppraisalMemory, EmbeddingSpace, RecallHit, database, graph, invalid, validate_key};
-use crate::memory::{Provenance, UntrustedNote};
+use crate::memory::{Provenance, UntrustedNote, WorkingLedger};
 
 #[path = "paired_vectors.rs"]
 mod paired_vectors;
@@ -151,6 +151,33 @@ impl PairedGraphMemory {
     /// Both BM25 hits and adjacent edges are local, explicitly untrusted data.
     pub fn recall_references(&mut self, text: &str, limit: usize) -> EonResult<Vec<RecallHit>> {
         self.index.recall_references(text, None, limit)
+    }
+
+    /// Explicitly observe one selected hit in the caller's transient ledger.
+    /// Never import context from Loro. Recheck the whole reference against a
+    /// single current SQLite snapshot; a deleted/corrected hit is a no-op.
+    /// Like other observations, this records evidence as of `now_ms`, not a
+    /// subscription to future edits or an endorsement of the note.
+    pub fn observe_current(
+        &mut self,
+        ledger: &mut WorkingLedger,
+        now_ms: u64,
+        note: &UntrustedNote,
+    ) -> EonResult<bool> {
+        let tx = self.index.db.transaction().map_err(database)?;
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM memory_v1_notes WHERE id=?1 AND source=?2)",
+                params![note.id(), note.provenance().reference()],
+                |r| r.get(0),
+            )
+            .map_err(database)?;
+        let matches = exists && graph::fetch(&tx, note.id())? == *note;
+        tx.commit().map_err(database)?;
+        if matches {
+            ledger.observe(now_ms, note)?;
+        }
+        Ok(matches)
     }
 
     /// Look up incident edges by the original mesh entity key.
