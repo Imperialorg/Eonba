@@ -117,13 +117,16 @@ def main(argv=None) -> int:
         paths = sorted(args.captures.glob("*.wav"))
         values = []
         seen = set()
+        rate = control.rate if control is not None else None
         for path in paths:
             if not path.is_file():
                 raise ValueError(f"not a regular capture file: {path.name}")
             try:
                 sample = _analyze(path, args.threshold)
-                if control is not None and sample.rate != control.rate:
-                    raise ValueError("capture rate differs from muted control")
+                if rate is None:
+                    rate = sample.rate
+                elif sample.rate != rate:
+                    raise ValueError("capture rate differs from " + ("muted control" if control else "first trial"))
                 latency = sample.latency_ms()
             except (ValueError, wave.Error, EOFError) as error:
                 raise ValueError(f"{path.name}: {error}") from error

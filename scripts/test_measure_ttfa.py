@@ -87,3 +87,10 @@ class LatencyTests(unittest.TestCase):
             "trials": 100, "p50_ms": 102, "p99_ms": 102,
             "passed": True, "muted_control_checked": True,
         })
+
+    def test_batch_without_control_still_requires_a_common_sample_rate(self):
+        trial = self.fixture()
+        self.fixture(path=trial.with_name("second.wav"), rate=44100)
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(main([str(trial.parent), "--threshold", "500"]), 2)
+        self.assertIn("capture rate differs from first trial", errors.getvalue())
