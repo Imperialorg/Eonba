@@ -199,6 +199,16 @@ jobs:
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;37.0.0" "ndk;27.3.13750724"
           rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
           cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Cross-check capability workers on Android arm64 (API 26)
+        working-directory: engine/core-rs
+        run: |
+          export ANDROID_NDK_ROOT="$ANDROID_HOME/ndk/27.3.13750724"
+          bin="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$bin/aarch64-linux-android26-clang"
+          export CXX_aarch64_linux_android="$bin/aarch64-linux-android26-clang++"
+          export AR_aarch64_linux_android="$bin/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
+          cargo clippy --locked --target aarch64-linux-android -p eon-capability --lib --no-deps -- -D warnings
       - name: Build signed debug APK, compare ABI bindings and run host tests
         run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.3.13750724" ./gradlew :core-bindings:test :app:test :core-bindings:verifyTargetBindings
       - name: Verify Keystore restart, denied demo actions and native vault on a disposable Android 35 emulator
