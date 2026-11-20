@@ -7,6 +7,13 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 
+fn owner(authority: &IdentityAuthority) -> ProcessOwner {
+    ProcessOwner {
+        caller: authority.user(Permissions::EXECUTE_PROCESS),
+        workflow: WorkflowId::new(),
+    }
+}
+
 fn pid(p: &PtyProvider, id: &SessionId) -> u32 {
     p.shared.lock().sessions[id].terminal.pid()
 }
@@ -58,7 +65,7 @@ fn devpts_peer_is_operator_only_before_first_unlock() {
     assert_eq!(m.gid(), rustix::process::getegid().as_raw());
 }
 
-fn send(p: &PtyProvider, owner: &WorkflowId, id: &SessionId, mut bytes: &[u8]) {
+fn send(p: &PtyProvider, owner: &ProcessOwner, id: &SessionId, mut bytes: &[u8]) {
     until(|| {
         match p.pty_write(owner, id, &bytes[..bytes.len().min(MAX_WRITE)]) {
             Ok(n) => bytes = &bytes[n..],
@@ -70,12 +77,105 @@ fn send(p: &PtyProvider, owner: &WorkflowId, id: &SessionId, mut bytes: &[u8]) {
 }
 
 #[test]
+fn persistent_filters_keep_state_without_interpreting_input() {
+    let auth = IdentityAuthority::new();
+    let mut p = PtyProvider::new(&auth).unwrap();
+    let owner = owner(&auth);
+    let id = p
+        .pty_open(&owner, PtyMode::Filter(StreamFilter::SqueezeSpaces))
+        .unwrap();
+    let child = pid(&p, &id);
+    assert_eq!(
+        fs::read(format!("/proc/{child}/cmdline")).unwrap(),
+        b"tr\0-s\0 \0"
+    );
+    // The first user space survives the admission probe. The filter keeps its
+    // final-space state even when the next write comes after observing a line.
+    send(&p, &owner, &id, b"    alpha   \nleft   ");
+    until(|| {
+        p.pty_read_ring(&owner, &id, 0, MAX_READ)
+            .unwrap()
+            .bytes
+            .starts_with(b" alpha \n")
+    });
+    send(&p, &owner, &id, b"   beta\t  \n");
+    until(|| {
+        p.pty_read_ring(&owner, &id, 0, MAX_READ).unwrap().bytes == b" alpha \nleft beta\t \n"
+    });
+    let upper = p
+        .pty_open(&owner, PtyMode::Filter(StreamFilter::AsciiUppercase))
+        .unwrap();
+    let upper_pid = pid(&p, &upper);
+    let bytes = b"--help; $(literal) /etc/os-release\x00\xff\n";
+    send(&p, &owner, &upper, bytes);
+    until(|| {
+        p.pty_read_ring(&owner, &upper, 0, MAX_READ).unwrap().bytes == bytes.to_ascii_uppercase()
+    });
+    p.close_owner(&owner.workflow);
+    gone(child);
+    gone(upper_pid);
+}
+
+#[test]
+fn filtered_session_requires_host_issuer_grant_workflow_and_exact_identity() {
+    let auth = IdentityAuthority::new();
+    let mut p = PtyProvider::new(&auth).unwrap();
+    let mode = PtyMode::Filter(StreamFilter::AsciiUppercase);
+    let caller = auth.user(Permissions::EXECUTE_PROCESS | Permissions::SPAWN_SUBAGENT);
+    let owner = ProcessOwner {
+        caller: caller.clone(),
+        workflow: WorkflowId::new(),
+    };
+    let id = p.pty_open(&owner, mode).unwrap();
+    for (identity, workflow, expected) in [
+        (
+            caller.delegate(Permissions::EXECUTE_PROCESS).unwrap(),
+            owner.workflow.clone(),
+            ErrorKind::NotFound,
+        ),
+        (caller.clone(), WorkflowId::new(), ErrorKind::NotFound),
+        (
+            caller.delegate(Permissions::NONE).unwrap(),
+            owner.workflow.clone(),
+            ErrorKind::PermissionDenied,
+        ),
+        (
+            IdentityAuthority::new().system(Permissions::EXECUTE_PROCESS),
+            owner.workflow.clone(),
+            ErrorKind::PermissionDenied,
+        ),
+    ] {
+        let other = ProcessOwner {
+            caller: identity,
+            workflow,
+        };
+        if expected == ErrorKind::PermissionDenied {
+            assert_eq!(p.pty_open(&other, mode).unwrap_err().kind(), expected);
+        }
+        assert_eq!(
+            p.pty_read_ring(&other, &id, 0, 1).unwrap_err().kind(),
+            expected
+        );
+        assert_eq!(p.pty_write(&other, &id, b"x").unwrap_err().kind(), expected);
+        assert_eq!(
+            p.pty_signal(&other, &id, PtySignal::Terminate)
+                .unwrap_err()
+                .kind(),
+            expected
+        );
+    }
+    send(&p, &owner, &id, b"still live\n");
+    until(|| p.pty_read_ring(&owner, &id, 0, MAX_READ).unwrap().bytes == b"STILL LIVE\n");
+}
+
+#[test]
 fn bidirectional_real_pty_owner_checks_paging_and_inert_display() {
-    let mut p = PtyProvider::new().unwrap();
-    let owner = WorkflowId::new();
-    let other = WorkflowId::new();
-    let id = p.pty_open(&owner).unwrap();
-    let id2 = p.pty_open(&other).unwrap();
+    let auth = IdentityAuthority::new();
+    let mut p = PtyProvider::new(&auth).unwrap();
+    let other = owner(&auth);
+    let owner = owner(&auth);
+    let id = p.pty_open(&owner, PtyMode::Loopback).unwrap();
+    let id2 = p.pty_open(&other, PtyMode::Loopback).unwrap();
     let pid2 = pid(&p, &id2);
     let pid1 = pid(&p, &id);
     assert_ne!(id, id2);
@@ -154,7 +254,7 @@ fn bidirectional_real_pty_owner_checks_paging_and_inert_display() {
             .bytes
             .is_empty()
     );
-    p.close_owner(&owner);
+    p.close_owner(&owner.workflow);
     gone(pid1);
     assert!(p.pty_write(&owner, &id, b"revoked").is_err());
     send(&p, &other, &id2, b"live");
@@ -184,9 +284,10 @@ fn ring_bounds_long_unterminated_output_and_reports_cursor_loss() {
 
 #[test]
 fn unattended_output_uses_ten_thousand_line_ring() {
-    let mut p = PtyProvider::new().unwrap();
-    let owner = WorkflowId::new();
-    let id = p.pty_open(&owner).unwrap();
+    let auth = IdentityAuthority::new();
+    let mut p = PtyProvider::new(&auth).unwrap();
+    let owner = owner(&auth);
+    let id = p.pty_open(&owner, PtyMode::Loopback).unwrap();
     let data = b"x\n".repeat(MAX_RING_LINES + 20);
     send(&p, &owner, &id, &data);
     until(|| {
@@ -200,13 +301,14 @@ fn unattended_output_uses_ten_thousand_line_ring() {
 
 #[test]
 fn capacity_termination_interrupt_and_reuse() {
-    let owner = WorkflowId::new();
-    let mut p = PtyProvider::new().unwrap();
+    let auth = IdentityAuthority::new();
+    let owner = owner(&auth);
+    let mut p = PtyProvider::new(&auth).unwrap();
     let ids = (0..MAX_SESSIONS)
-        .map(|_| p.pty_open(&owner).unwrap())
+        .map(|_| p.pty_open(&owner, PtyMode::Loopback).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(
-        p.pty_open(&owner).unwrap_err().kind(),
+        p.pty_open(&owner, PtyMode::Loopback).unwrap_err().kind(),
         ErrorKind::ResourceBusy
     );
     for (id, sig) in ids.iter().zip([PtySignal::Interrupt, PtySignal::Terminate]) {
@@ -218,15 +320,18 @@ fn capacity_termination_interrupt_and_reuse() {
             ErrorKind::NotFound
         );
     }
-    p.pty_open(&owner).unwrap();
+    p.pty_open(&owner, PtyMode::Loopback).unwrap();
 }
 
 #[test]
 fn idle_watchdog_reaps_without_any_caller_or_lazy_sweep() {
     assert_eq!(IDLE_TIMEOUT, Duration::from_secs(300));
-    let owner = WorkflowId::new();
-    let mut p = PtyProvider::with_timeout(Duration::from_millis(150)).unwrap();
-    let id = p.pty_open(&owner).unwrap();
+    let auth = IdentityAuthority::new();
+    let owner = owner(&auth);
+    let mut p = PtyProvider::with_timeout(&auth, Duration::from_millis(150)).unwrap();
+    let id = p
+        .pty_open(&owner, PtyMode::Filter(StreamFilter::AsciiUppercase))
+        .unwrap();
     let pid = pid(&p, &id);
     gone(pid); // No provider API calls until after wait has happened.
     assert_eq!(
@@ -275,9 +380,10 @@ fn child_has_only_pty_stdio_no_environment_no_secret_and_a_private_group() {
     // SAFETY: F_GETFD only inspects the fixture descriptor flags.
     assert_eq!(unsafe { libc::fcntl(inherited, libc::F_GETFD) }, 0);
     assert_eq!(std::env::var(MARKER).unwrap(), "private host fixture");
-    let mut p = PtyProvider::new().unwrap();
-    let owner = WorkflowId::new();
-    let id = p.pty_open(&owner).unwrap();
+    let auth = IdentityAuthority::new();
+    let mut p = PtyProvider::new(&auth).unwrap();
+    let owner = owner(&auth);
+    let id = p.pty_open(&owner, PtyMode::Loopback).unwrap();
     let pid = pid(&p, &id);
     let proc = PathBuf::from(format!("/proc/{pid}"));
     assert!(fs::read(proc.join("environ")).unwrap().is_empty());
@@ -303,7 +409,7 @@ fn child_has_only_pty_stdio_no_environment_no_secret_and_a_private_group() {
     for n in ["1", "2"] {
         assert_eq!(fs::read_link(fds.join(n)).unwrap(), slave);
     }
-    p.close_owner(&owner);
+    p.close_owner(&owner.workflow);
     gone(pid);
 
     // This isolated host now auto-reaps children. Admission must fail before
@@ -313,5 +419,5 @@ fn child_has_only_pty_stdio_no_environment_no_secret_and_a_private_group() {
         unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) },
         libc::SIG_ERR
     );
-    assert!(p.pty_open(&owner).is_err());
+    assert!(p.pty_open(&owner, PtyMode::Loopback).is_err());
 }

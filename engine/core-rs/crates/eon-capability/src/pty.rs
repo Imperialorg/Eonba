@@ -1,12 +1,17 @@
-//! Host-only, workflow-owned PTYs. The sole program is the system `cat` with
-//! no operands: an interactive byte loopback, not a shell or command runner.
-//! Use one provider per host and pass the authenticated workflow identity,
-//! never an owner supplied by a tool argument. Call `close_owner` on workflow
-//! teardown. No agent dispatch, workspace access, or UI integration is implied.
+//! Host-only native stdin filters, not a shell or workspace command runner.
+//! The host supplies the identity and workflow from its dispatch context, never
+//! from tool arguments. Use one provider per host; call `close_owner` on workflow
+//! teardown. Session IDs alone confer no authority.
 //! The host must leave this provider responsible for waiting on its own children.
 mod native;
+mod process;
 #[cfg(test)]
 mod pty_tests;
+
+pub use process::{
+    MAX_PROCESS_INPUT, MAX_PROCESS_OUTPUT, PROCESS_TIMEOUT, ProcessMode, ProcessOutput,
+    ProcessProvider,
+};
 
 use std::collections::{BTreeMap, VecDeque, btree_map::Entry};
 use std::io::{self, ErrorKind, Read, Write};
@@ -14,8 +19,10 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use eon_primitives::{SessionId, WorkflowId};
-use native::{Image, Terminal};
+use eon_foundation::identity::{Identity, IdentityAuthority};
+use eon_foundation::permissions::Permissions;
+use eon_primitives::{IdentityId, SessionId, WorkflowId};
+use native::{Image, Terminal, Utility};
 
 pub const MAX_SESSIONS: usize = 8;
 pub const MAX_WRITE: usize = 4096;
@@ -23,6 +30,43 @@ pub const MAX_READ: usize = 16 * 1024;
 pub const MAX_RING_LINES: usize = 10_000;
 pub const MAX_RING_BYTES: usize = 256 * 1024;
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn authorize(authority: &IdentityAuthority, caller: &Identity) -> io::Result<()> {
+    authority
+        .authorize(caller, Permissions::EXECUTE_PROCESS)
+        .map_err(|_| io::Error::from(ErrorKind::PermissionDenied))
+}
+
+/// Trusted dispatch context, not a deserializable claim.
+pub struct ProcessOwner {
+    pub caller: Identity,
+    pub workflow: WorkflowId,
+}
+
+/// Closed set of byte transforms in the C locale. Input is always stdin.
+#[derive(Clone, Copy, Debug)]
+pub enum StreamFilter {
+    AsciiUppercase,
+    /// Collapse each run of ASCII spaces to one, including across PTY writes.
+    SqueezeSpaces,
+}
+
+impl StreamFilter {
+    fn args(self) -> &'static [&'static str] {
+        match self {
+            Self::AsciiUppercase => &["a-z", "A-Z"],
+            Self::SqueezeSpaces => &["-s", " "],
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum PtyMode {
+    Loopback,
+    /// Line-oriented native filter. End a request with LF for prompt output;
+    /// a partial line may stay in the child's bounded stdio buffer.
+    Filter(StreamFilter),
+}
 
 /// Opaque, untrusted output. Never send `bytes` directly to a terminal,
 /// logger or markup interpreter. `escaped` produces inert ASCII for plain text UIs.
@@ -97,6 +141,7 @@ impl Ring {
 
 struct Session {
     owner: WorkflowId,
+    caller: IdentityId,
     terminal: Terminal,
     ring: Ring,
     last_io: Instant,
@@ -156,7 +201,9 @@ impl Shared {
 }
 
 pub struct PtyProvider {
-    image: Image,
+    authority: IdentityAuthority,
+    cat: Image,
+    tr: Image,
     shared: Arc<Shared>,
     watchdog: Option<JoinHandle<()>>,
     idle: Duration,
@@ -165,19 +212,22 @@ pub struct PtyProvider {
 impl PtyProvider {
     /// Pin the trusted host installation. Unsupported layouts and missing
     /// kernel protections fail closed; there is no unconfined fallback.
-    pub fn new() -> io::Result<Self> {
-        Self::with_timeout(IDLE_TIMEOUT)
+    pub fn new(authority: &IdentityAuthority) -> io::Result<Self> {
+        Self::with_timeout(authority, IDLE_TIMEOUT)
     }
 
-    fn with_timeout(idle: Duration) -> io::Result<Self> {
-        let image = Image::pin()?;
+    fn with_timeout(authority: &IdentityAuthority, idle: Duration) -> io::Result<Self> {
+        let cat = Image::pin(Utility::Cat)?;
+        let tr = Image::pin(Utility::Tr)?;
         let shared = Arc::new(Shared::default());
         let watcher = shared.clone();
         let watchdog = thread::Builder::new()
             .name("eon-pty".into())
             .spawn(move || watcher.watch(idle))?;
         Ok(Self {
-            image,
+            authority: authority.clone(),
+            cat,
+            tr,
             shared,
             watchdog: Some(watchdog),
             idle,
@@ -185,16 +235,28 @@ impl PtyProvider {
     }
 
     /// `&mut self` serializes admission, but launch never holds the watchdog lock.
-    pub fn pty_open(&mut self, owner: &WorkflowId) -> io::Result<SessionId> {
+    pub fn pty_open(&mut self, owner: &ProcessOwner, mode: PtyMode) -> io::Result<SessionId> {
+        authorize(&self.authority, &owner.caller)?;
         if self.shared.lock().sessions.len() >= MAX_SESSIONS {
             return Err(io::Error::new(ErrorKind::ResourceBusy, "PTY limit reached"));
         }
-        let terminal = self.image.launch()?;
+        let terminal = match mode {
+            PtyMode::Loopback => self.cat.launch(&[], b"?", b"?")?,
+            PtyMode::Filter(filter) => {
+                // LF flushes the line-buffered filter and resets squeeze state.
+                let (probe, reply): (&[u8], &[u8]) = match filter {
+                    StreamFilter::AsciiUppercase => (b"a\n", b"A\n"),
+                    StreamFilter::SqueezeSpaces => (b"  \n", b" \n"),
+                };
+                self.tr.launch(filter.args(), probe, reply)?
+            }
+        };
         let id = SessionId::new();
         self.shared.lock().sessions.insert(
             id.clone(),
             Session {
-                owner: owner.clone(),
+                owner: owner.workflow.clone(),
+                caller: owner.caller.id().clone(),
                 terminal,
                 ring: Ring::default(),
                 last_io: Instant::now(),
@@ -206,16 +268,17 @@ impl PtyProvider {
 
     fn access<T>(
         &self,
-        owner: &WorkflowId,
+        owner: &ProcessOwner,
         id: &SessionId,
         op: impl FnOnce(&mut Session) -> io::Result<T>,
     ) -> io::Result<T> {
+        authorize(&self.authority, &owner.caller)?;
         let absent = || io::Error::new(ErrorKind::NotFound, "unknown PTY");
         let mut state = self.shared.lock();
         let Entry::Occupied(mut entry) = state.sessions.entry(id.clone()) else {
             return Err(absent());
         };
-        if &entry.get().owner != owner {
+        if entry.get().owner != owner.workflow || &entry.get().caller != owner.caller.id() {
             return Err(absent());
         }
         if entry.get().last_io.elapsed() >= self.idle {
@@ -235,7 +298,12 @@ impl PtyProvider {
     }
 
     /// Nonblocking. A short count consumes only that prefix; retry the suffix.
-    pub fn pty_write(&self, owner: &WorkflowId, id: &SessionId, data: &[u8]) -> io::Result<usize> {
+    pub fn pty_write(
+        &self,
+        owner: &ProcessOwner,
+        id: &SessionId,
+        data: &[u8],
+    ) -> io::Result<usize> {
         self.access(owner, id, |s| {
             if !(1..=MAX_WRITE).contains(&data.len()) {
                 return Err(io::Error::new(
@@ -256,7 +324,7 @@ impl PtyProvider {
     /// is not I/O and does not keep a session alive.
     pub fn pty_read_ring(
         &self,
-        owner: &WorkflowId,
+        owner: &ProcessOwner,
         id: &SessionId,
         cursor: u64,
         limit: usize,
@@ -273,14 +341,15 @@ impl PtyProvider {
     /// Only typed signals to this session's own terminal/group, never a caller PID.
     pub fn pty_signal(
         &self,
-        owner: &WorkflowId,
+        owner: &ProcessOwner,
         id: &SessionId,
         signal: PtySignal,
     ) -> io::Result<()> {
         self.access(owner, id, |s| s.terminal.signal(signal))
     }
 
-    /// Synchronously revoke and reap all sessions belonging to this workflow.
+    /// Trusted host teardown (not a caller operation): revoke and reap all
+    /// sessions for the workflow, including those of delegated identities.
     pub fn close_owner(&mut self, owner: &WorkflowId) {
         self.shared.lock().sessions.retain(|_, s| &s.owner != owner);
     }

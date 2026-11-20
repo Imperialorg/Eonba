@@ -11,6 +11,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use rustix::fs::{self, Mode, OFlags};
+use rustix::process::{self, Resource, Rlimit, Signal};
 
 use super::PtySignal;
 use crate::sandbox::{ConfinementPolicy, WorkerIo, confine_command};
@@ -59,20 +60,38 @@ fn fd_path(f: &File) -> PathBuf {
 }
 
 pub(super) struct Image {
+    utility: Utility,
     program: File,
     libc: File,
     loader: File,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum Utility {
+    Cat,
+    Tr,
+    Wc,
+}
+
+impl Utility {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Cat => "cat",
+            Self::Tr => "tr",
+            Self::Wc => "wc",
+        }
+    }
+}
+
 impl Image {
-    pub(super) fn pin() -> io::Result<Self> {
+    pub(super) fn pin(utility: Utility) -> io::Result<Self> {
         if fs::fstatfs(File::open("/proc/self/fd")?)?.f_type != fs::PROC_SUPER_MAGIC {
             return Err(io::Error::new(
                 ErrorKind::Unsupported,
                 "PTY requires procfs",
             ));
         }
-        let program = host_elf(Path::new("/usr/bin/cat"))?;
+        let program = host_elf(&Path::new("/usr/bin").join(utility.name()))?;
         if program.metadata()?.mode() & 0o111 == 0 {
             return Err(io::Error::from(ErrorKind::PermissionDenied));
         }
@@ -95,6 +114,7 @@ impl Image {
             match (pin_lib("libc.so.6"), pin_lib(ld)) {
                 (Ok(libc), Ok(loader)) => {
                     return Ok(Self {
+                        utility,
                         program,
                         libc,
                         loader,
@@ -110,7 +130,7 @@ impl Image {
         ))
     }
 
-    pub(super) fn launch(&self) -> io::Result<Terminal> {
+    fn command(&self, args: &[&'static str]) -> io::Result<Command> {
         // An auto-reaped leader cannot pin its process-group ID for cleanup.
         // SAFETY: null act is a read-only query; success initializes previous.
         let previous = unsafe {
@@ -123,16 +143,60 @@ impl Image {
             previous.assume_init()
         };
         if previous.sa_sigaction == libc::SIG_IGN || previous.sa_flags & libc::SA_NOCLDWAIT != 0 {
-            return Err(io::Error::other("PTY requires waitable child processes"));
+            return Err(io::Error::other(
+                "provider requires waitable child processes",
+            ));
         }
-        let (master, slave) = pair()?;
-        let program = fd_path(&self.program);
+        let mut cmd = Command::new(fd_path(&self.program));
+        cmd.arg0(self.utility.name()).args(args);
+        Ok(cmd)
+    }
+
+    fn confine(&self, cmd: &mut Command) -> io::Result<()> {
         let policy = ConfinementPolicy {
-            read_only: vec![program.clone(), fd_path(&self.loader), fd_path(&self.libc)],
+            read_only: vec![
+                fd_path(&self.program),
+                fd_path(&self.loader),
+                fd_path(&self.libc),
+            ],
             deny_network: true,
         };
-        let mut cmd = Command::new(program);
-        cmd.arg0("cat");
+        // SAFETY: child-only rlimit syscalls, before installing seccomp.
+        unsafe {
+            cmd.pre_exec(|| {
+                limit(Resource::Core, 0)?;
+                limit(Resource::As, 64 * 1024 * 1024)
+            });
+        }
+        confine_command(cmd, &policy, WorkerIo::StdioProtocol).map_err(io::Error::other)
+    }
+
+    pub(super) fn batch(&self, args: &[&'static str], max_file: u64) -> io::Result<Command> {
+        let mut cmd = self.command(args)?;
+        let parent = process::getpid();
+        // SAFETY: child-only syscalls before confinement; the synchronous batch
+        // child must not outlive its calling thread if the host exits abruptly.
+        unsafe {
+            cmd.pre_exec(move || {
+                process::set_parent_process_death_signal(Some(Signal::KILL))?;
+                if process::getppid() != Some(parent) {
+                    return Err(io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                limit(Resource::Fsize, max_file)
+            });
+        }
+        self.confine(&mut cmd)?;
+        Ok(cmd)
+    }
+
+    pub(super) fn launch(
+        &self,
+        args: &[&'static str],
+        probe: &[u8],
+        reply: &[u8],
+    ) -> io::Result<Terminal> {
+        let mut cmd = self.command(args)?;
+        let (master, slave) = pair()?;
         // SAFETY: in the child stdio is already installed. setsid makes a new
         // process group and session before claiming the slave as controlling
         // terminal. Only async-signal-safe native operations before confinement.
@@ -157,7 +221,7 @@ impl Image {
                 Ok(())
             });
         }
-        confine_command(&mut cmd, &policy, WorkerIo::StdioProtocol).map_err(io::Error::other)?;
+        self.confine(&mut cmd)?;
         // Replace just the default stdio pipes, retaining all confinement hooks,
         // the empty environment and the fixed working directory.
         cmd.stdin(slave.try_clone()?)
@@ -168,9 +232,21 @@ impl Image {
             child: cmd.spawn()?,
         };
         drop(cmd);
-        terminal.verify_loopback()?;
+        terminal.verify(probe, reply)?;
         Ok(terminal)
     }
+}
+
+fn limit(resource: Resource, cap: u64) -> io::Result<()> {
+    // Never raise an inherited limit, even if the host has the privilege to do so.
+    let value = Some(process::getrlimit(resource).current.unwrap_or(cap).min(cap));
+    Ok(process::setrlimit(
+        resource,
+        Rlimit {
+            current: value,
+            maximum: value,
+        },
+    )?)
 }
 
 fn cvt(n: libc::c_int) -> io::Result<libc::c_int> {
@@ -292,17 +368,17 @@ pub(super) struct Terminal {
 }
 
 impl Terminal {
-    // exec success alone doesn't mean the dynamic loader or byte loopback
-    // actually worked. The probe is private, with kernel echo disabled.
-    fn verify_loopback(&mut self) -> io::Result<()> {
-        self.master.write_all(b"?")?;
+    // exec success alone doesn't mean the loader or filter worked. Consume the
+    // entire private response (possibly split across reads) with kernel echo off.
+    fn verify(&mut self, probe: &[u8], mut reply: &[u8]) -> io::Result<()> {
+        self.master.write_all(probe)?;
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut pfd = libc::pollfd {
             fd: self.master.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         };
-        loop {
+        while !reply.is_empty() {
             let ms = deadline
                 .saturating_duration_since(Instant::now())
                 .as_millis() as i32;
@@ -317,12 +393,16 @@ impl Terminal {
                     result?;
                 }
             }
-            let mut answer = [0];
-            if self.master.read(&mut answer)? == 1 && answer == *b"?" {
-                return Ok(());
+            let mut answer = [0; 8];
+            match self.master.read(&mut answer) {
+                Ok(n) if n != 0 && reply.starts_with(&answer[..n]) => reply = &reply[n..],
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {
+                    continue;
+                }
+                _ => return Err(io::Error::other("confined PTY failed its startup probe")),
             }
-            return Err(io::Error::other("confined PTY failed its startup probe"));
         }
+        Ok(())
     }
 
     fn signal_group(&self, sig: i32) -> io::Result<()> {
