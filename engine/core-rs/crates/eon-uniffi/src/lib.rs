@@ -15,7 +15,7 @@ mod android_vault;
 mod dag;
 pub use dag::{DagNode, validate_task_dag};
 mod profile_workflow;
-pub use profile_workflow::{MobileWorkflowReceipt, run_profile_workflow};
+pub use profile_workflow::{MobileWorkflowError, MobileWorkflowReceipt, run_profile_workflow};
 
 uniffi::include_scaffolding!("eon_core");
 
@@ -23,7 +23,6 @@ uniffi::include_scaffolding!("eon_core");
 pub enum BridgeError {
     InvalidInput { reason: String },
     UnsupportedTask { reason: String },
-    WorkflowUnavailable { reason: String },
 }
 
 fn invalid(reason: impl Into<String>) -> BridgeError {
@@ -37,7 +36,6 @@ impl std::fmt::Display for BridgeError {
         match self {
             Self::InvalidInput { reason } => write!(f, "invalid input: {reason}"),
             Self::UnsupportedTask { reason } => write!(f, "unsupported task: {reason}"),
-            Self::WorkflowUnavailable { reason } => write!(f, "workflow unavailable: {reason}"),
         }
     }
 }

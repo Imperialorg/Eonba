@@ -3,7 +3,7 @@ namespace eon_uniffi {
     [Throws=BridgeError]
     string select_model_profile(double memory_gb);
     // One in-memory diagnostic task. No caller-supplied workflow, capability or resource handle.
-    [Throws=BridgeError]
+    [Throws=MobileWorkflowError]
     MobileWorkflowReceipt run_profile_workflow(double memory_gb);
     u32 endpoint_silence_ms(Completeness completeness);
     [Throws=BridgeError]
@@ -36,7 +36,12 @@ dictionary DagNode {
 interface BridgeError {
     InvalidInput(string reason);
     UnsupportedTask(string reason);
-    WorkflowUnavailable(string reason);
+};
+
+[Error]
+interface MobileWorkflowError {
+    InvalidInput(string reason);
+    Unavailable(string reason);
 };
 
 dictionary MobileWorkflowReceipt {

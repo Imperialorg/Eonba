@@ -8,7 +8,7 @@ func smoke() throws {
     do {
         _ = try runProfileWorkflow(memoryGb: -1)
         fatalError("received a completion for invalid memory")
-    } catch BridgeError.InvalidInput(_) {}
+    } catch MobileWorkflowError.InvalidInput(_) {}
     do {
         _ = try selectModelProfile(memoryGb: .nan)
         fatalError("accepted NaN")

@@ -8,21 +8,40 @@ use eon_kernel::resource::ResourceManager;
 use eon_kernel::scheduler::{Dispatch, Outcome, TaskScheduler};
 use eon_primitives::{ObjectiveId, TaskId, WorkflowId};
 
-use crate::{BridgeError, invalid};
-
 #[derive(Debug)]
 pub struct MobileWorkflowReceipt {
     pub profile: String,
     pub completed_tasks: u32,
 }
 
-fn unavailable(reason: impl ToString) -> BridgeError {
-    BridgeError::WorkflowUnavailable {
+#[derive(Debug)]
+pub enum MobileWorkflowError {
+    InvalidInput { reason: String },
+    Unavailable { reason: String },
+}
+
+impl std::fmt::Display for MobileWorkflowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidInput { reason } => write!(f, "invalid input: {reason}"),
+            Self::Unavailable { reason } => write!(f, "workflow unavailable: {reason}"),
+        }
+    }
+}
+
+fn invalid(reason: impl ToString) -> MobileWorkflowError {
+    MobileWorkflowError::InvalidInput {
         reason: reason.to_string(),
     }
 }
 
-fn submit(task_id: &TaskId, memory_gb: f64) -> Result<TaskScheduler<VecSink>, BridgeError> {
+fn unavailable(reason: impl ToString) -> MobileWorkflowError {
+    MobileWorkflowError::Unavailable {
+        reason: reason.to_string(),
+    }
+}
+
+fn submit(task_id: &TaskId, memory_gb: f64) -> Result<TaskScheduler<VecSink>, MobileWorkflowError> {
     const EPOCH: u64 = 1; // Each call owns a fresh workflow and sink.
     let memory = serde_json::Number::from_f64(memory_gb)
         .ok_or_else(|| invalid("device memory must be finite"))?;
@@ -46,12 +65,11 @@ fn submit(task_id: &TaskId, memory_gb: f64) -> Result<TaskScheduler<VecSink>, Br
         .map_err(unavailable)
 }
 
-fn diagnose(permit: &Dispatch) -> Result<ModelProfile, BridgeError> {
+fn diagnose(permit: &Dispatch) -> Result<ModelProfile, MobileWorkflowError> {
     let memory_gb = permit.contract().parameters["memory_gb"]
         .as_f64()
         .ok_or_else(|| invalid("expected numeric memory_gb"))?;
-    let profile =
-        ModelProfile::select_for_memory_gb(memory_gb).map_err(|e| invalid(e.to_string()))?;
+    let profile = ModelProfile::select_for_memory_gb(memory_gb).map_err(invalid)?;
     // Verify the output against the profile table before acknowledging success.
     if memory_gb < profile.min_device_memory_gb()
         || ModelProfile::ALL
@@ -66,7 +84,7 @@ fn diagnose(permit: &Dispatch) -> Result<ModelProfile, BridgeError> {
 fn run_task(
     scheduler: &mut TaskScheduler<VecSink>,
     task: &TaskId,
-) -> Result<MobileWorkflowReceipt, BridgeError> {
+) -> Result<MobileWorkflowReceipt, MobileWorkflowError> {
     let permits = scheduler.tick(Instant::now()).map_err(unavailable)?;
     let [permit] = permits.as_slice() else {
         return Err(unavailable("expected one diagnostic dispatch"));
@@ -98,7 +116,7 @@ fn run_task(
 }
 
 /// Run one fixed, permissionless diagnostic. All task state and evidence die with this call.
-pub fn run_profile_workflow(memory_gb: f64) -> Result<MobileWorkflowReceipt, BridgeError> {
+pub fn run_profile_workflow(memory_gb: f64) -> Result<MobileWorkflowReceipt, MobileWorkflowError> {
     let task = TaskId::new();
     run_task(&mut submit(&task, memory_gb)?, &task)
 }
@@ -127,7 +145,7 @@ mod codegen_tests {
         let mut scheduler = submit(&task, -1.0).unwrap();
         assert!(matches!(
             run_task(&mut scheduler, &task),
-            Err(BridgeError::InvalidInput { .. })
+            Err(MobileWorkflowError::InvalidInput { .. })
         ));
         assert_eq!(scheduler.state(&task), Some(TaskState::Failed));
         assert!(matches!(
@@ -138,7 +156,7 @@ mod codegen_tests {
         for gb in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert!(matches!(
                 run_profile_workflow(gb),
-                Err(BridgeError::InvalidInput { .. })
+                Err(MobileWorkflowError::InvalidInput { .. })
             ));
         }
     }
@@ -150,7 +168,7 @@ mod codegen_tests {
         run_task(&mut scheduler, &task).unwrap();
         assert!(matches!(
             run_task(&mut scheduler, &task),
-            Err(BridgeError::WorkflowUnavailable { .. })
+            Err(MobileWorkflowError::Unavailable { .. })
         ));
     }
 }

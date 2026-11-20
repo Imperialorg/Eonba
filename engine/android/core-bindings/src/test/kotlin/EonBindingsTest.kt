@@ -1,6 +1,7 @@
 import uniffi.eon_uniffi.BridgeException
 import uniffi.eon_uniffi.Completeness
 import uniffi.eon_uniffi.DagNode
+import uniffi.eon_uniffi.MobileWorkflowException
 import uniffi.eon_uniffi.endpointSilenceMs
 import uniffi.eon_uniffi.executeTaskSync
 import uniffi.eon_uniffi.generateUlid
@@ -20,11 +21,24 @@ class EonBindingsTest {
         val first = runProfileWorkflow(4.0)
         assertEquals("p0_mobile_ultralight", first.profile)
         assertEquals(1u, first.completedTasks)
-        assertFailsWith<BridgeException.InvalidInput> { runProfileWorkflow(-1.0) }
-        assertFailsWith<BridgeException.InvalidInput> { runProfileWorkflow(Double.NaN) }
+        assertFailsWith<MobileWorkflowException.InvalidInput> { runProfileWorkflow(-1.0) }
+        assertFailsWith<MobileWorkflowException.InvalidInput> { runProfileWorkflow(Double.NaN) }
         val next = runProfileWorkflow(8.0)
         assertEquals("p1_mobile_flagship", next.profile)
         assertEquals(1u, next.completedTasks)
+    }
+
+    @Test
+    fun existingBridgeErrorsRemainExhaustive() {
+        fun classify(error: BridgeException) = when (error) {
+            is BridgeException.InvalidInput -> "invalid"
+            is BridgeException.UnsupportedTask -> "unsupported"
+        }
+        assertEquals("invalid", classify(assertFailsWith<BridgeException> { selectModelProfile(Double.NaN) }))
+        val unsupported = assertFailsWith<BridgeException> {
+            executeTaskSync(generateUlid("task"), "unknown", "unknown", "{}")
+        }
+        assertEquals("unsupported", classify(unsupported))
     }
 
     @Test
