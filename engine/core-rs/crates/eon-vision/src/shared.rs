@@ -1,5 +1,14 @@
-//! Linux frame storage for an explicitly selected local reader. Only the JPEG is shared:
-//! it contains no ring metadata, earlier frames, or authority to observe subsequent frames.
+//! Linux storage for caller-authorized captures. Use [`LiveSharedVisualMemory`] during
+//! capture and [`SharedVisualMemory`] to replay timestamps offline.
+//!
+//! Each sealed descriptor contains one JPEG, not the history.
+//! This limits what is **in that file**, not what its recipient
+//! can access through ambient permissions (for example, same-UID procfs access).
+//! Seals protect integrity; they do not sandbox a reader. Nothing here captures a
+//! screen, authorizes a reader, or transmits a descriptor.
+
+mod live;
+pub use live::LiveSharedVisualMemory;
 
 use std::fs::File;
 use std::os::fd::{AsFd, BorrowedFd};
@@ -42,9 +51,9 @@ fn store(data: &[u8]) -> EonResult<SharedJpeg> {
     Ok(SharedJpeg(file))
 }
 
-/// A rolling history backed by one anonymous, sealed memory file per sampled frame.
-/// The producer keeps at most 30 seconds (150 frames) and applies the same byte limit as
-/// the portable history. The caller supplies already-authorized captures; nothing is sent.
+/// Timestamp-driven history backed by one sealed memory file per sampled frame.
+/// For offline use: like [`KeyframeHistory`], it does not expire files while idle.
+/// Use [`LiveSharedVisualMemory`] for a running capture.
 pub type SharedVisualMemory = KeyframeHistory<SharedJpeg>;
 
 impl SharedVisualMemory {

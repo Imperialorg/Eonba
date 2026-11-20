@@ -4,18 +4,30 @@ use std::fs::File;
 use std::os::fd::AsFd;
 use std::os::unix::fs::FileExt;
 use std::process::Command;
+use std::time::Duration;
 
-use eon_vision::shared::SharedVisualMemory;
+use eon_vision::shared::{LiveSharedVisualMemory, SharedVisualMemory};
 use rustix::fs::{SealFlags, fcntl_get_seals};
 
 #[test]
-fn selected_frame_can_be_mapped_in_another_process_but_not_modified() {
-    let mut ring = SharedVisualMemory::with_budget(32);
-    for (time, data) in [(0, b"private" as &[u8]), (1000, b"selected")] {
-        ring.observe(time, (32, 32), &[0; 1024], data).unwrap();
-    }
-    let frame = ring.recent(1000, 1000).unwrap().next().unwrap();
-    assert_eq!(frame.sequence_number, 2);
+fn selected_live_frame_maps_as_a_sealed_image_after_stop() {
+    let ring = LiveSharedVisualMemory::with_budget(32).unwrap();
+    let seq = ring
+        .observe((32, 32), &[0; 1024], b"selected")
+        .unwrap()
+        .unwrap();
+    // Allow the live sampler's 200 ms minimum interval before changing scenes.
+    std::thread::sleep(Duration::from_millis(200));
+    let newer = ring
+        .observe((32, 32), &[255; 1024], b"newer")
+        .unwrap()
+        .unwrap();
+    assert_eq!(ring.recent().unwrap(), [seq, newer]);
+    assert!(ring.select(newer + 1).unwrap().is_none());
+    let frame = ring.select(seq).unwrap().unwrap();
+    ring.stop();
+    assert_eq!(frame.sequence_number, seq);
+    assert_eq!((frame.width, frame.height), (32, 32));
     let fd = frame.jpeg_bytes.as_fd();
     assert!(
         fcntl_get_seals(fd)
@@ -26,9 +38,8 @@ fn selected_frame_can_be_mapped_in_another_process_but_not_modified() {
     assert!(file.set_len(1).is_err());
     assert!(file.write_all_at(b"changed!", 0).is_err());
 
-    // Drop the producer's history before a real child maps the one authorized frame.
-    // The fd cannot be used to see either a previous frame or any future frames.
-    drop(ring);
+    // This cooperative child maps only the supplied file. Nothing here confines it
+    // or tests what other resources a same-UID process might be permitted to access.
     let output = Command::new("python3")
         .args(["-I", "-c", "import mmap,sys; m=mmap.mmap(0,0,access=mmap.ACCESS_READ); sys.stdout.buffer.write(m[:])"])
         .stdin(file)

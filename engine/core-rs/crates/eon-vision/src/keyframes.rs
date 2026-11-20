@@ -37,7 +37,8 @@ fn similarity(a: &Luma, b: &Luma) -> f64 {
     total / 16.
 }
 
-/// A byte-bounded history of caller-supplied frames, using one monotonic capture clock.
+/// A byte-bounded history driven by caller-supplied, nondecreasing timestamps.
+/// Suitable for offline capture and replay: time advances only on `observe` or `recent`.
 pub struct KeyframeHistory<Jpeg> {
     frames: VecDeque<(VideoKeyframe<Jpeg>, usize)>,
     last_luma: Option<Luma>,
@@ -45,6 +46,7 @@ pub struct KeyframeHistory<Jpeg> {
     sequence: u64,
     bytes: usize,
     budget: usize,
+    retention_ms: u64,
 }
 
 /// Portable in-process history. Sampling does not grant capture permission.
@@ -58,13 +60,18 @@ impl<Jpeg> Default for KeyframeHistory<Jpeg> {
 
 impl<Jpeg> KeyframeHistory<Jpeg> {
     pub fn with_budget(bytes: usize) -> Self {
+        Self::with_limits(bytes, RETENTION_MS)
+    }
+
+    pub(crate) fn with_limits(budget: usize, retention_ms: u64) -> Self {
         Self {
             frames: VecDeque::new(),
             last_luma: None,
             clock_ms: 0,
             sequence: 0,
             bytes: 0,
-            budget: bytes,
+            budget,
+            retention_ms,
         }
     }
 
@@ -73,19 +80,25 @@ impl<Jpeg> KeyframeHistory<Jpeg> {
         self.bytes -= len;
     }
 
-    /// Also call on idle reads so a paused capture cannot return stale imagery.
-    fn advance(&mut self, now_ms: u64) -> EonResult<()> {
+    pub(crate) fn retained(&self) -> impl Iterator<Item = &VideoKeyframe<Jpeg>> {
+        self.frames.iter().map(|(frame, _)| frame)
+    }
+
+    pub(crate) fn next_expiry_ms(&self) -> Option<u64> {
+        self.retained()
+            .next()?
+            .timestamp_ms
+            .checked_add(self.retention_ms)
+    }
+
+    pub(crate) fn advance(&mut self, now_ms: u64) -> EonResult<()> {
         if now_ms < self.clock_ms {
             return Err(EonError::ValidationError(
                 "capture clock moved backwards".into(),
             ));
         }
         self.clock_ms = now_ms;
-        while self
-            .frames
-            .front()
-            .is_some_and(|(f, _)| now_ms - f.timestamp_ms >= RETENTION_MS)
-        {
+        while self.next_expiry_ms().is_some_and(|end| end <= now_ms) {
             self.evict_oldest();
         }
         if self.frames.is_empty() {
@@ -166,11 +179,7 @@ impl<Jpeg> KeyframeHistory<Jpeg> {
             ));
         }
         self.advance(now_ms)?;
-        Ok(self
-            .frames
-            .iter()
-            .map(|(frame, _)| frame)
-            .filter(move |f| f.timestamp_ms >= since_ms))
+        Ok(self.retained().filter(move |f| f.timestamp_ms >= since_ms))
     }
 }
 
