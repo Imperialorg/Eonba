@@ -2401,6 +2401,7 @@ dependencies = [
  "eon-cyber",
  "eon-kernel",
  "eon-primitives",
+ "image",
  "pollster",
  "wgpu",
 ]
@@ -3772,6 +3773,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

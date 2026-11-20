@@ -61,6 +61,26 @@ jobs:
       # This exercises the portable paths, not model inference or device drivers.
       - run: cargo test --locked --no-default-features -p eon-voice -p eon-cognition -p eon-uniffi --features eon-cognition/loro-memory,eon-cognition/objective-compiler
 
+  canvas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      VK_DRIVER_FILES: /opt/google/chrome/vk_swiftshader_icd.json
+    defaults:
+      run:
+        working-directory: engine/core-rs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test the workbench, JPEG scrubber and actual Vulkan pixel readback
+        run: |
+          test -r "$VK_DRIVER_FILES"
+          export XDG_RUNTIME_DIR
+          XDG_RUNTIME_DIR="$(mktemp -d "$RUNNER_TEMP/canvas.XXXXXXXX")"
+          cargo test --locked -p eon-canvas --all-targets
+
   mesh-loopback:
     runs-on: ubuntu-latest
     timeout-minutes: 30
