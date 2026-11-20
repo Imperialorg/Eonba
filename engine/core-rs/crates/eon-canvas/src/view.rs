@@ -9,7 +9,7 @@ use crate::diff::{Decision, Pairing, Review, Status};
 use crate::render::{NODE_HEIGHT, NODE_WIDTH, node_centre};
 
 const NODE_FILL: egui::Color32 = egui::Color32::from_rgb(51, 128, 230);
-const EDGE_STROKE: egui::Color32 = egui::Color32::from_rgb(230, 179, 51);
+pub(crate) const EDGE_STROKE: egui::Color32 = egui::Color32::from_rgb(230, 179, 51);
 const LABEL: egui::Color32 = egui::Color32::WHITE;
 const BLOCK_WIDTH: f32 = 360.0;
 const BLOCK_HEIGHT: f32 = 44.0;
@@ -143,6 +143,19 @@ pub fn review_controls(
     }
 }
 
+pub(crate) fn paint_node(painter: &egui::Painter, centre: egui::Pos2, label: &str) -> egui::Rect {
+    let rect = egui::Rect::from_center_size(centre, egui::vec2(NODE_WIDTH, NODE_HEIGHT));
+    painter.rect_filled(rect, 4.0, NODE_FILL);
+    painter.text(
+        centre,
+        egui::Align2::CENTER_CENTER,
+        label,
+        egui::FontId::proportional(14.0),
+        LABEL,
+    );
+    rect
+}
+
 pub fn paint_layout(painter: &egui::Painter, origin: egui::Pos2, layout: &Layout) {
     let at = |p: [f32; 2]| origin + egui::vec2(p[0], p[1]);
     for path in &layout.edge_paths {
@@ -153,16 +166,7 @@ pub fn paint_layout(painter: &egui::Painter, origin: egui::Pos2, layout: &Layout
         }
     }
     for (index, (&rank, &slot)) in layout.rank.iter().zip(&layout.slot).enumerate() {
-        let centre = node_centre(rank, slot);
-        let rect = egui::Rect::from_center_size(at(centre), egui::vec2(NODE_WIDTH, NODE_HEIGHT));
-        painter.rect_filled(rect, 4.0, NODE_FILL);
-        painter.text(
-            at(centre),
-            egui::Align2::CENTER_CENTER,
-            format!("n{index}"),
-            egui::FontId::proportional(14.0),
-            LABEL,
-        );
+        paint_node(painter, at(node_centre(rank, slot)), &format!("n{index}"));
     }
 }
 

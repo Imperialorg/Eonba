@@ -151,6 +151,26 @@ JVM tests and `--build-only` do not exercise AndroidKeyStore. A passing emulator
 
 To review a recorded sequence, run `cargo run --locked -p eon-canvas --example scrub -- 1250 a.jpg 1480 b.jpg` in the Rust workspace with your own timestamps (milliseconds) and JPEG files. The slider follows elapsed time, not frame number. Input is limited to 150 frames in a 30-second window, 30 MiB compressed in total, and 4096 pixels per side. There is also a pixel-area limit before decoding to account for progressive JPEG buffers (1080p fits; 4K does not). The viewer keeps thumbnails up to 256 pixels per side and neither opens a capture device nor writes the source files.
 
+To view a control-flow graph, redirect **one regular file** of GCC successor records into the canvas. From `engine/core-rs`:
+
+```sh
+cargo run --locked -p eon-canvas --example cfg < crates/eon-canvas/tests/fixtures/count_groups.cfg
+```
+
+Arrows point to successors. Pink arrows return to an earlier layer or to the same block; gold arrows go down the layers. Color does not indicate a branch condition. Scroll to explore a larger graph and hover a block for its exact successor IDs.
+
+The file contains only `;; BLOCK succs { TARGET ... }` lines for **one function**. IDs are decimal `u32`s. An empty list declares a block with no successors. GCC omits the row for its artificial exit (block 1); the viewer includes it when referenced. Other targets need their own row. Duplicate blocks or edges are errors. Limits: 16 KiB, 32 blocks including the exit, 64 directed edges. The viewer reads once before opening the window. It does not open source files, follow paths in the input, invoke a compiler or execute the program.
+
+To reproduce the fixture offline on Linux (GCC 13.3.0):
+
+```sh
+gcc -O0 -S -o /dev/null -fdump-tree-cfg=/dev/stdout crates/eon-canvas/tests/fixtures/count_groups.c |
+  sed -n '/^;; [[:digit:]][[:digit:]]* succs /p' |
+  diff -u crates/eon-canvas/tests/fixtures/count_groups.cfg -
+```
+
+For your own export, use a translation unit containing just the selected function and save the successor lines instead of running `diff`. Do not pass C, assembly, a binary, a pipe, or the full dump to the viewer.
+
 For desktop workstations and servers:
 - **Interactive Terminal**: Authored in Rust using `ratatui` + `crossterm` + `ratatui-image`. Displays live audio wave visualizers, active DAG task graphs, inline terminal graphics (Kitty/Sixel), and interactive slash commands (`/menu`, `/capabilities`, `/cyber`, `/mesh`, `/vision`).
 - **Interactive Live Canvas (`clients/canvas`)**: High-performance graphical workbench powered by `wgpu` or Compose Multiplatform + Skia for live side-by-side AST diff inspection, interactive reverse-engineering CFGs, and screen annotation overlays.
