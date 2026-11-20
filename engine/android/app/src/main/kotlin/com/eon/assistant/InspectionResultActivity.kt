@@ -13,7 +13,7 @@ class InspectionResultActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        val kind = InspectionAccess.session.takeResult(InspectionAccess.eligible(this))
+        val kind = InspectionAccess.takeResult(InspectionAccess.eligible(this))
         if (kind == null || savedInstanceState != null) {
             finish()
             return

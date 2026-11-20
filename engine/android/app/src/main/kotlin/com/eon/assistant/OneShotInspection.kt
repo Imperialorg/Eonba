@@ -39,9 +39,11 @@ internal class OneShotInspection(private val elapsedMillis: () -> Long) {
 
     fun revoke() { state = Idle }
 
-    fun allowNextShortcut(eligible: Boolean): Boolean {
-        state = if (eligible) Armed(elapsedMillis() + LIFETIME_MS) else Idle
-        return eligible
+    fun allowNextShortcut(eligible: Boolean, confirmedAt: Long = elapsedMillis()): Boolean {
+        val until = confirmedAt + LIFETIME_MS
+        val allowed = eligible && elapsedMillis() < until
+        state = if (allowed) Armed(until) else Idle
+        return allowed
     }
 
     fun inspectOnShortcut(eligible: () -> Boolean, readFocused: () -> ControlKind): Boolean {

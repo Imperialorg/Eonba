@@ -114,24 +114,36 @@ class AssistantActivity : Activity() {
     }
 
     private fun reviewInspection() {
+        InspectionAccess.cancel()
+        consent?.dismiss()
+        consent = null
         if (!InspectionAccess.eligible(this)) {
             inspectionStatus.text = "Inspection is off. Unlock the device, select EON as assistant, and enable its accessibility service and shortcut first."
             return
         }
+        var confirmed = false
         val dialog = AlertDialog.Builder(this)
             .setTitle("Allow one focused control inspection?")
             .setMessage("EON will close. Focus the control you choose with accessibility, then tap EON’s accessibility shortcut within 30 seconds. EON shows only its kind (such as Button), not its label, contents or value. Hidden, sensitive and editable controls are skipped. Reopen EON to cancel.")
             .setNegativeButton("Cancel", null)
-            .setPositiveButton("Allow next shortcut") { _, _ ->
-                if (resumed && InspectionAccess.session.allowNextShortcut(InspectionAccess.eligible(this))) {
-                    InspectionAccess.clearAfterTimeout()
-                    finish()
-                } else {
-                    inspectionStatus.text = "Inspection was not allowed."
+            .setPositiveButton("Allow next shortcut") { source, _ ->
+                if (source !== consent || !resumed) return@setPositiveButton
+                confirmed = true
+                inspectionStatus.text = "Checking approval. No control has been read."
+                InspectionAccess.confirm({ resumed && InspectionAccess.eligible(this) }) { allowed ->
+                    if (allowed) finish() else inspectionStatus.text = "Inspection unavailable. No control was read."
                 }
             }
             .create()
         consent = dialog
+        // Negative button, back, outside tap, or other dismissal never leaves an approval alive.
+        // The positive button also auto-dismisses, but its still-foreground proof may complete.
+        dialog.setOnDismissListener {
+            if (consent === dialog) {
+                consent = null
+                if (!confirmed) InspectionAccess.cancel()
+            }
+        }
         dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         if (Build.VERSION.SDK_INT >= 31) dialog.window?.setHideOverlayWindows(true)
         dialog.show()
@@ -166,6 +178,7 @@ class AssistantActivity : Activity() {
 
     override fun onPause() {
         resumed = false
+        InspectionAccess.cancelPendingConfirmation()
         consent?.dismiss()
         consent = null
         super.onPause()

@@ -18,11 +18,14 @@ import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityManager
 import android.view.accessibility.AccessibilityNodeInfo
+import java.util.concurrent.Executors
 
 internal object InspectionAccess {
-    val session = OneShotInspection(SystemClock::elapsedRealtime)
     private val handler = Handler(Looper.getMainLooper())
-    private val revoke = Runnable { session.revoke() }
+    private val consent = VerifiedInspectionConsent(
+        SystemClock::elapsedRealtime, Executors.newSingleThreadExecutor(), { handler.post(it) },
+    ) { InspectionCredential.issue()?.use { it.redeem() } == true }
+    private val revoke = Runnable { cancel() }
     var shortcutAvailable = false
         private set
 
@@ -33,25 +36,48 @@ internal object InspectionAccess {
 
     fun cancel() {
         handler.removeCallbacks(revoke)
-        session.revoke()
+        consent.revoke()
     }
 
-    fun clearAfterTimeout() {
+    fun cancelPendingConfirmation() = consent.cancelPending()
+
+    fun confirm(eligible: () -> Boolean, ready: (Boolean) -> Unit) {
+        cancel()
+        consent.confirm(eligible) { allowed ->
+            if (allowed) clearAfterTimeout()
+            ready(allowed)
+        }
+    }
+
+    fun inspect(eligible: () -> Boolean, readFocused: () -> ControlKind, deliver: () -> Unit) {
+        if (consent.inspect(eligible, readFocused)) {
+            clearAfterTimeout()
+            deliver()
+        }
+    }
+
+    fun takeResult(eligible: Boolean): ControlKind? = consent.takeResult(eligible)
+
+    private fun clearAfterTimeout() {
         handler.removeCallbacks(revoke)
         handler.postDelayed(revoke, OneShotInspection.LIFETIME_MS)
     }
 
     fun eligible(context: Context): Boolean {
         if (Build.VERSION.SDK_INT < 34 || !shortcutAvailable) return false
-        val role = context.getSystemService(RoleManager::class.java)
-        val keyguard = context.getSystemService(KeyguardManager::class.java)
-        val power = context.getSystemService(PowerManager::class.java)
-        val manager = context.getSystemService(AccessibilityManager::class.java)
-        val self = ComponentName(context, FocusedControlService::class.java)
-        return power?.isInteractive == true && keyguard?.isKeyguardLocked == false &&
-            role?.isRoleAvailable(RoleManager.ROLE_ASSISTANT) == true && role.isRoleHeld(RoleManager.ROLE_ASSISTANT) &&
-            manager?.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
-                ?.any { ComponentName.unflattenFromString(it.id) == self } == true
+        return try {
+            val role = context.getSystemService(RoleManager::class.java)
+            val keyguard = context.getSystemService(KeyguardManager::class.java)
+            val power = context.getSystemService(PowerManager::class.java)
+            val manager = context.getSystemService(AccessibilityManager::class.java)
+            val self = ComponentName(context, FocusedControlService::class.java)
+            power?.isInteractive == true && keyguard?.isKeyguardLocked == false &&
+                role?.isRoleAvailable(RoleManager.ROLE_ASSISTANT) == true && role.isRoleHeld(RoleManager.ROLE_ASSISTANT) &&
+                manager?.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+                    ?.any { ComponentName.unflattenFromString(it.id) == self } == true
+        } catch (_: RuntimeException) {
+            false
+        }
     }
 }
 
@@ -70,8 +96,8 @@ class FocusedControlService : AccessibilityService() {
         override fun onClicked(controller: AccessibilityButtonController) {
             if (!listening || Build.VERSION.SDK_INT < 34) return
             try {
-                val deliver = InspectionAccess.session.inspectOnShortcut(
-                    eligible = { controller.isAccessibilityButtonAvailable && InspectionAccess.eligible(this@FocusedControlService) },
+                InspectionAccess.inspect(
+                    eligible = { listening && controller.isAccessibilityButtonAvailable && InspectionAccess.eligible(this@FocusedControlService) },
                     readFocused = {
                         // One accessibility-focused node, not input focus, the active root or window list.
                         val n = findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
@@ -80,9 +106,7 @@ class FocusedControlService : AccessibilityService() {
                             n.isPassword, n.isEditable, n.inputType,
                         ) { n.className }
                     },
-                )
-                if (deliver) {
-                    InspectionAccess.clearAfterTimeout()
+                ) {
                     startActivity(Intent(this@FocusedControlService, InspectionResultActivity::class.java)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 }
