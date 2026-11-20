@@ -6,7 +6,10 @@ use std::path::Path;
 
 use eon_capability::{EonError, EonResult, wasm_tool::call_i32_export};
 #[cfg(target_os = "linux")]
-use eon_capability::{mcp_pinning::ToolDescriptor, registry::AllowedTool};
+use eon_capability::{
+    mcp_pinning::ToolDescriptor,
+    registry::{AllowedTool, ToolInput},
+};
 
 #[cfg(target_os = "linux")]
 fn assert_registry_rejects_imports(module: &[u8]) {
@@ -24,6 +27,20 @@ fn assert_registry_rejects_imports(module: &[u8]) {
     .unwrap();
     assert!(
         matches!(registry.register(descriptor, module), Err(EonError::SecurityViolation(m)) if m.contains("import"))
+    );
+    assert!(matches!(
+        registry.dispatch(
+            "fixture",
+            &mut approval_fixture::workflow(),
+            ToolInput { json: "0", label: &approval_fixture::operator() },
+        ),
+        Err(EonError::CapabilityNotFound { capability_id }) if capability_id == "fixture"
+    ));
+    let frames = eon_foundation::journal::replay(registry.root.with_file_name("journal")).unwrap();
+    assert_eq!(frames.len(), 2);
+    assert_eq!(
+        frames[1].payload,
+        b"tool.dispatch outcome attempt=1 not_registered"
     );
 }
 

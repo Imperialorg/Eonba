@@ -2,7 +2,9 @@
 //! trusted embedder supplies the allowlist, labels, task profile and masked runner.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use eon_foundation::{group_commit::GroupCommitJournal, scrubber::redaction_marker};
 use eon_primitives::{EonError, EonResult};
 use serde_json::Value;
 
@@ -68,6 +70,7 @@ pub struct CapabilityRegistry {
     pins: PinStore,
     melon: Option<Box<dyn MaskedRunner>>,
     worker: Option<WasmWorker>,
+    journal: Option<Arc<GroupCommitJournal>>,
 }
 
 impl CapabilityRegistry {
@@ -104,6 +107,14 @@ impl CapabilityRegistry {
     /// Trusted host configuration, never a descriptor or tool argument.
     pub fn with_wasm_worker(mut self, worker: WasmWorker) -> Self {
         self.worker = Some(worker);
+        self
+    }
+
+    /// Host-owned durable journal outside the workspace. Both dispatch APIs
+    /// require an acknowledged attempt before admission and an acknowledged
+    /// outcome before returning. An unmatched attempt is not a success.
+    pub fn with_dispatch_journal(mut self, journal: Arc<GroupCommitJournal>) -> Self {
+        self.journal = Some(journal);
         self
     }
 
@@ -193,6 +204,39 @@ impl CapabilityRegistry {
                 .context
                 .join(&SecurityLabel::external("masked context"));
         }
+        let journal = Arc::clone(self.journal.as_ref().ok_or_else(|| {
+            EonError::SecurityViolation(
+                "registered dispatch requires a durable audit journal".into(),
+            )
+        })?);
+        // Never journal arbitrary guest text (including names, error messages,
+        // provenance and masked context). A short redaction tag is not an
+        // approval identity; use the attempt's sequence to pair its outcome.
+        let attempt = journal.append_scrubbed(&format!(
+            "tool.dispatch attempt name={}",
+            redaction_marker(name)
+        ))?;
+        let result = self.dispatch_checked(name, profile, input, untrusted_context);
+        let status = match &result {
+            Ok(_) => "ok",
+            Err(EonError::CapabilityNotFound { .. }) => "not_registered",
+            Err(EonError::SecurityViolation(_)) => "denied",
+            Err(EonError::ValidationError(_)) => "invalid",
+            Err(EonError::ResourceExhausted { .. }) => "exhausted",
+            Err(EonError::ResourceLeaseTimeout { .. }) => "timeout",
+            Err(_) => "failed",
+        };
+        journal.append_scrubbed(&format!("tool.dispatch outcome attempt={attempt} {status}"))?;
+        result
+    }
+
+    fn dispatch_checked(
+        &mut self,
+        name: &str,
+        profile: &mut TaskProfile,
+        input: ToolInput<'_>,
+        untrusted_context: Option<&str>,
+    ) -> EonResult<ToolOutcome> {
         let tool = self
             .tools
             .get(name)

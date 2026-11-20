@@ -1,12 +1,12 @@
 #![cfg(target_os = "linux")]
 
 mod approval_fixture;
-use approval_fixture::{Fixture, prepared};
+use approval_fixture::{Fixture, operator, prepared, workflow};
 use eon_capability::{
     EonError, EonResult,
     ifc::{
         labels::{CognitiveTaint, ConfidentialityLevel, IntegrityLevel, SecurityLabel},
-        rule_of_two::{Capability, ControlParameter, TaskProfile},
+        rule_of_two::{Capability, ControlParameter},
     },
     mcp_pinning::ToolDescriptor,
     melon::{MaskedRunner, ToolCall},
@@ -43,25 +43,6 @@ fn registry(schema: &str, module: &[u8]) -> Fixture {
     reg
 }
 
-fn operator() -> SecurityLabel {
-    SecurityLabel::new(
-        IntegrityLevel::Trusted,
-        ConfidentialityLevel::Public,
-        vec!["operator".into()],
-    )
-}
-
-fn workflow() -> TaskProfile {
-    TaskProfile {
-        context: operator(),
-        resolves_secret: false,
-        reads_outside_sandbox: false,
-        capabilities: vec![],
-        control_parameters: vec![],
-        air_gapped: false,
-    }
-}
-
 fn invoke(reg: &mut CapabilityRegistry, json: &str) -> EonResult<String> {
     reg.dispatch(
         "echo",
@@ -78,6 +59,76 @@ mod registry_tests {
     use super::*;
     use eon_capability::wasm_tool::{MAX_WORKER_WALL_TIME, WasmWorker};
     use std::{path::Path, time::Duration};
+
+    #[test]
+    fn exhausted_journal_refuses_admission_or_withholds_the_guest_result() {
+        use eon_foundation::{group_commit::GroupCommitJournal, journal::replay_from};
+        use std::{fs, sync::Arc};
+
+        for slots in [0, 1] {
+            let mut fixture = registry(OBJECT, ECHO);
+            let dir = fixture.root.with_file_name("last-segment");
+            // Model a final, empty journal segment. Reopen the real writer with
+            // room for either no records or just the attempt, without mocking fsync.
+            drop(GroupCommitJournal::spawn(&dir, 1).unwrap());
+            let first = u64::MAX - slots;
+            fs::rename(
+                dir.join("seg_00000000000000000001.eonj"),
+                dir.join(format!("seg_{first:020}.eonj")),
+            )
+            .unwrap();
+            let journal = Arc::new(GroupCommitJournal::spawn(&dir, 1).unwrap());
+            fixture.registry = fixture.registry.with_dispatch_journal(journal);
+            let mut profile = workflow();
+            let result = fixture.dispatch(
+                "echo",
+                &mut profile,
+                ToolInput {
+                    json: MSG,
+                    label: &operator(),
+                },
+            );
+            assert!(
+                matches!(result, Err(EonError::InternalError(m)) if m.contains("sequence space exhausted"))
+            );
+            assert_eq!(
+                profile.context.integrity == IntegrityLevel::Untrusted,
+                slots == 1
+            );
+            drop(fixture.registry);
+            let frames = replay_from(&dir, first).unwrap();
+            assert_eq!(frames.len() as u64, slots);
+            if let Some(frame) = frames.first() {
+                assert_eq!(frame.seq_no, first);
+                assert!(frame.payload.starts_with(b"tool.dispatch attempt "));
+            }
+        }
+    }
+
+    #[test]
+    fn missing_audit_journal_denies_even_an_approved_registered_tool() {
+        let fixture = prepared([approved(OBJECT, TRAP)]).unwrap();
+        let mut reg = CapabilityRegistry::with_allowlist(
+            [approved(OBJECT, TRAP)],
+            DurableApprovals::open(&fixture.root).unwrap(),
+        )
+        .unwrap()
+        .with_wasm_worker(WasmWorker::new(&fixture.executable, MAX_WORKER_WALL_TIME).unwrap());
+        reg.register(descriptor(OBJECT), TRAP).unwrap();
+        assert!(
+            matches!(invoke(&mut reg, MSG), Err(EonError::SecurityViolation(m)) if m.contains("audit journal"))
+        );
+        let mut profile = workflow();
+        let input = ToolInput {
+            json: MSG,
+            label: &operator(),
+        };
+        assert!(
+            matches!(reg.dispatch_guarded("echo", &mut profile, input, Some("external")),
+                Err(EonError::SecurityViolation(m)) if m.contains("audit journal"))
+        );
+        assert_eq!(profile.context.integrity, IntegrityLevel::Untrusted);
+    }
 
     #[test]
     fn only_a_protected_pinned_native_worker_can_be_provisioned() {
@@ -131,7 +182,9 @@ mod registry_tests {
         ] {
             let entry = approved(OBJECT, ECHO);
             store.approve(&entry).unwrap();
-            let mut reg = CapabilityRegistry::with_allowlist([entry], store.clone()).unwrap();
+            let mut reg = CapabilityRegistry::with_allowlist([entry], store.clone())
+                .unwrap()
+                .with_dispatch_journal(root.journal.clone());
             let has_worker = worker.is_some();
             if let Some(worker) = worker {
                 reg = reg.with_wasm_worker(worker);
