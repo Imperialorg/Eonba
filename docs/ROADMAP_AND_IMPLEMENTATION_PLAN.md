@@ -188,6 +188,7 @@
   - **Files**: `src/router.rs`, `src/reflex.rs`, `src/tactical_slm.rs`, `src/strategic_frontier.rs`
   - **Requirements**: Route latency < 20ms for Tier 0 reflex, < 120ms for Tier 1 local SLM. Dual-stream split: silent `<think>...</think>` scratchpad routed to HUD/CLI, post-`</think>` tokens to TTS.
   - **Unit Tests**: `cargo test -p eon-cognition router_tests`.
+  - **Latency evidence**: On Linux, 2,000 complete reflex turns had a p95 of 621 ns. The opt-in `router_native_gate` times 40 complete local responses after warmup and requires the pinned P0 GGUF. That model was unavailable here, so there is no Tier 1 latency result.
 
 - [x] **Task 6.2: Appraisal Engine & Hybrid Cognitive Memory**
   - **Crate**: `eon-cognition`
@@ -323,6 +324,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Unit Tests**: `cargo test -p eon-cli terminal_tests`.
   - **Verified subset**: Build `eon-cli` with `--features audio-input`, run `eon watch <journal-dir>`, open `/audio` and press F2. Pasted text cannot start capture. F2, `/`, leaving the view or quitting stops it. The meter keeps at most 48 peak readings and no PCM. A dedicated Linux null-sink monitor delivered a 50% peak; its recording stream disappeared on `/` before the process exited. This test did not use a physical microphone.
   - **Terminal graphics**: On Unix, `eon watch <journal-dir> --image <file>` accepts one PNG or JPEG. `/vision` displays that still, not a screen capture. Leaving releases it; re-entry does not reopen the file. Kitty and VT340 xterm both displayed the selected colors after the original file was unlinked and cleared them on exit. The path is visible to shell history and OS process inspection.
+  - **Control-flow canvas**: The `cfg` example reads one bounded GCC successor export. Software Vulkan readback verified all seven labels and eight directed edges of a real function, including a back edge and a self-loop.
 
 - [ ] **Task 10.2: Sub-170ms Time-To-First-Audio (TTFA) Benchmark**
   - **Directory**: `tests/latency-benchmarks/`
