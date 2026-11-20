@@ -55,6 +55,8 @@ fn declaration_name(n: Node<'_>) -> Option<Node<'_>> {
         | "object_declaration"
         | "companion_object" => n.child_by_field_name("name"),
         "type_alias" => n.child_by_field_name("type"),
+        // An untyped set(name) binding is a direct child, not a parameter node.
+        "setter" => child(n, "identifier"),
         "parameter" | "class_parameter" | "variable_declaration" | "type_parameter" => n
             .named_children(&mut n.walk())
             .find(|c| c.kind() == "identifier"),
@@ -270,6 +272,14 @@ impl<'t, 's> Subject<'t, 's> {
             child(child(class, "modifiers")?, "class_modifier")?,
             ["data"],
         )?;
+        if child(class, "class_body").is_some_and(|body| {
+            body.named_children(&mut body.walk())
+                .filter(|member| member.kind() == "property_declaration")
+                .filter_map(|member| child(member, "variable_declaration"))
+                .any(|binding| self.declares(binding, self.text(name)))
+        }) {
+            return None;
+        }
         (id == name && self.resolve(params, self.text(id), "class_parameter")? == param)
             .then(|| insert(name.start_byte(), "val "))
     }
@@ -317,11 +327,52 @@ impl<'t, 's> Subject<'t, 's> {
         Some((var.byte_range(), "val".into()))
     }
 
+    // Both conversions exist on Collection<E>. The boxed return type alone
+    // does not distinguish it from e.g. IntArray, which has no toIntArray().
+    fn collection_receiver(&self, receiver: Node<'t>, elem: &str) -> Option<()> {
+        let id = match receiver.kind() {
+            "identifier" => receiver,
+            "call_expression" => {
+                let [nav, args] = shape(receiver, ["navigation_expression", "value_arguments"])?;
+                let [id, _, method] = shape(nav, ["identifier", ".", "identifier"])?;
+                shape(args, ["(", ")"])?;
+                if self.text(method) != "sorted" || !self.unshadowed("sorted") {
+                    return None;
+                }
+                id
+            }
+            _ => return None,
+        };
+        let ty = self.parameter_type(id)?;
+        let param = parent(ty, "parameter")?;
+        let fun = parent(
+            parent(param, "function_value_parameters")?,
+            "function_declaration",
+        )?;
+        let before = std::iter::successors(param.prev_sibling(), |n| n.prev_sibling())
+            .find(|n| !n.is_extra())?;
+        if !matches!(before.kind(), "(" | ",") // no vararg
+            || fun.parent()? != self.root || child(fun, ".").is_some() || ty.kind() != "user_type"
+        {
+            return None;
+        }
+        let [base, args] = shape(ty, ["identifier", "type_arguments"])?;
+        let [_, projection, _] = shape(args, ["<", "type_projection", ">"])?;
+        let [inner] = shape(projection, ["user_type"])?;
+        let base = self.text(base);
+        (matches!(
+            base,
+            "List" | "Collection" | "Set" | "MutableList" | "MutableCollection" | "MutableSet"
+        ) && self.unshadowed(base)
+            && self.simple_type(inner)? == elem)
+            .then_some(())
+    }
+
     fn primitive_array(&self, leaf: Node<'t>, msg: &str) -> Option<Edit> {
         let body = enclosing(leaf, "function_body")?;
         let [_, call] = shape(body, ["=", "call_expression"])?;
         let [nav, args] = shape(call, ["navigation_expression", "value_arguments"])?;
-        let [_, _, method] = shape(nav, ["_", ".", "identifier"])?;
+        let [receiver, _, method] = shape(nav, ["_", ".", "identifier"])?;
         shape(args, ["(", ")"])?;
         let expected = self.simple_type(return_type(body)?)?;
         let elem = expected.strip_suffix("Array")?;
@@ -337,6 +388,7 @@ impl<'t, 's> Subject<'t, 's> {
         {
             return None;
         }
+        self.collection_receiver(receiver, elem)?;
         Some((method.byte_range(), new))
     }
 

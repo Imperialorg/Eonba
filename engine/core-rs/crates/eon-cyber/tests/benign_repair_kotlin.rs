@@ -131,6 +131,22 @@ fn declaration_repairs_do_not_consume_comments_or_other_declarations() {
 }
 
 #[test]
+fn data_parameter_refuses_conflicting_member_properties_by_normalized_name() {
+    let code = "DATA_CLASS_NOT_PROPERTY_PARAMETER";
+    for (param, member) in [
+        ("edition", "edition"),
+        ("edition", "`edition`"),
+        ("`edition`", "edition"),
+    ] {
+        let src =
+            format!("data class Volume(§{param}: Int) {{\n private val {member} = {param}\n}}");
+        assert!(repair(&src, code, "").is_none(), "{src}");
+    }
+    let src = "data class Volume(§edition: Int) {\n val first = edition\n}";
+    assert_eq!(repair(src, code, "").unwrap(), src.replace('§', "val "));
+}
+
+#[test]
 fn supertype_requires_a_unique_open_class_with_an_implicit_empty_constructor() {
     let code = "SUPERTYPE_NOT_INITIALIZED";
     let src =
@@ -191,6 +207,42 @@ fn primitive_array_replaces_only_the_terminal_method_name() {
     ] {
         assert!(repair(&bad, code, msg).is_none(), "{bad}");
     }
+}
+
+#[test]
+fn primitive_array_requires_a_proven_collection_receiver() {
+    let code = "RETURN_TYPE_MISMATCH";
+    let msg = "Return type mismatch: expected 'IntArray', actual 'Array<Int>'.";
+    let direct = "fun pack(xs: List<Int>): IntArray = §xs.toTypedArray()";
+    let sorted = direct.replace("xs.toTyped", "xs.sorted().toTyped");
+    for bad in [
+        direct.replace("List<Int>", "IntArray"),
+        direct.replace("List<Int>", "Custom<Int>"),
+        direct.replace("List<Int>", "List<Long>"),
+        direct.replace("xs: List", "vararg xs: List"),
+        direct.replace("xs.toTyped", "xs.unknown().toTyped"),
+        format!("typealias List<T> = Custom<T>\n{direct}"),
+        format!("fun List<Int>.sorted() = intArrayOf()\n{sorted}"),
+    ] {
+        assert!(repair(&bad, code, msg).is_none(), "{bad}");
+    }
+    assert_eq!(
+        repair(&sorted, code, msg).unwrap(),
+        sorted
+            .replace('§', "")
+            .replace("toTypedArray", "toIntArray")
+    );
+}
+
+#[test]
+fn illegal_escape_refuses_a_regex_callable_bound_by_a_setter() {
+    let code = "ILLEGAL_ESCAPE";
+    let src = "var callback: (String) -> Unit = {}\n set(Regex) { Regex(\"§\\d\") }";
+    for bad in [src.to_owned(), src.replace("set(Regex)", "set(`Regex`)")] {
+        assert!(repair(&bad, code, "").is_none(), "{bad}");
+    }
+    let other = src.replace("set(Regex)", "set(f)");
+    assert_eq!(repair(&other, code, "").unwrap(), other.replace('§', "\\"));
 }
 
 #[test]
