@@ -117,9 +117,7 @@ fn deadline_kills_and_reaps_confined_child_blocked_on_input() {
     let (reader, writer) = io::pipe().unwrap(); // Deliberately withhold EOF.
     let running = Running::spawn(&tr, StreamFilter::AsciiUppercase.args(), reader.into()).unwrap();
     let proc = Path::new("/proc").join(running.child.id().to_string());
-    let fixed = fs::metadata("/usr/bin/tr").unwrap();
-    let actual = fs::metadata(proc.join("exe")).unwrap();
-    assert_eq!((actual.dev(), actual.ino()), (fixed.dev(), fixed.ino()));
+    crate::pty::pty_tests::assert_child_image(&proc, "/usr/bin/gnutr", "/usr/bin/tr");
     assert_eq!(fs::read(proc.join("cmdline")).unwrap(), b"tr\0a-z\0A-Z\0");
     assert!(fs::read(proc.join("environ")).unwrap().is_empty());
     assert_eq!(fs::read_link(proc.join("cwd")).unwrap(), Path::new("/"));
@@ -130,12 +128,17 @@ fn deadline_kills_and_reaps_confined_child_blocked_on_input() {
     assert!(status.lines().any(|s| s == "NoNewPrivs:\t1"));
     assert!(status.lines().any(|s| s == "Seccomp:\t2"));
     let limits = fs::read_to_string(proc.join("limits")).unwrap();
-    let size = limits
-        .lines()
-        .find(|line| line.starts_with("Max file size"))
-        .unwrap();
-    let soft: u64 = size.split_whitespace().nth(3).unwrap().parse().unwrap();
-    assert!(soft <= MAX_PROCESS_OUTPUT as u64 + 1);
+    for (name, cap) in [
+        ("Max file size", MAX_PROCESS_OUTPUT as u64 + 1),
+        ("Max address space", 64 * 1024 * 1024),
+        ("Max core file size", 0),
+    ] {
+        let line = limits.lines().find_map(|s| s.strip_prefix(name)).unwrap();
+        let mut fields = line.split_whitespace();
+        let soft: u64 = fields.next().unwrap().parse().unwrap();
+        let hard: u64 = fields.next().unwrap().parse().unwrap();
+        assert!(soft <= hard && hard <= cap, "{name}: {line}");
+    }
     let captures = [&running.stdout, &running.stderr].map(|f| {
         let m = f.metadata().unwrap();
         (m.dev(), m.ino())

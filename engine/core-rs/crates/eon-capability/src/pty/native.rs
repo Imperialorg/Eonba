@@ -81,6 +81,59 @@ impl Utility {
             Self::Wc => "wc",
         }
     }
+
+    fn pin_program(self) -> io::Result<File> {
+        let bin = Path::new("/usr/bin");
+        // Ubuntu's split coreutils packages install dedicated GNU executables
+        // under gnu-prefixed names. The unprefixed selectors can point at a
+        // multicall binary. Never follow them or grant that binary's runtime.
+        host_program(
+            &bin.join(format!("gnu{}", self.name())),
+            &bin.join(self.name()),
+        )
+    }
+}
+
+fn host_program(split: &Path, classic: &Path) -> io::Result<File> {
+    let program = match host_elf(split) {
+        Err(e) if e.kind() == ErrorKind::NotFound => host_elf(classic)?,
+        result => result?,
+    };
+    if program.metadata()?.mode() & 0o111 == 0 {
+        return Err(io::Error::from(ErrorKind::PermissionDenied));
+    }
+    Ok(program)
+}
+
+#[cfg(test)]
+#[test]
+fn only_a_missing_split_image_allows_a_classic_image() {
+    let split = Path::new("/usr/bin/gnucat");
+    let regular = if split.try_exists().unwrap() {
+        split
+    } else {
+        Path::new("/usr/bin/cat")
+    };
+    // Controlled missing entry, symlink and non-regular file in trusted dirs;
+    // no privileges, system installation changes or fixture execution.
+    let missing = Path::new("/proc/eon-no-such-entry");
+    let link = Path::new("/proc/self");
+    let pinned = host_program(missing, regular).unwrap().metadata().unwrap();
+    let expected = regular.symlink_metadata().unwrap();
+    assert_eq!(
+        (pinned.dev(), pinned.ino()),
+        (expected.dev(), expected.ino())
+    );
+    for (first, second) in [(link, regular), (missing, link)] {
+        assert_eq!(
+            host_program(first, second).unwrap_err().raw_os_error(),
+            Some(libc::ELOOP)
+        );
+    }
+    assert_eq!(
+        host_program(Path::new("/"), regular).unwrap_err().kind(),
+        ErrorKind::PermissionDenied
+    );
 }
 
 impl Image {
@@ -91,10 +144,7 @@ impl Image {
                 "PTY requires procfs",
             ));
         }
-        let program = host_elf(&Path::new("/usr/bin").join(utility.name()))?;
-        if program.metadata()?.mode() & 0o111 == 0 {
-            return Err(io::Error::from(ErrorKind::PermissionDenied));
-        }
+        let program = utility.pin_program()?;
         let (multiarch, ld) = match std::env::consts::ARCH {
             "x86_64" => ("x86_64-linux-gnu", "ld-linux-x86-64.so.2"),
             "aarch64" => ("aarch64-linux-gnu", "ld-linux-aarch64.so.1"),

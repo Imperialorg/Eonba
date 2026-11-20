@@ -4,7 +4,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn owner(authority: &IdentityAuthority) -> ProcessOwner {
@@ -16,6 +16,22 @@ fn owner(authority: &IdentityAuthority) -> ProcessOwner {
 
 fn pid(p: &PtyProvider, id: &SessionId) -> u32 {
     p.shared.lock().sessions[id].terminal.pid()
+}
+
+pub(super) fn assert_child_image(proc: &Path, split: &str, classic: &str) {
+    let expected = match fs::symlink_metadata(split) {
+        Err(e) if e.kind() == ErrorKind::NotFound => fs::symlink_metadata(classic).unwrap(),
+        result => result.unwrap(),
+    };
+    assert!(
+        expected.is_file(),
+        "expected a standalone image, not a link"
+    );
+    let actual = fs::metadata(proc.join("exe")).unwrap();
+    assert_eq!(
+        (actual.dev(), actual.ino()),
+        (expected.dev(), expected.ino())
+    );
 }
 
 fn until(mut ready: impl FnMut() -> bool) {
@@ -388,9 +404,7 @@ fn child_has_only_pty_stdio_no_environment_no_secret_and_a_private_group() {
     let proc = PathBuf::from(format!("/proc/{pid}"));
     assert!(fs::read(proc.join("environ")).unwrap().is_empty());
     assert_eq!(fs::read(proc.join("cmdline")).unwrap(), b"cat\0");
-    let actual = fs::metadata(proc.join("exe")).unwrap();
-    let fixed = fs::metadata("/usr/bin/cat").unwrap();
-    assert_eq!((actual.dev(), actual.ino()), (fixed.dev(), fixed.ino()));
+    assert_child_image(&proc, "/usr/bin/gnucat", "/usr/bin/cat");
     assert_eq!(fs::read_link(proc.join("cwd")).unwrap(), PathBuf::from("/"));
     let status = fs::read_to_string(proc.join("status")).unwrap();
     assert!(status.lines().any(|s| s == "NoNewPrivs:\t1"));
