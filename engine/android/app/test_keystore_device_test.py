@@ -17,6 +17,7 @@ class InstrumentationResults(unittest.TestCase):
         for key, result in (("keystore", "PASS-issue"), ("keystore", "PASS-restart"),
                             ("demo", "PASS-denied"), ("demo", "PASS-allowed"), ("nativeVault", "PASS"),
                             ("voiceHud", "PASS-stock"), ("voiceHud", "PASS-session"),
+                            ("workflowNotice", "PASS-session"),
                             ("assistantActivity", "PASS-picker-canceled")):
             with self.subTest(key=key, result=result):
                 check_result(f"INSTRUMENTATION_RESULT: {key}={result}\r\nINSTRUMENTATION_CODE: -1\r\n", key, result)
@@ -94,6 +95,41 @@ class DeviceModes(unittest.TestCase):
         manual = parse_args(["--preconfigured-hud-serial", "emulator-5554"])
         self.assertFalse(manual.stock_hud)
         self.assertIsNone(manual.serial)
+
+    def test_workflow_observes_only_its_own_result_and_preserves_operator_target(self):
+        manual = parse_args(["--preconfigured-workflow-serial", "emulator-5556"])
+        self.assertIsNone(manual.serial)
+        serial = manual.preconfigured_workflow_serial
+        self.assertEqual(serial, "emulator-5556")
+        for key in ("workflowNotice", "voiceHud"):
+            calls = []
+
+            def response(cmd, **kwargs):
+                self.assertEqual(cmd[1:3], ["-s", serial])
+                args = cmd[3:]
+                calls.append(args)
+                if args == ["shell", "pm", "list", "packages", "-u", "--user", "all"]:
+                    return f"package:android\npackage:{TARGET}\n"
+                if args == ["install", "-t", Path("/test.apk")] or args == ["uninstall", TEST]:
+                    return "Success\n"
+                self.assertEqual(args, ["shell", "am", "instrument", "-w", "-r",
+                                        f"{TEST}/{TARGET}.WorkflowNoticeAcceptance"])
+                self.assertGreater(kwargs["timeout"], 8 * 30)
+                return f"INSTRUMENTATION_RESULT: {key}=PASS-session\nINSTRUMENTATION_CODE: -1\n"
+
+            with (self.subTest(key=key),
+                  patch("keystore_device_test.subprocess.check_output", side_effect=response),
+                  patch("keystore_device_test.require_stock_emulator") as emulator,
+                  patch("keystore_device_test.require_setup_complete") as setup,
+                  patch("keystore_device_test.require_preconfigured_apk") as identity,
+                  contextlib.redirect_stdout(io.StringIO()),
+                  contextlib.nullcontext() if key == "workflowNotice" else self.assertRaises(SystemExit)):
+                run(Path("/sdk"), serial, Path("/test.apk"), preconfigured_workflow=True)
+            self.assertEqual(emulator.call_args.args[1:], (serial, 34))
+            setup.assert_called_once()
+            identity.assert_called_once()
+            self.assertEqual(len(calls), 4)
+            self.assertEqual(calls[-1], ["uninstall", TEST])
 
     def test_selected_session_requires_both_setup_steps_without_changing_settings(self):
         for values in (["0"], ["null"], ["1", "0"], ["1", "null"], ["1", "1"]):
@@ -191,7 +227,11 @@ class DeviceModes(unittest.TestCase):
                      ["--serial", "emulator-5554", "--mic-phase", "stop"],
                      ["--build-only", "--mic-phase", "complete"],
                      ["--preconfigured-mic-serial", "emulator-5554", "--mic-phase", "all"],
-                     ["--preconfigured-hud-serial", "emulator-5554", "--mic-phase", "complete"]):
+                     ["--preconfigured-hud-serial", "emulator-5554", "--mic-phase", "complete"],
+                     ["--preconfigured-workflow-serial", "emulator-5556", "--mic-phase", "complete"],
+                     ["--preconfigured-workflow-serial", "emulator-5556", "--demo-denied"],
+                     ["--preconfigured-workflow-serial", "emulator-5556", "--serial", "emulator-5554"],
+                     ["--preconfigured-workflow-serial", "emulator-5556", "--preconfigured-hud-serial", "emulator-5556"]):
             with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 parse_args(args)
 

@@ -311,7 +311,8 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/main/kotlin/com/eon/android/ui/EonOverlayManager.kt`, `AudioVisualizerView.kt`
   - **Requirements**: Persistent unobtrusive floating presence. Visualizes thought state, active listening wave, and task completion notices.
   - **Verified subset**: Android opened the selected assistant's card on API 35. A visible user-started analysis of a built-in tone produced 11 levels (peak 42% RMS); Stop/Clear, Back and a fresh invocation passed. The card can count EON's own Android activity tasks. Neither the tone nor those counts establish a microphone waveform or a live workflow feed.
-  - **Live meter**: On setup-complete API 35 emulators, the selected card refused Start without reviewed access. With reviewed access, a private virtual input produced 12 half-second levels (highest RMS 43%). The observer saw EON's recording operation active during measurement and inactive after completion, Stop and dismissal. A fresh card opened with the meter off. Live kernel workflow completion notices are not yet verified.
+  - **Live meter**: On setup-complete API 35 emulators, the selected card refused Start without reviewed access. With reviewed access, a private virtual input produced 12 half-second levels (highest RMS 43%). The observer saw EON's recording operation active during measurement and inactive after completion, Stop and dismissal. A fresh card opened with the meter off.
+  - **Workflow notice**: On API 35, tapping **Check model profile** in the selected assistant card completed one kernel task. The card showed the count and the expected profile; after dismissal, the next card had neither. This verifies notices for that user-started workflow, not a persistent overlay outside the assistant session.
 
 - [ ] **Task 9.5: Native Digital Assistant Role & OS Survival (`ROLE_ASSISTANT`)**
   - **Directory**: `clients/android/app/`

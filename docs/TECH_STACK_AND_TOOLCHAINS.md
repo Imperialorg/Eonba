@@ -161,7 +161,7 @@ an expanded, unlocked assistant card. Selection as assistant does not start capt
 The meter shows half-second RMS levels; Stop, hide or loss of the session ends the
 take. It does not record to a file, listen in the background or measure acoustic TTFA.
 
-Use separate instrumentation gates for the stock app, selected tone HUD and selected microphone HUD:
+Use separate instrumentation gates for the stock app and the selected assistant's tone, workflow and microphone controls:
 
 * **Clean stock device:** On a **new disposable** `system-images;android-35;google_apis;x86_64`
   AVD, verify `adb -s "$SERIAL" emu avd name` matches the AVD you just created.
@@ -179,6 +179,16 @@ Use separate instrumentation gates for the stock app, selected tone HUD and sele
   close the card, wait a second, and invoke again. The observer must see a real completed
   graph, its cleared state, dismissal and a clean new card for
   `voiceHud=PASS-session`. It never injects gestures, changes roles or grants permissions.
+* **Selected-role workflow:** Use a setup-complete, unlocked, disposable API 34+ AVD with
+  less than 8 GB of memory. Install the matching debug APK, select EON in Android's role
+  picker and leave the test APK uninstalled. No microphone or accessibility permission
+  is needed. With EON's role status visible, run
+  `python3 app/keystore_device_test.py --preconfigured-workflow-serial "$SERIAL"`.
+  Invoke the assistant, expand the card and tap **Check model profile**. Expect one
+  completed task and `p0_mobile_ultralight`. End the session, pause on the controls,
+  then invoke and expand again without tapping Check. `workflowNotice=PASS-session`
+  requires the fresh card to have no result. This checks a user-started kernel workflow
+  in the visible session, not a notification feed for other workflows.
 * **Selected-role microphone:** Use a setup-complete, unlocked, disposable API 34+ AVD.
   Route its input exclusively to a private virtual audio source carrying a generated tone,
   never to the host microphone. Install the matching target APK and leave the test APK

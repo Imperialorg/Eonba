@@ -2,6 +2,8 @@
     package="com.eon.assistant.keystoretest">
     <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="35" />
     <application android:allowBackup="false" android:testOnly="true" />
+    <instrumentation android:name="com.eon.assistant.WorkflowNoticeAcceptance"
+        android:targetPackage="com.eon.assistant.keystoretest" />
     <instrumentation android:name="com.eon.assistant.SessionMicAcceptance"
         android:targetPackage="com.eon.assistant.keystoretest" />
     <instrumentation android:name="com.eon.assistant.OperatorWindowAcceptance"

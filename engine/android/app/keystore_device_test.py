@@ -119,23 +119,24 @@ def require_setup_complete(adb):
 
 
 def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, stock_assistant=False, preconfigured_allowed=False,
-        preconfigured_hud=False, mic_phase=None):
+        preconfigured_hud=False, preconfigured_workflow=False, mic_phase=None):
     def adb(*args, timeout=120):
         return subprocess.check_output([sdk / "platform-tools/adb", "-s", serial, *args],
                                        text=True, stderr=subprocess.STDOUT, timeout=timeout)
 
     def instrument(component, key, expected, *args):
         # The operator observer allows up to 30 seconds for each of eight visible checkpoints.
-        timeout = 270 if component in ("OperatorWindowAcceptance", "SessionMicAcceptance") else 120
+        timeout = 270 if component in ("OperatorWindowAcceptance", "SessionMicAcceptance", "WorkflowNoticeAcceptance") else 120
         output = adb("shell", "am", "instrument", "-w", "-r", *args, f"{TEST}/{TARGET}.{component}",
                      timeout=timeout)
         check_result(output, key, expected)
         name = expected.removeprefix("PASS-") if key == "keystore" else f"{key}={expected}"
         print(f"PASS: {name}", flush=True)
 
-    preconfigured = preconfigured_allowed or preconfigured_hud or mic_phase is not None
+    selected_session = preconfigured_hud or preconfigured_workflow or mic_phase is not None
+    preconfigured = preconfigured_allowed or selected_session
     require_stock_emulator(adb, serial, 34 if demo_denied or stock_hud or stock_assistant or preconfigured else 28)
-    if preconfigured_hud or mic_phase is not None:
+    if selected_session:
         require_setup_complete(adb)
     check_packages(adb("shell", "pm", "list", "packages", "-u", "--user", "all"), preconfigured)
     with ExitStack() as cleanup:
@@ -147,7 +148,13 @@ def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, stock_assi
         if preconfigured:
             require_preconfigured_apk(adb)
             install(TEST, test_apk)
-            if mic_phase is not None:
+            if preconfigured_workflow:
+                print("Start on EON controls with selected role status visible. Pause briefly at each step. "
+                      "Invoke the assistant, expand, tap Check model profile, and wait for the completed count "
+                      "and profile. End session; leave the controls visible, invoke again, then expand without "
+                      "checking.", flush=True)
+                instrument("WorkflowNoticeAcceptance", "workflowNotice", "PASS-session")
+            elif mic_phase is not None:
                 print("Invoke the selected assistant on the unlocked AVD over EON controls. Expand its card "
                       "and pause with the meter off before tapping Start. "
                       + MIC_PHASES[mic_phase], flush=True)
@@ -197,6 +204,11 @@ def parse_args(argv=None):
                       help="observe one manual microphone phase on a separate, setup-complete, unlocked API 34+ "
                            "AVD with the matching target already selected as assistant. Use only a private "
                            "virtual input, never a host microphone. The harness does not configure or start capture.")
+    mode.add_argument("--preconfigured-workflow-serial", metavar="SERIAL",
+                      help="only observe the user-started profile workflow notice on a setup-complete, unlocked "
+                           "disposable API 34+ AVD with <8 decimal GB RAM, no personal data/accounts or host mic. "
+                           "Install the matching debug target, choose EON via the Android assistant picker and "
+                           "leave its controls visible. No accessibility or microphone permission is needed.")
     parser.add_argument("--mic-phase", choices=MIC_PHASES, help="required only with --preconfigured-mic-serial")
     parser.add_argument("--stock-hud", action="store_true",
                         help="also measure and cancel an actual OS notification tone with the production "
@@ -224,7 +236,8 @@ if __name__ == "__main__":
     apk = build(sdk)
     if not args.build_only:
         run(sdk, args.serial or args.preconfigured_allowed_serial or args.preconfigured_hud_serial
-            or args.preconfigured_mic_serial, apk,
+            or args.preconfigured_mic_serial or args.preconfigured_workflow_serial, apk,
             demo_denied=args.demo_denied, stock_hud=args.stock_hud, stock_assistant=args.stock_assistant,
             preconfigured_allowed=args.preconfigured_allowed_serial is not None,
-            preconfigured_hud=args.preconfigured_hud_serial is not None, mic_phase=args.mic_phase)
+            preconfigured_hud=args.preconfigured_hud_serial is not None,
+            preconfigured_workflow=args.preconfigured_workflow_serial is not None, mic_phase=args.mic_phase)
