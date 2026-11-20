@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 mod approval_fixture;
 use approval_fixture::{Fixture, prepared};
 use eon_capability::{
@@ -74,6 +76,114 @@ fn invoke(reg: &mut CapabilityRegistry, json: &str) -> EonResult<String> {
 
 mod registry_tests {
     use super::*;
+    use eon_capability::wasm_tool::{MAX_WORKER_WALL_TIME, WasmWorker};
+    use std::{path::Path, time::Duration};
+
+    #[test]
+    fn only_a_protected_pinned_native_worker_can_be_provisioned() {
+        use std::{
+            fs,
+            os::unix::fs::{PermissionsExt, symlink},
+        };
+        let mut fixture = prepared([approved(OBJECT, ECHO)]).unwrap();
+        let exe = &fixture.executable;
+        let directory = exe.parent().unwrap();
+        let provision = |path: &Path| WasmWorker::new(path, MAX_WORKER_WALL_TIME);
+        assert!(provision(directory).is_err());
+        fs::set_permissions(exe, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(provision(exe).is_err());
+        fs::set_permissions(exe, fs::Permissions::from_mode(0o500)).unwrap();
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o770)).unwrap();
+        assert!(provision(exe).is_err());
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let alias = directory.join("alias");
+        symlink(exe, &alias).unwrap();
+        assert!(provision(&alias).is_err());
+        fs::remove_file(&alias).unwrap();
+        symlink(directory, &alias).unwrap();
+        assert!(provision(&alias.join("eon-wasm-worker")).is_err());
+        fs::remove_file(&alias).unwrap();
+        fs::hard_link(exe, &alias).unwrap();
+        assert!(provision(exe).is_err());
+        fs::remove_file(&alias).unwrap();
+        // Replacing a name after provisioning cannot select a different worker.
+        fs::rename(exe, &alias).unwrap();
+        fs::write(exe, b"not a worker").unwrap();
+        fs::set_permissions(exe, fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(provision(exe).is_err());
+        fixture.register(descriptor(OBJECT), ECHO).unwrap();
+        assert_eq!(invoke(&mut fixture, MSG).unwrap(), MSG);
+    }
+
+    #[test]
+    fn registration_requires_a_host_worker_and_a_timely_validation() {
+        let root = prepared([]).unwrap();
+        let store = DurableApprovals::open(&root.root).unwrap();
+        let worker_path = &root.executable;
+        assert!(WasmWorker::new(Path::new("eon-wasm-worker"), MAX_WORKER_WALL_TIME).is_err());
+        assert!(WasmWorker::new(worker_path, Duration::ZERO).is_err());
+        assert!(
+            WasmWorker::new(worker_path, MAX_WORKER_WALL_TIME + Duration::from_secs(1)).is_err()
+        );
+        for worker in [
+            None,
+            Some(WasmWorker::new(worker_path, Duration::from_nanos(1)).unwrap()),
+        ] {
+            let entry = approved(OBJECT, ECHO);
+            store.approve(&entry).unwrap();
+            let mut reg = CapabilityRegistry::with_allowlist([entry], store.clone()).unwrap();
+            let has_worker = worker.is_some();
+            if let Some(worker) = worker {
+                reg = reg.with_wasm_worker(worker);
+            }
+            let error = reg.register(descriptor(OBJECT), ECHO).unwrap_err();
+            assert!(matches!(
+                (has_worker, error),
+                (true, EonError::ResourceLeaseTimeout { .. })
+                    | (false, EonError::SecurityViolation(_))
+            ));
+            assert!(matches!(
+                invoke(&mut reg, MSG),
+                Err(EonError::CapabilityNotFound { .. })
+            ));
+            // An interrupted registration does not silently restore durable approval.
+            let mut peer = root
+                .provisioned([approved(OBJECT, ECHO)], store.clone())
+                .unwrap();
+            assert!(matches!(
+                peer.register(descriptor(OBJECT), ECHO),
+                Err(EonError::SecurityViolation(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn both_existing_dispatch_apis_enforce_the_worker_budget() {
+        let fixture = prepared([approved(OBJECT, ECHO)]).unwrap();
+        let store = DurableApprovals::open(&fixture.root).unwrap();
+        let mut reg = fixture
+            .provisioned([approved(OBJECT, ECHO)], store)
+            .unwrap();
+        reg.register(descriptor(OBJECT), ECHO).unwrap();
+        let exe = &fixture.executable;
+        reg = reg.with_wasm_worker(WasmWorker::new(exe, Duration::from_nanos(1)).unwrap());
+        assert!(matches!(
+            invoke(&mut reg, MSG),
+            Err(EonError::ResourceLeaseTimeout { .. })
+        ));
+        let mut profile = workflow();
+        let input = ToolInput {
+            json: MSG,
+            label: &operator(),
+        };
+        assert!(matches!(
+            reg.dispatch_guarded("echo", &mut profile, input, None),
+            Err(EonError::ResourceLeaseTimeout { .. })
+        ));
+        assert_eq!(profile.context.integrity, IntegrityLevel::Untrusted);
+        reg = reg.with_wasm_worker(WasmWorker::new(exe, MAX_WORKER_WALL_TIME).unwrap());
+        assert_eq!(invoke(&mut reg, MSG).unwrap(), MSG);
+    }
 
     #[test]
     fn quarantine_survives_restart_until_an_exact_explicit_reapproval() {
@@ -81,7 +191,8 @@ mod registry_tests {
             let fixture = prepared([approved(OBJECT, ECHO)]).unwrap();
             let root = &fixture.root;
             let reopen = |entry| {
-                CapabilityRegistry::with_allowlist([entry], DurableApprovals::open(root).unwrap())
+                fixture
+                    .provisioned([entry], DurableApprovals::open(root).unwrap())
                     .unwrap()
             };
             let mut first = reopen(approved(OBJECT, ECHO));
@@ -100,7 +211,7 @@ mod registry_tests {
                 Err(EonError::SecurityViolation(_))
             ));
             drop(first);
-            // Even a peer with a previously compiled module consults the durable state.
+            // Even a peer with a previously validated module consults the durable state.
             assert!(matches!(
                 invoke(&mut peer, MSG),
                 Err(EonError::SecurityViolation(_))
@@ -132,8 +243,9 @@ mod registry_tests {
         let empty = prepared([]).unwrap();
         let store = DurableApprovals::open(&empty.root).unwrap();
         let entry = approved(OBJECT, ECHO);
-        let mut reg =
-            CapabilityRegistry::with_allowlist([approved(OBJECT, ECHO)], store.clone()).unwrap();
+        let mut reg = empty
+            .provisioned([approved(OBJECT, ECHO)], store.clone())
+            .unwrap();
         assert!(reg.register(descriptor(OBJECT), ECHO).is_err());
         store.approve(&entry).unwrap();
         reg.register(descriptor(OBJECT), ECHO).unwrap();
@@ -151,14 +263,15 @@ mod registry_tests {
         ));
         assert!(reg.register(descriptor(OBJECT), ECHO).is_err());
         assert!(store.approve(&entry).is_err());
+        busy.unlock().unwrap();
         drop(busy);
         assert_eq!(invoke(&mut reg, MSG).unwrap(), MSG);
         for corrupt in [&b"short"[..], &[0; 32][..]] {
             std::fs::write(&path, corrupt).unwrap();
             assert!(invoke(&mut reg, MSG).is_err());
-            let mut restarted =
-                CapabilityRegistry::with_allowlist([approved(OBJECT, ECHO)], store.clone())
-                    .unwrap();
+            let mut restarted = empty
+                .provisioned([approved(OBJECT, ECHO)], store.clone())
+                .unwrap();
             assert!(restarted.register(descriptor(OBJECT), ECHO).is_err());
         }
         std::fs::remove_file(path).unwrap();

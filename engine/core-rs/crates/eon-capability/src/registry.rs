@@ -11,7 +11,7 @@ use crate::ifc::rule_of_two::{Capability, Decision, TaskProfile, decide};
 use crate::mcp_pinning::{PinStore, ToolDescriptor};
 use crate::melon::{self, MaskedRunner, ToolCall};
 use crate::schema;
-use crate::wasm_tool::{MAX_INPUT_BYTES, MAX_MODULE_BYTES, PureModule, check_size};
+use crate::wasm_tool::{MAX_INPUT_BYTES, MAX_MODULE_BYTES, WasmWorker, check_size};
 
 mod approval;
 pub use approval::DurableApprovals;
@@ -57,7 +57,7 @@ impl ToolOutcome {
 struct RegisteredTool {
     descriptor: ToolDescriptor,
     schema: schema::CheckedSchema,
-    module: PureModule,
+    module: Box<[u8]>,
 }
 
 #[derive(Default)]
@@ -67,6 +67,7 @@ pub struct CapabilityRegistry {
     tools: BTreeMap<String, RegisteredTool>,
     pins: PinStore,
     melon: Option<Box<dyn MaskedRunner>>,
+    worker: Option<WasmWorker>,
 }
 
 impl CapabilityRegistry {
@@ -75,6 +76,7 @@ impl CapabilityRegistry {
         Self::default()
     }
 
+    /// Provision a worker with `with_wasm_worker` before registering Wasm.
     pub fn with_allowlist(
         allowed: impl IntoIterator<Item = AllowedTool>,
         durable: DurableApprovals,
@@ -99,6 +101,18 @@ impl CapabilityRegistry {
         Ok(registry)
     }
 
+    /// Trusted host configuration, never a descriptor or tool argument.
+    pub fn with_wasm_worker(mut self, worker: WasmWorker) -> Self {
+        self.worker = Some(worker);
+        self
+    }
+
+    fn worker(&self) -> EonResult<&WasmWorker> {
+        self.worker.as_ref().ok_or_else(|| {
+            EonError::SecurityViolation("registered Wasm requires an isolated worker".into())
+        })
+    }
+
     fn durable(&self) -> EonResult<&DurableApprovals> {
         self.durable
             .as_ref()
@@ -106,7 +120,7 @@ impl CapabilityRegistry {
     }
 
     /// Metadata or code drift quarantines even the previously registered version.
-    /// Only approved bytes enter the compiler; compilation is not guest fuel-metered.
+    /// Only approved source bytes enter the worker. No compiled code crosses IPC.
     pub fn register(&mut self, descriptor: ToolDescriptor, module: &[u8]) -> EonResult<()> {
         let approved = self
             .allowed
@@ -127,21 +141,21 @@ impl CapabilityRegistry {
         if blake3::hash(module).as_bytes() != &approved.module {
             return Err(self.pins.quarantine_module(&descriptor.name));
         }
-        let compiled = if !self.tools.contains_key(&descriptor.name) {
+        let checked = if !self.tools.contains_key(&descriptor.name) {
             let schema = serde_json::from_str(&descriptor.input_schema)
                 .map_err(|e| EonError::ValidationError(format!("invalid tool schema: {e}")))?;
             let schema = schema::CheckedSchema::new(schema).map_err(EonError::ValidationError)?;
-            let module = PureModule::compile(module)?;
+            self.worker()?.validate(module)?;
             Some(RegisteredTool {
                 descriptor,
                 schema,
-                module,
+                module: module.into(),
             })
         } else {
             None
         };
         record.restore(&approved.approval)?;
-        if let Some(tool) = compiled {
+        if let Some(tool) = checked {
             self.tools.insert(tool.descriptor.name.clone(), tool);
         }
         Ok(())
@@ -237,7 +251,7 @@ impl CapabilityRegistry {
             )?;
         }
         profile.context = profile.context.join(&SecurityLabel::external(name));
-        let output = tool.module.run(&json)?;
+        let output = self.worker()?.run(&tool.module, &json)?;
         Ok(ToolOutcome {
             output,
             label: profile.context.clone(),

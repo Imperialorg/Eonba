@@ -5,6 +5,8 @@ pub mod local_lsp;
 pub mod mcp_pinning;
 pub mod melon;
 pub mod microvm;
+#[cfg(target_os = "linux")]
+pub mod pty;
 pub mod quarantine;
 pub mod registry;
 pub mod research;

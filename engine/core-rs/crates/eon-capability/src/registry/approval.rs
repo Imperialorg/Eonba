@@ -44,7 +44,7 @@ impl DurableApprovals {
         Ok(Self(Arc::new(dir)))
     }
 
-    fn locked_file(&self, name: &str, create: bool) -> EonResult<File> {
+    fn locked_file(&self, name: &str, create: bool) -> EonResult<Record> {
         let key =
             CString::new(blake3::hash(name.as_bytes()).to_hex().as_str()).expect("hex has no NUL");
         let flags = libc::O_RDWR
@@ -80,14 +80,14 @@ impl DurableApprovals {
             return Err(denied());
         }
         file.try_lock().map_err(storage)?;
-        Ok(file)
+        Ok(Record(file))
     }
 
     /// Explicit operator action only, never on a listing or as startup recovery.
     /// Approves exactly one reviewed metadata + code identity. Rebuild a registry
     /// that already latched a local quarantine after re-approval.
     pub fn approve(&self, entry: &AllowedTool) -> EonResult<()> {
-        let record = Record(self.locked_file(&entry.descriptor.name, true)?);
+        let record = self.locked_file(&entry.descriptor.name, true)?;
         record.consume()?;
         // Make the directory entry durable while it still denies all versions.
         self.0.sync_all().map_err(storage)?;
@@ -95,20 +95,28 @@ impl DurableApprovals {
     }
 
     pub(super) fn acquire(&self, name: &str, identity: &[u8; 32]) -> EonResult<Record> {
-        let file = self.locked_file(name, false)?;
+        let record = self.locked_file(name, false)?;
         let mut bytes = [0; 32];
-        if file.metadata().map_err(storage)?.len() != bytes.len() as u64 {
+        if record.0.metadata().map_err(storage)?.len() != bytes.len() as u64 {
             return Err(denied());
         }
-        file.read_exact_at(&mut bytes, 0).map_err(storage)?;
+        record.0.read_exact_at(&mut bytes, 0).map_err(storage)?;
         if &bytes != identity {
             return Err(denied());
         }
-        Ok(Record(file))
+        Ok(record)
     }
 }
 
 pub(super) struct Record(File);
+
+impl Drop for Record {
+    fn drop(&mut self) {
+        // A concurrent fork may briefly hold a duplicate until exec. Release
+        // our lock at the end of the critical section, not at the last close.
+        let _ = self.0.unlock();
+    }
+}
 
 impl Record {
     /// Persist the default-deny state *before* inspecting a new listing.

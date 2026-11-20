@@ -12,6 +12,11 @@ use wasmtime::{
     Trap, ValType,
 };
 
+mod worker;
+#[doc(hidden)]
+pub use worker::worker_main;
+pub use worker::{MAX_WORKER_WALL_TIME, WasmWorker};
+
 const MAX_LINEAR_MEMORY: usize = 64 * 1024 * 1024;
 pub const MAX_INPUT_BYTES: usize = 16 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 16 * 1024;
@@ -58,6 +63,7 @@ fn engine() -> EonResult<&'static Engine> {
 
 /// Compiles `module` (binary or WAT text), instantiates it with no imports, and calls its exported `(i32) -> i32`
 /// function `export` with `arg` under a budget of `fuel` instructions.
+/// This low-level in-process helper has no host compilation or wall deadline. Not for registry dispatch.
 pub fn call_i32_export(module: &[u8], export: &str, arg: i32, fuel: u64) -> EonResult<i32> {
     let module = Module::new(engine()?, module).map_err(|e| operation_failed("wasm.compile", e))?;
     call_module(&module, export, arg, fuel)
@@ -110,12 +116,18 @@ fn call_module(module: &Module, export: &str, arg: i32, fuel: u64) -> EonResult<
 
 /// Registry ABI: canonical JSON at memory offset zero; `run(input_len)` returns the
 /// unsigned byte length of UTF-8 output at the same offset. Neither buffer is a host pointer.
-pub(crate) struct PureModule(Module);
+struct PureModule(Module);
 
 impl PureModule {
-    pub(crate) fn compile(bytes: &[u8]) -> EonResult<Self> {
+    fn compile(bytes: &[u8]) -> EonResult<Self> {
+        let engine = Engine::new(
+            config()
+                .parallel_compilation(false)
+                .memory_reservation(MAX_LINEAR_MEMORY as u64),
+        )
+        .map_err(|e| operation_failed("wasm.engine", e))?;
         let module =
-            Module::new(engine()?, bytes).map_err(|e| operation_failed("wasm.compile", e))?;
+            Module::new(&engine, bytes).map_err(|e| operation_failed("wasm.compile", e))?;
         if module.imports().next().is_some() {
             return Err(EonError::SecurityViolation(
                 "pure tools cannot import host capabilities".into(),
@@ -134,7 +146,7 @@ impl PureModule {
         Ok(Self(module))
     }
 
-    pub(crate) fn run(&self, input: &str) -> EonResult<String> {
+    fn run(&self, input: &str) -> EonResult<String> {
         check_size("tool_input_bytes", input.len(), MAX_INPUT_BYTES)?;
         let (mut store, instance) = instantiate(&self.0, DISPATCH_FUEL)?;
         let memory = instance

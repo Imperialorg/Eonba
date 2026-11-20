@@ -9,12 +9,15 @@ struct Fixture(PathBuf);
 
 impl Fixture {
     fn new() -> Self {
-        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/workspace-fixtures");
-        host::create_dir_all(&base).unwrap();
+        // A checkout may be group-writable. Keep the journal and workspace
+        // under a vetted operator-owned directory, without changing its mode.
+        let home = std::env::home_dir().expect("workspace tests need an operator home");
+        let base = eon_foundation::owned_dir::OwnedDirectory::open(&home, false).unwrap();
         let mut id = [0; 16];
         getrandom::fill(&mut id).unwrap();
-        let path = base.join(format!("{:032x}", u128::from_le_bytes(id)));
-        dir(&path);
+        let name = format!(".eon-workspace-test-{:032x}", u128::from_le_bytes(id));
+        dir(&base.path().join(&name));
+        let path = home.join(name);
         dir(&path.join("workspace"));
         Self(path)
     }

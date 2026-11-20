@@ -1,13 +1,14 @@
+#[cfg(target_os = "linux")]
 mod approval_fixture;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use eon_capability::{
-    EonError, EonResult, mcp_pinning::ToolDescriptor, registry::AllowedTool,
-    wasm_tool::call_i32_export,
-};
+use eon_capability::{EonError, EonResult, wasm_tool::call_i32_export};
+#[cfg(target_os = "linux")]
+use eon_capability::{mcp_pinning::ToolDescriptor, registry::AllowedTool};
 
+#[cfg(target_os = "linux")]
 fn assert_registry_rejects_imports(module: &[u8]) {
     let descriptor = ToolDescriptor {
         name: "fixture".into(),
@@ -37,6 +38,13 @@ fn assert_missing_import(outcome: EonResult<i32>, namespace: &str, name: &str) {
     );
 }
 
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn isolated_registry_worker_is_unavailable() {
+    use eon_capability::wasm_tool::{MAX_WORKER_WALL_TIME, WasmWorker};
+    assert!(WasmWorker::new(Path::new("/eon-wasm-worker"), MAX_WORKER_WALL_TIME).is_err());
+}
+
 #[test]
 fn host_io_and_socket_creation_are_not_linked() {
     let fd_signature = "(param i32 i32 i32 i32) (result i32)";
@@ -54,6 +62,7 @@ fn host_io_and_socket_creation_are_not_linked() {
             r#"(module (import "{namespace}" "{name}" (func {signature}))
             (memory (export "memory") 1) (func (export "run") (param i32) (result i32) local.get 0))"#
         );
+        #[cfg(target_os = "linux")]
         assert_registry_rejects_imports(module.as_bytes());
         assert_missing_import(
             call_i32_export(module.as_bytes(), "run", 0, 1000),
@@ -86,6 +95,7 @@ fn path_open_is_not_linked_and_the_host_sentinel_is_unchanged() {
             i64.const 66 i64.const 0 i32.const 0 i32.const 0 call $open))"#,
         bytes.len()
     );
+    #[cfg(target_os = "linux")]
     assert_registry_rejects_imports(module.as_bytes());
     let outcome = call_i32_export(module.as_bytes(), "run", 0, 1000);
     let observed = fs::read(&path);
