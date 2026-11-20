@@ -188,8 +188,11 @@ Use separate instrumentation gates for the stock app and the selected assistant'
   Invoke the assistant, expand the card and tap **Check model profile**. Expect one
   completed task and `p0_mobile_ultralight`. End the session, pause on the controls,
   then invoke and expand again without tapping Check. `workflowNotice=PASS-session`
-  requires the fresh card to have no result. This checks a user-started kernel workflow
-  in the visible session, not a notification feed for other workflows.
+  requires the original card's window to disappear while the other known windows remain,
+  and the new card to have no result. As a negative control, collapse the card and tap
+  through to the controls instead of ending the session. The observer must reject this
+  at `dismissed-to-controls`. This checks a user-started workflow in the visible session,
+  not a notification feed for other workflows.
 * **Selected-role microphone:** Use a setup-complete, unlocked, disposable API 34+ AVD.
   Route its input exclusively to a private virtual audio source carrying a generated tone,
   never to the host microphone. Install the matching target APK and leave the test APK

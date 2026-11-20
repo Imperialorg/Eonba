@@ -13,7 +13,10 @@ import android.view.View;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Predicate;
 
 /** Observe the selected assistant from the test APK; do not start a session, click, or grant access. */
@@ -91,22 +94,20 @@ public final class WorkflowNoticeAcceptance extends Instrumentation {
                 && visible(r, "hud_status") == null && visible(r, "hud_result") == null;
     }
 
-    // Read window IDs and active flags only. Never fetch the root, title or contents of other
-    // windows. An empty list, or one missing our known controls/active window, proves nothing.
-    private boolean windows(int active, int controls, int card, boolean cardPresent) {
+    // Read IDs and active flags only, never the root, title or contents of other windows.
+    private Set<Integer> windowIds(int active) {
         List<AccessibilityWindowInfo> windows = ui.getWindows();
-        if (windows == null || windows.isEmpty()) return false;
-        boolean sawActive = false, sawControls = false, sawCard = false;
+        if (windows == null) return Collections.emptySet();
+        Set<Integer> ids = new HashSet<>();
+        boolean sawActive = false;
         for (AccessibilityWindowInfo w : windows) {
-            if (w == null || w.getId() < 0) return false;
+            if (w == null || w.getId() < 0 || !ids.add(w.getId())) return Collections.emptySet();
             if (w.isActive()) {
-                if (sawActive || w.getId() != active) return false;
+                if (sawActive || w.getId() != active) return Collections.emptySet();
                 sawActive = true;
             }
-            sawControls |= w.getId() == controls;
-            sawCard |= w.getId() == card;
         }
-        return sawActive && sawControls && sawCard == cardPresent;
+        return sawActive ? ids : Collections.emptySet();
     }
 
     private void observe() {
@@ -132,18 +133,28 @@ public final class WorkflowNoticeAcceptance extends Instrumentation {
         });
         int card = await("fresh-card", r -> r.getWindowId() != controls && idle(r, false)).getWindowId();
         await("explicit-check", r -> r.getWindowId() == card && clicks.expandedThenChecked(card));
+        Set<Integer> otherWindows = new HashSet<>();
         await("completed-receipt", r -> {
             AccessibilityNodeInfo status = visible(r, "hud_status");
-            return r.getWindowId() == card && status != null
-                    && status.getLiveRegion() == View.ACCESSIBILITY_LIVE_REGION_POLITE
-                    && TextUtils.equals("Profile workflow complete. Completed tasks: 1", status.getText())
-                    && "Suggested profile: p0_mobile_ultralight".equals(text(r, "hud_result"))
-                    && windows(card, controls, card, true);
+            if (r.getWindowId() != card || status == null
+                    || status.getLiveRegion() != View.ACCESSIBILITY_LIVE_REGION_POLITE
+                    || !TextUtils.equals("Profile workflow complete. Completed tasks: 1", status.getText())
+                    || !"Suggested profile: p0_mobile_ultralight".equals(text(r, "hud_result"))) return false;
+            Set<Integer> ids = windowIds(card);
+            if (!ids.contains(controls) || ids.size() < 3) return false;
+            otherWindows.addAll(ids);
+            otherWindows.remove(card);
+            return true;
         });
         ui.setOnAccessibilityEventListener(null);
         // Tapping through the non-modal card can make controls active without dismissing it.
-        await("dismissed-to-controls", r -> r.getWindowId() == controls && controls(r)
-                && windows(controls, controls, card, false));
+        // Require the rest of the known inventory too; a list truncated to controls alone
+        // would otherwise turn a missing window into false evidence of removal.
+        await("dismissed-to-controls", r -> {
+            if (r.getWindowId() != controls || !controls(r)) return false;
+            Set<Integer> ids = windowIds(controls);
+            return ids.containsAll(otherWindows) && !ids.contains(card);
+        });
         int fresh = await("reshown-card", r -> idle(r, false)).getWindowId();
         await("reshown-details", r -> r.getWindowId() == fresh && idle(r, true));
     }

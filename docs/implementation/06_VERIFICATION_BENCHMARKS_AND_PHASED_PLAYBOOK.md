@@ -246,7 +246,7 @@ Enrollment and query use the [upstream WeSpeaker ResNet34 front end](https://git
 | Street traffic (0 dB) | 10 | 0 | No (5 rejected) |
 | TV dialogue (0 dB) | 11 | 0 | No (5 rejected) |
 
-These are five runs, one per condition, not five population samples. Acceptance requires a real negative embedding decision and verified owner interruption at the original 0.35 cosine threshold in **each** condition, including post-decision mute and audit. All three scene mixtures missed the owner, so the suite exited 1. Times count fixture samples up to the speaker decision, not physical speaker latency.
+These are five runs, one per condition, not five population samples. Acceptance requires a real negative embedding decision and verified owner interruption at the original 0.35 cosine threshold in **each** condition, including post-decision mute and audit. A fresh Linux native build reproduced all five results: two controls passed, all three scene mixtures missed the owner, and the suite exited 1. The separate speaker-switch control rejected six non-owner candidates before accepting the returning owner at 860 ms. Times count fixture samples up to the speaker decision, not physical speaker latency.
 
 Silero admitted candidates in all three missed scenes. The best owner scores were 0.262 (babble), 0.307 (traffic) and 0.208 (TV). A two-second rolling-context experiment passed these scenes but failed a speaker-switch control: 210 ms after a non-owner took over, retained context scored 0.414 and muted playback; the current window scored 0.048. The longer window was not adopted. Recheck a speaker switch as well as the five fixed conditions when changing the decision window.
 
