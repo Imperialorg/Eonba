@@ -14,7 +14,7 @@ pub enum SpeechAct {
 }
 
 impl SpeechAct {
-    const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 5] = [
         Self::Affirmative,
         Self::Report,
         Self::Notice,

@@ -11,6 +11,8 @@
 //! gates time `plan` through validated text, not first token or audible speech.
 //! Tier 1 uses the production greedy Qwen speaker and bounded speech filter,
 //! not the separate GBNF tool-call generator.
+//! For a release deployed on the build host, `RUSTFLAGS="-C target-cpu=native"`
+//! enables llama.cpp's host ISA kernels. Such binaries are not portable.
 
 use std::fs::File;
 use std::io;
@@ -111,6 +113,7 @@ fn warm_tactical_p95_under_120ms() {
     for (text, reading) in cases.into_iter().cycle().take(40) {
         samples.push(completed_turn(&router, text, reading));
     }
+    eprintln!("TacticalLocal complete turns (in order): {samples:?}");
     samples.sort_unstable();
     let quantile = |p: usize| samples[(p * samples.len()).div_ceil(100) - 1];
     let p95 = quantile(95);

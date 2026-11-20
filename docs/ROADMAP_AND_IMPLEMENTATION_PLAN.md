@@ -184,12 +184,12 @@
 
 ## Phase 6: Ciel Cognitive Core & Thought Acceleration (Level 5)
 
-- [ ] **Task 6.1: 3-Tier Cognitive Router (Thought Acceleration)**
+- [x] **Task 6.1: 3-Tier Cognitive Router (Thought Acceleration)**
   - **Crate**: `eon-cognition`
   - **Files**: `src/router.rs`, `src/reflex.rs`, `src/tactical_slm.rs`, `src/strategic_frontier.rs`
   - **Requirements**: Route latency < 20ms for Tier 0 reflex, < 120ms for Tier 1 local SLM. Dual-stream split: silent `<think>...</think>` scratchpad routed to HUD/CLI, post-`</think>` tokens to TTS.
   - **Unit Tests**: `cargo test -p eon-cognition router_tests`.
-  - **Latency evidence**: On Linux, 2,000 complete reflex turns had a p95 of 621 ns. Checking the greedy winner against the grammar before filtering the whole vocabulary reduced warm Tier 1 p95 from 535–560 ms to 413–417 ms on the same host. All 120 optimized turns reached natural end of generation and returned the correct validated reading. The 120 ms target was not met.
+  - **Latency evidence**: The Linux reflex gate passed (previously 621 ns p95 over 2,000 turns). On an AMD EPYC 9V45, three consecutive warm Tier 1 runs of 40 complete turns had p95s of 94.19, 89.72 and 98.50 ms, below 120 ms. All 120 turns generated the correct reading through natural end of generation. Only model-template state was reused, not requests or replies. This used 16 inference threads and a host-native build; on four physical cores the same binary missed at 170.35 ms p95.
 
 - [x] **Task 6.2: Appraisal Engine & Hybrid Cognitive Memory**
   - **Crate**: `eon-cognition`
