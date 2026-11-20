@@ -8,6 +8,7 @@ license.workspace = true
 [features]
 default = ["local-inference", "sqlite-memory", "objective-compiler"]
 llama-backend = ["dep:llama-cpp-2"]
+router-native-gate = ["llama-backend", "dep:sha2", "dep:serde_json"]
 local-inference = ["llama-backend", "dep:eon-capability", "dep:serde_json"]
 sqlite-memory = ["dep:rusqlite"]
 loro-memory = ["sqlite-memory", "dep:loro", "dep:postcard", "dep:blake3"]
@@ -51,6 +52,10 @@ required-features = ["llama-backend"]
 [[test]]
 name = "melon_e2e"
 required-features = ["local-inference"]
+
+[[test]]
+name = "router_native_gate"
+required-features = ["router-native-gate"]
 
 [[test]]
 name = "warm_up_e2e"

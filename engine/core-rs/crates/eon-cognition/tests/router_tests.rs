@@ -449,36 +449,32 @@ mod router_tests {
     }
 
     #[test]
-    fn route_overhead_excludes_model_inference() {
-        let never_called = Fixture::new(|_| panic!("routing performed inference"));
-        let router = CognitiveRouter {
-            tactical_local: Some(&never_called),
-            ..Default::default()
-        };
-        for (text, route, budget_ms) in [
-            ("router status", Route::Reflex, 20),
-            ("sensor reading", Route::TacticalLocal, 120),
-        ] {
-            let mut timings = Vec::with_capacity(2_000);
-            for _ in 0..2_000 {
-                let start = Instant::now();
-                let plan = router
-                    .plan(report(black_box(text)), Workload::Interactive)
-                    .unwrap();
-                assert_eq!(plan.route(), route);
-                if route == Route::Reflex {
-                    black_box(plan.execute().unwrap());
-                }
-                timings.push(start.elapsed());
-            }
-            timings.sort_unstable();
-            let p95 = timings[timings.len() * 95 / 100];
-            eprintln!(
-                "{route:?} p95 over {} turns: {p95:?} (no inference)",
-                timings.len()
+    fn completed_reflex_p95_under_20ms() {
+        let router = CognitiveRouter::default();
+        let mut timings = Vec::with_capacity(2_000);
+        for _ in 0..2_000 {
+            let request = report(black_box("router status"));
+            let start = Instant::now();
+            let reply = router
+                .plan(request, Workload::Interactive)
+                .unwrap()
+                .execute()
+                .unwrap();
+            timings.push(start.elapsed());
+            assert_eq!(reply.route, Route::Reflex);
+            assert!(reply.backend_elapsed.is_none());
+            assert_eq!(
+                reply.speech,
+                "Report: No local tactical backend configured."
             );
-            assert!(p95 < Duration::from_millis(budget_ms));
         }
-        assert_eq!(never_called.count(), 0);
+        timings.sort_unstable();
+        let p95 = timings[(95 * timings.len()).div_ceil(100) - 1];
+        eprintln!(
+            "Reflex request to validated text: n={}, p95={p95:?}, max={:?}",
+            timings.len(),
+            timings.last().unwrap()
+        );
+        assert!(p95 < Duration::from_millis(20));
     }
 }
