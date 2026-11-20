@@ -88,6 +88,34 @@
                     android:minHeight="48dp"
                     android:text="@string/voice_hud_check" />
                 <Button
+                    android:id="@+id/hud_tone_scan"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:filterTouchesWhenObscured="true"
+                    android:minHeight="48dp"
+                    android:text="@string/voice_tone_scan" />
+                <TextView
+                    android:id="@+id/hud_tone_status"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:accessibilityLiveRegion="polite"
+                    android:textColor="#13292D"
+                    android:visibility="gone" />
+                <com.eon.assistant.ToneGraph
+                    android:id="@+id/hud_tone_graph"
+                    android:layout_width="match_parent"
+                    android:layout_height="54dp"
+                    android:background="#DFEBE9"
+                    android:importantForAccessibility="no"
+                    android:visibility="gone" />
+                <Button
+                    android:id="@+id/hud_tone_clear"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:filterTouchesWhenObscured="true"
+                    android:minHeight="48dp"
+                    android:text="@string/voice_tone_clear" />
+                <Button
                     android:id="@+id/hud_controls"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"

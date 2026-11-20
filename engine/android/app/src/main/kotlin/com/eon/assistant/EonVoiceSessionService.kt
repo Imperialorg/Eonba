@@ -11,6 +11,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.os.Bundle
+import android.os.CancellationSignal
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
@@ -38,6 +39,7 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
     private val main = Handler(Looper.getMainLooper())
     private var hud: VoiceHudView? = null
     private var work: FutureTask<String>? = null
+    private var toneStop: CancellationSignal? = null
     private var observingScreenOff = false
     private val screenOff = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -89,7 +91,11 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
             setBackgroundDrawableResource(android.R.color.transparent)
             setHideOverlayWindows(true)
         }
-        return VoiceHudView(context, ::toggleDetails, ::checkProfile, ::openControls, ::closeHud).also { hud = it }
+        return VoiceHudView(context, ::toggleDetails, ::checkProfile, ::analyzeTone, ::clearTone,
+            ::openControls, ::closeHud).also {
+            hud = it
+            it.render(surface.frame)
+        }
     }
 
     override fun onComputeInsets(outInsets: Insets) {
@@ -110,7 +116,47 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
 
     private fun toggleDetails() {
         if (!requireVisible()) return
+        if (surface.frame?.expanded == true) clearTone()
         surface.toggleDetails()
+        render()
+    }
+
+    private fun analyzeTone() {
+        if (!requireVisible()) return
+        val request = surface.requestTone() ?: return
+        val stop = CancellationSignal()
+        toneStop = stop
+        render()
+        val app = context.applicationContext
+        Thread({
+            val ok = try {
+                StockToneReader.read(app, stop) { level ->
+                    main.post {
+                        if (toneStop === stop && requireVisible()) {
+                            surface.addLevel(request, level)
+                            render()
+                        }
+                    }
+                }
+                true
+            } catch (_: Exception) {
+                false
+            }
+            main.post {
+                if (toneStop === stop && requireVisible()) {
+                    toneStop = null
+                    surface.finishTone(request, ok)
+                    render()
+                }
+            }
+        }, "EON stock tone").start()
+    }
+
+    private fun clearTone() {
+        val old = toneStop
+        toneStop = null
+        old?.cancel()
+        surface.clearTone()
         render()
     }
 
@@ -157,6 +203,7 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
 
     private fun clearShowing() {
         surface.hide()
+        clearTone()
         work?.cancel(true)
         work = null
         main.removeCallbacksAndMessages(null)

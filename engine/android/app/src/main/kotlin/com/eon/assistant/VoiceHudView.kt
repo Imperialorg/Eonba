@@ -16,10 +16,12 @@ import kotlin.math.roundToInt
 
 internal class VoiceHudView(
     context: Context,
-    toggleDetails: () -> Unit,
-    checkProfile: () -> Unit,
-    openControls: () -> Unit,
-    dismiss: () -> Unit,
+    toggleDetails: Runnable,
+    checkProfile: Runnable,
+    analyzeTone: Runnable,
+    clearTone: Runnable,
+    openControls: Runnable,
+    dismiss: Runnable,
 ) : FrameLayout(context) {
     init {
         inflate(context, R.layout.voice_hud, this)
@@ -38,13 +40,19 @@ internal class VoiceHudView(
     private val result: TextView = findViewById(R.id.hud_result)
     private val toggle: ImageButton = findViewById(R.id.hud_toggle)
     private val check: Button = findViewById(R.id.hud_check)
+    private val scan: Button = findViewById(R.id.hud_tone_scan)
+    private val clear: Button = findViewById(R.id.hud_tone_clear)
+    private val graph: ToneGraph = findViewById(R.id.hud_tone_graph)
+    private val reading: TextView = findViewById(R.id.hud_tone_status)
     private val position = IntArray(2)
 
     init {
-        toggle.setOnClickListener { toggleDetails() }
-        check.setOnClickListener { checkProfile() }
-        findViewById<Button>(R.id.hud_controls).setOnClickListener { openControls() }
-        findViewById<ImageButton>(R.id.hud_end).setOnClickListener { dismiss() }
+        toggle.setOnClickListener { toggleDetails.run() }
+        check.setOnClickListener { checkProfile.run() }
+        scan.setOnClickListener { analyzeTone.run() }
+        clear.setOnClickListener { clearTone.run() }
+        findViewById<Button>(R.id.hud_controls).setOnClickListener { openControls.run() }
+        findViewById<ImageButton>(R.id.hud_end).setOnClickListener { dismiss.run() }
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -74,6 +82,23 @@ internal class VoiceHudView(
                 if (recommendation == null) R.string.voice_hud_failed else R.string.voice_hud_checked
             )
         }
+        val tone = frame?.tone ?: ToneScan.Idle
+        val levels = when (tone) {
+            is ToneScan.Reading -> tone.levels
+            is ToneScan.Complete -> tone.levels
+            else -> emptyList()
+        }
+        graph.levels = levels
+        graph.visibility = if (levels.isEmpty()) GONE else VISIBLE
+        scan.isEnabled = expanded && tone !is ToneScan.Reading
+        clear.visibility = if (tone == ToneScan.Idle) GONE else VISIBLE
+        reading.text = when (tone) {
+            ToneScan.Idle -> null
+            is ToneScan.Reading -> context.getString(R.string.voice_tone_progress, levels.size, ToneLevels.LIMIT)
+            is ToneScan.Complete -> context.getString(R.string.voice_tone_complete, levels.size, levels.max())
+            ToneScan.Unavailable -> context.getString(R.string.voice_tone_failed)
+        }
+        reading.visibility = if (tone == ToneScan.Idle) GONE else VISIBLE
     }
 
     fun fillTouchableRegion(region: Region) {
@@ -81,6 +106,27 @@ internal class VoiceHudView(
         if (!panel.isShown || !panel.isLaidOut) return
         panel.getLocationInWindow(position)
         region.set(position[0], position[1], position[0] + panel.width, position[1] + panel.height)
+    }
+}
+
+/** Bars use a fixed 0–100% full-scale RMS axis; silence is zero, not a decorative minimum. */
+internal class ToneGraph(context: Context, attrs: AttributeSet) : View(context, attrs) {
+    private val ink = Paint().apply { color = 0xff11665e.toInt() }
+    var levels: List<Int> = emptyList()
+        set(value) {
+            if (value != field) {
+                field = value
+                invalidate()
+            }
+        }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val slot = width.toFloat() / ToneLevels.LIMIT
+        levels.forEachIndexed { index, rms ->
+            canvas.drawRect((index + 0.1f) * slot, height * (1f - rms / 100f),
+                (index + 0.9f) * slot, height.toFloat(), ink)
+        }
     }
 }
 

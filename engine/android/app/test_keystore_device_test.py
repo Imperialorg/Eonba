@@ -4,13 +4,14 @@ import contextlib
 import io
 import unittest
 
-from keystore_device_test import TARGET, TEST, check_packages, check_result, parse_args
+from keystore_device_test import TARGET, TEST, check_packages, check_result, parse_args, require_stock_emulator
 
 
 class InstrumentationResults(unittest.TestCase):
     def test_requires_result_for_the_requested_gate_and_successful_finish(self):
         for key, result in (("keystore", "PASS-issue"), ("keystore", "PASS-restart"),
-                            ("demo", "PASS-denied"), ("demo", "PASS-allowed"), ("nativeVault", "PASS")):
+                            ("demo", "PASS-denied"), ("demo", "PASS-allowed"), ("nativeVault", "PASS"),
+                            ("voiceHud", "PASS-stock"), ("voiceHud", "PASS-session")):
             with self.subTest(key=key, result=result):
                 check_result(f"INSTRUMENTATION_RESULT: {key}={result}\r\nINSTRUMENTATION_CODE: -1\r\n", key, result)
 
@@ -31,6 +32,19 @@ class InstrumentationResults(unittest.TestCase):
 
 
 class DeviceModes(unittest.TestCase):
+    def test_device_selection_rejects_physical_or_unverified_targets_before_install(self):
+        def unexpected(*args):
+            self.fail(f"unexpected adb command: {args}")
+        with self.assertRaises(SystemExit):
+            require_stock_emulator(unexpected, "physical-device", 28)
+        def avd(name, api):
+            return lambda *args: {("emu", "avd", "name"): name,
+                                  ("shell", "getprop", "ro.build.version.sdk"): api}[args]
+        for name, api in [("OK", "35"), ("demo\nERROR", "35"), ("demo\nOK", "33"), ("demo\nOK", "")]:
+            with self.subTest(name=name, api=api), self.assertRaises(SystemExit):
+                require_stock_emulator(avd(name, api), "emulator-5554", 34)
+        require_stock_emulator(avd("demo\nOK", "28"), "emulator-5554", 28)
+
     def test_allowed_is_opt_in_and_separate_from_clean_install(self):
         clean = parse_args(["--serial", "emulator-5554", "--demo-denied"])
         self.assertTrue(clean.demo_denied)
@@ -41,10 +55,20 @@ class DeviceModes(unittest.TestCase):
         self.assertFalse(allowed.demo_denied)
         self.assertFalse(parse_args(["--serial", "emulator-5554"]).demo_denied)
 
+    def test_stock_tone_and_operator_hud_are_distinct_opt_ins(self):
+        clean = parse_args(["--serial", "emulator-5554", "--stock-hud", "--demo-denied"])
+        self.assertTrue(clean.stock_hud and clean.demo_denied)
+        self.assertIsNone(clean.preconfigured_hud_serial)
+        manual = parse_args(["--preconfigured-hud-serial", "emulator-5554"])
+        self.assertFalse(manual.stock_hud)
+        self.assertIsNone(manual.serial)
+
     def test_incompatible_requests_are_rejected_not_silently_skipped(self):
         for args in (["--demo-denied"], ["--build-only", "--demo-denied"],
                      ["--preconfigured-allowed-serial", "emulator-5556", "--demo-denied"],
-                     ["--preconfigured-allowed-serial", "emulator-5556", "--serial", "emulator-5554"]):
+                     ["--preconfigured-allowed-serial", "emulator-5556", "--serial", "emulator-5554"],
+                     ["--build-only", "--stock-hud"], ["--preconfigured-hud-serial", "emulator-5554", "--stock-hud"],
+                     ["--preconfigured-hud-serial", "emulator-5554", "--demo-denied"]):
             with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 parse_args(args)
 

@@ -103,4 +103,52 @@ class VoiceHudPresentationTest {
         assertNull(hud.frame)
         assertFalse(hud.show(true, true))
     }
+
+    @Test
+    fun toneConsentIsSeparateFromShowingExpansionAndTheProfileCheck() {
+        assertNull(hud.requestTone())
+        assertTrue(hud.show(true, true))
+        assertNull(hud.requestTone())
+        hud.toggleDetails()
+        assertNotNull(hud.requestCheck())
+        assertEquals(ToneScan.Idle, hud.frame?.tone)
+        val request = assertNotNull(hud.requestTone())
+        assertNull(hud.requestTone())
+        hud.addLevel(request, -1)
+        hud.addLevel(request, 101)
+        for (i in 0..30) hud.addLevel(request, i)
+        assertEquals(ToneScan.Reading(request, (0 until 12).toList()), hud.frame?.tone)
+        hud.finishTone(request, true)
+        assertEquals(ToneScan.Complete((0 until 12).toList()), hud.frame?.tone)
+        hud.clearTone()
+        assertEquals(ToneScan.Idle, hud.frame?.tone)
+    }
+
+    @Test
+    fun collapseRetryHideAndRevokeRejectQueuedLevelsAndCompletion() {
+        startCheck()
+        val first = assertNotNull(hud.requestTone())
+        hud.toggleDetails()
+        hud.toggleDetails()
+        val next = assertNotNull(hud.requestTone())
+        hud.addLevel(first, 77)
+        hud.finishTone(first, true)
+        assertEquals(ToneScan.Reading(next), hud.frame?.tone)
+        hud.finishTone(next, true) // No samples is not success.
+        assertEquals(ToneScan.Unavailable, hud.frame?.tone)
+        val failed = assertNotNull(hud.requestTone())
+        hud.addLevel(failed, 88)
+        hud.finishTone(failed, false)
+        assertEquals(ToneScan.Unavailable, hud.frame?.tone)
+        val hidden = assertNotNull(hud.requestTone())
+        startCheck()
+        hud.addLevel(hidden, 2)
+        hud.finishTone(hidden, true)
+        assertEquals(ToneScan.Idle, hud.frame?.tone)
+        val revoked = assertNotNull(hud.requestTone())
+        registry.shutdown(binding)
+        hud.addLevel(revoked, 91)
+        hud.finishTone(revoked, true)
+        assertNull(hud.frame)
+    }
 }

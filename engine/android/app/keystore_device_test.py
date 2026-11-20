@@ -64,15 +64,15 @@ def check_result(output, key, expected):
     raise SystemExit(f"Missing or invalid instrumentation completion for {key}={expected}.")
 
 
-def require_demo_emulator(adb, serial):
+def require_stock_emulator(adb, serial, minimum_api):
     if not re.fullmatch(r"emulator-[0-9]+", serial):
-        raise SystemExit("Demo acceptance requires an explicitly selected disposable Android emulator.")
+        raise SystemExit("This gate requires an explicitly selected disposable Android emulator.")
     avd = adb("emu", "avd", "name").splitlines()
     if len(avd) != 2 or not avd[0] or avd[1] != "OK":
         raise SystemExit("Could not verify the selected emulator's AVD.")
     api = adb("shell", "getprop", "ro.build.version.sdk").strip()
-    if not re.fullmatch("[0-9]+", api) or int(api) < 34:
-        raise SystemExit("Demo acceptance requires API 34+.")
+    if not re.fullmatch("[0-9]+", api) or int(api) < minimum_api:
+        raise SystemExit(f"This gate requires API {minimum_api}+.")
 
 
 def require_preconfigured_apk(adb):
@@ -100,7 +100,8 @@ def check_packages(inventory, preconfigured_allowed):
         raise SystemExit("Install and configure the target APK before running the allowed gate.")
 
 
-def run(sdk, serial, test_apk, *, demo_denied=False, preconfigured_allowed=False):
+def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, preconfigured_allowed=False,
+        preconfigured_hud=False):
     def adb(*args):
         return subprocess.check_output([sdk / "platform-tools/adb", "-s", serial, *args],
                                        text=True, stderr=subprocess.STDOUT, timeout=120)
@@ -111,19 +112,25 @@ def run(sdk, serial, test_apk, *, demo_denied=False, preconfigured_allowed=False
         name = expected.removeprefix("PASS-") if key == "keystore" else f"{key}={expected}"
         print(f"PASS: {name}", flush=True)
 
-    if demo_denied or preconfigured_allowed:
-        require_demo_emulator(adb, serial)
-    check_packages(adb("shell", "pm", "list", "packages", "-u", "--user", "all"), preconfigured_allowed)
+    preconfigured = preconfigured_allowed or preconfigured_hud
+    require_stock_emulator(adb, serial, 34 if demo_denied or stock_hud or preconfigured else 28)
+    check_packages(adb("shell", "pm", "list", "packages", "-u", "--user", "all"), preconfigured)
     with ExitStack() as cleanup:
         def install(package, apk):
             if "Success" not in adb("install", "-t", apk).splitlines():
                 raise SystemExit(f"Installation failed for {package}.")
             cleanup.callback(adb, "uninstall", package)
 
-        if preconfigured_allowed:
+        if preconfigured:
             require_preconfigured_apk(adb)
             install(TEST, test_apk)
-            instrument("DemoActionAcceptance", "demo", "PASS-allowed", "-e", "mode", "allowed")
+            if preconfigured_hud:
+                print("Invoke EON with the unlocked assistant gesture. Expand and choose Analyze built-in "
+                      "notification tone. After completion, close the card, wait a second, then invoke again.",
+                      flush=True)
+                instrument("VoiceHudAcceptance", "voiceHud", "PASS-session", "-e", "mode", "session")
+            else:
+                instrument("DemoActionAcceptance", "demo", "PASS-allowed", "-e", "mode", "allowed")
             return
 
         install(TARGET, TARGET_APK)
@@ -133,6 +140,8 @@ def run(sdk, serial, test_apk, *, demo_denied=False, preconfigured_allowed=False
             instrument("KeystoreAcceptance", "keystore", f"PASS-{phase}", "-e", "phase", phase)
         if demo_denied:
             instrument("DemoActionAcceptance", "demo", "PASS-denied", "-e", "mode", "denied")
+        if stock_hud:
+            instrument("VoiceHudAcceptance", "voiceHud", "PASS-stock", "-e", "mode", "stock")
         # Only after restart's single-alias and continuity checks; the native vault has its own key.
         instrument("NativeVaultAcceptance", "nativeVault", "PASS")
 
@@ -141,16 +150,25 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--build-only", action="store_true")
-    mode.add_argument("--serial", help="adb serial of a clean disposable API 28+ emulator/device")
+    mode.add_argument("--serial", help="adb serial of a newly created disposable API 28+ emulator")
     mode.add_argument("--preconfigured-allowed-serial", metavar="SERIAL",
                       help="only run demo=allowed on a disposable unlocked API 34+ AVD: first install "
                            "app-debug.apk and manually select EON as assistant and enable its service and "
                            "shortcut. Leave the instrumentation APK uninstalled. No role or permission grants.")
+    mode.add_argument("--preconfigured-hud-serial", metavar="SERIAL",
+                      help="observe an operator's real assistant gesture, tone analysis, dismissal and fresh "
+                           "invocation on an unlocked disposable API 34+ AVD already configured with EON "
+                           "as assistant. Do not enable accessibility. Install only the matching target APK.")
+    parser.add_argument("--stock-hud", action="store_true",
+                        help="also measure and cancel an actual OS notification tone with the production "
+                             "decoder on the unselected clean API 34+ emulator named by --serial")
     parser.add_argument("--demo-denied", action="store_true",
                         help="also require demo=denied on the clean, unlocked API 34+ emulator named by --serial")
     args = parser.parse_args(argv)
     if args.demo_denied and not args.serial:
         parser.error("--demo-denied requires --serial")
+    if args.stock_hud and not args.serial:
+        parser.error("--stock-hud requires --serial")
     return args
 
 
@@ -159,5 +177,7 @@ if __name__ == "__main__":
     sdk = Path(os.environ.get("ANDROID_HOME") or os.environ["ANDROID_SDK_ROOT"])
     apk = build(sdk)
     if not args.build_only:
-        run(sdk, args.serial or args.preconfigured_allowed_serial, apk, demo_denied=args.demo_denied,
-            preconfigured_allowed=args.preconfigured_allowed_serial is not None)
+        run(sdk, args.serial or args.preconfigured_allowed_serial or args.preconfigured_hud_serial, apk,
+            demo_denied=args.demo_denied, stock_hud=args.stock_hud,
+            preconfigured_allowed=args.preconfigured_allowed_serial is not None,
+            preconfigured_hud=args.preconfigured_hud_serial is not None)

@@ -6,11 +6,16 @@
     <string name="voice_hud_checked">Profile check complete</string>
     <string name="voice_hud_failed">Profile check unavailable</string>
     <string name="voice_hud_recommendation">Suggested profile: %1$s</string>
-    <string name="voice_hud_privacy">This session takes no audio, screenshots or app context. The dots show session open, profile check requested, and result. The optional check uses device memory size; it does not load a model.</string>
+    <string name="voice_hud_privacy">Check a model profile using device memory size, or measure up to 1.2 seconds of the first built-in notification tone. Each bar is a 100 ms average (RMS) level. Nothing is played or recorded. No personal sounds, microphone, screenshots or app context.</string>
+    <string name="voice_tone_scan">Analyze built-in notification tone</string>
+    <string name="voice_tone_clear">Stop and clear tone levels</string>
+    <string name="voice_tone_progress">Measuring tone · %1$d of up to %2$d levels</string>
+    <string name="voice_tone_complete">Tone complete · %1$d levels · highest RMS %2$d%%</string>
+    <string name="voice_tone_failed">Could not measure a built-in tone. No levels kept.</string>
     <string name="voice_hud_expand">Show session details</string>
     <string name="voice_hud_collapse">Hide session details</string>
     <string name="voice_hud_check">Check model profile</string>
     <string name="open_eon_controls">Open EON controls</string>
     <string name="close_voice_session">End session</string>
-    <string name="voice_hud_help">With EON selected, use your assistant gesture while unlocked to open the floating session card. Expand it for a local model profile check, or end the session with the close button. Nothing is recorded.</string>
+    <string name="voice_hud_help">With EON selected, use your assistant gesture while unlocked. Expand the card to check a model profile or see the levels of a built-in tone. Collapse or close the card to clear the levels. Nothing is recorded.</string>
 </resources>

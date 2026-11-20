@@ -12,6 +12,7 @@ import android.provider.Settings
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -20,6 +21,7 @@ import uniffi.eon_uniffi.selectModelProfile
 
 /** ACTION_ASSIST launches a normal, foreground activity. It doesn't inspect the incoming intent. */
 class AssistantActivity : Activity() {
+    private lateinit var measureNextProfile: CheckBox
     private lateinit var roleStatus: TextView
     private lateinit var requestRole: Button
     private lateinit var inspectionStatus: TextView
@@ -39,17 +41,31 @@ class AssistantActivity : Activity() {
         column.addView(TextView(this).apply {
             text = "EON local assistant\nScreen and microphone capture are off. Choosing EON as assistant does not allow inspection."
         })
+        measureNextProfile = CheckBox(this).apply {
+            text = "Measure EON process CPU during the next profile check"
+            isSaveEnabled = false
+            filterTouchesWhenObscured = true
+        }
+        column.addView(measureNextProfile)
         column.addView(Button(this).apply {
             text = "Check model profile"
             setOnClickListener {
-                val info = ActivityManager.MemoryInfo()
-                getSystemService(ActivityManager::class.java).getMemoryInfo(info)
-                result.text = try {
-                    "Model profile: ${selectModelProfile(info.totalMem / 1_000_000_000.0)}"
-                } catch (_: BridgeException) {
-                    "Could not select a profile for this device."
-                } catch (_: LinkageError) {
-                    "The native bridge could not be loaded."
+                val optedIn = measureNextProfile.isChecked
+                measureNextProfile.isChecked = false
+                val delta = SelfProcessCpu.measure(optedIn) {
+                    val info = ActivityManager.MemoryInfo()
+                    getSystemService(ActivityManager::class.java).getMemoryInfo(info)
+                    result.text = try {
+                        "Model profile: ${selectModelProfile(info.totalMem / 1_000_000_000.0)}"
+                    } catch (_: BridgeException) {
+                        "Could not select a profile for this device."
+                    } catch (_: LinkageError) {
+                        "The native bridge could not be loaded."
+                    }
+                }
+                if (optedIn) {
+                    result.append(if (delta.isPresent) "\nEON process CPU: ${delta.asLong} ms."
+                                  else "\nEON process CPU unavailable.")
                 }
             }
         })
@@ -182,6 +198,7 @@ class AssistantActivity : Activity() {
 
     override fun onPause() {
         resumed = false
+        measureNextProfile.isChecked = false
         InspectionAccess.cancelPendingConfirmation()
         consent?.dismiss()
         consent = null

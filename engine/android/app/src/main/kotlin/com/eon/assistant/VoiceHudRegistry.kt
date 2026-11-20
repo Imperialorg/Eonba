@@ -7,7 +7,16 @@ internal sealed interface ProfileCheck {
     data class Result(val recommendation: String?) : ProfileCheck
 }
 
-internal data class VoiceHudFrame(val expanded: Boolean = false, val check: ProfileCheck = ProfileCheck.Idle)
+internal sealed interface ToneScan {
+    data object Idle : ToneScan
+    class Request
+    data class Reading(val request: Request, val levels: List<Int> = emptyList()) : ToneScan
+    data class Complete(val levels: List<Int>) : ToneScan
+    data object Unavailable : ToneScan
+}
+
+internal data class VoiceHudFrame(val expanded: Boolean = false, val check: ProfileCheck = ProfileCheck.Idle,
+                                 val tone: ToneScan = ToneScan.Idle)
 
 /** Main-thread only. A window belongs to one OS binding; neither survives a process restart. */
 internal class VoiceHudRegistry {
@@ -52,7 +61,34 @@ internal class VoiceHudRegistry {
         fun canUse(eligible: Boolean): Boolean = visible === this && owner === binding && eligible
 
         fun toggleDetails() {
-            frame = frame?.let { it.copy(expanded = !it.expanded) }
+            frame = frame?.let { it.copy(expanded = !it.expanded, tone = ToneScan.Idle) }
+        }
+
+        fun requestTone(): ToneScan.Request? {
+            val current = frame ?: return null
+            if (!current.expanded || current.tone is ToneScan.Reading) return null
+            return ToneScan.Request().also { frame = current.copy(tone = ToneScan.Reading(it)) }
+        }
+
+        fun addLevel(request: ToneScan.Request, level: Int) {
+            val current = frame ?: return
+            val reading = current.tone as? ToneScan.Reading ?: return
+            if (reading.request === request && level in 0..100 && reading.levels.size < ToneLevels.LIMIT) {
+                frame = current.copy(tone = reading.copy(levels = reading.levels + level))
+            }
+        }
+
+        fun finishTone(request: ToneScan.Request, ok: Boolean) {
+            val current = frame ?: return
+            val reading = current.tone as? ToneScan.Reading ?: return
+            if (reading.request === request) {
+                frame = current.copy(tone = if (ok && reading.levels.isNotEmpty())
+                    ToneScan.Complete(reading.levels) else ToneScan.Unavailable)
+            }
+        }
+
+        fun clearTone() {
+            frame = frame?.copy(tone = ToneScan.Idle)
         }
 
         fun requestCheck(): ProfileCheck.Requested? {
