@@ -1,6 +1,8 @@
-//! UI geometry and bounded temporal sampling of caller-supplied screen frames.
+//! UI geometry, bounded temporal sampling and opt-in still-image OCR of caller-supplied frames.
 
 pub mod keyframes;
+#[cfg(feature = "paddle-ocr")]
+pub mod ocr;
 #[cfg(target_os = "linux")]
 pub mod shared;
 

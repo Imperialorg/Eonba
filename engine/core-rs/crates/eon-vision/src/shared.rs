@@ -25,6 +25,29 @@ use crate::{EonError, EonResult};
 #[derive(Debug)]
 pub struct SharedJpeg(File);
 
+#[cfg(feature = "paddle-ocr")]
+impl SharedJpeg {
+    pub(crate) fn read_limited(&self, limit: usize) -> EonResult<Vec<u8>> {
+        let failed = |e: std::io::Error| EonError::OperationFailed {
+            operation: "read selected keyframe".into(),
+            reason: e.to_string(),
+        };
+        let size = self.0.metadata().map_err(failed)?.len();
+        if size > limit as u64 {
+            return Err(EonError::ResourceExhausted {
+                resource: "OCR JPEG bytes".into(),
+                requested: size,
+                available: limit as u64,
+            });
+        }
+        // The size is sealed. Positional I/O leaves the producer's and other
+        // recipients' shared seek position untouched.
+        let mut bytes = vec![0; size as usize];
+        self.0.read_exact_at(&mut bytes, 0).map_err(failed)?;
+        Ok(bytes)
+    }
+}
+
 impl AsFd for SharedJpeg {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.0.as_fd()

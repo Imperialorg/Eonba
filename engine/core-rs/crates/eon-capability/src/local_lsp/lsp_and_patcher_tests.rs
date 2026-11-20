@@ -290,6 +290,61 @@ fn preview_changes_only_unique_top_level_block_and_never_writes() {
 }
 
 #[test]
+fn ecma_preview_requires_one_unambiguous_concrete_top_level_declaration() {
+    let f = Fixture::new();
+    let w = Workspace::open(&f.0).unwrap();
+    let replacement = "function f() { return 1; }";
+    for (path, original) in [
+        (
+            "a.ts",
+            "export function f(x: string): number;\nexport function f(x: string) { return 0; }",
+        ),
+        (
+            "a.ts",
+            "export declare /* signature */ function f(): void;\nexport function f() {}",
+        ),
+        ("a.ts", "declare namespace Helpers { function f(): void; }"),
+        ("a.js", "export default function() {}"),
+        ("a.js", "export default (function f() {});"),
+        ("a.js", "const f = () => 0;"),
+        ("a.js", "class C { f() {} }"),
+        ("a.js", "function outer() { function f() {} }"),
+        ("a.js", "const sample = `function f() {}`; // function f() {}"),
+        ("a.js", "function f() {} function f() {}"),
+        ("a.js", r"function \u0066() {} function f() {}"),
+        ("a.js", "function f() {} function unfinished("),
+        ("a.js", "function f(x: number) {}"),
+        ("a.ts", "function f() { return <article/>; }"),
+    ] {
+        fs::write(f.0.join(path), original).unwrap();
+        assert!(
+            preview_replacement(&w, path, "f", replacement).is_err(),
+            "{path}: {original}"
+        );
+    }
+    for (path, prefix) in [("a.mjs", "export "), ("a.cjs", ""), ("a.mts", "export "), ("a.cts", "")] {
+        let original = format!(
+            "// function f(): 🗓\r\nfunction outer() {{ function f() {{}} }}\r\n\
+             {prefix}/* keep */ async function* f() {{ yield 0; }} // keep\r\nconst end = 0;\r\n"
+        );
+        fs::write(f.0.join(path), &original).unwrap();
+        let p = preview_replacement(&w, path, "f", "async function* f() { yield 2; }\n").unwrap();
+        assert_eq!(p.after, original.replace("yield 0", "yield 2"));
+        for bad in [
+            "async function* f() { yield 0; }",
+            "function renamed() {}",
+            "export default function f() {}",
+            "/* outside */ function f() {}",
+            "function f() {} // outside",
+            "function f() {} function extra() {}",
+            "function f() {",
+        ] {
+            assert!(preview_replacement(&w, path, "f", bad).is_err(), "{bad}");
+        }
+    }
+}
+
+#[test]
 fn path_scope_and_document_budget_also_apply_to_previews() {
     let f = Fixture::new();
     let other = Fixture::new();

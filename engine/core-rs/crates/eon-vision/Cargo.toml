@@ -5,9 +5,18 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+paddle-ocr = ["dep:image", "dep:ort", "dep:sha2"]
+
 [dependencies]
 eon-primitives = { path = "../eon-primitives" }
+image = { version = "0.25.10", default-features = false, features = ["jpeg"], optional = true }
+ort = { version = "=2.0.0-rc.15", optional = true }
+sha2 = { version = "0.10.9", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1", features = ["fs"] }
 
+[[test]]
+name = "still_ocr"
+required-features = ["paddle-ocr"]
