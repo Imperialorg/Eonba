@@ -1,8 +1,12 @@
-"""Build separate Keystore instrumentation; optionally run on an explicitly selected clean device."""
+"""Build Android instrumentation and run explicitly selected disposable-target acceptance gates."""
 
 import argparse
+from contextlib import ExitStack
+import hashlib
 import os
 from pathlib import Path
+import re
+import shlex
 import subprocess
 from zipfile import ZIP_STORED, ZipFile
 
@@ -13,6 +17,7 @@ WORK = BUILD / "intermediates/keystore-test"
 SOURCE = APP / "src/androidTest"
 TARGET = "com.eon.assistant"
 TEST = f"{TARGET}.keystoretest"
+TARGET_APK = BUILD / "outputs/apk/debug/app-debug.apk"
 
 
 def build(sdk):
@@ -46,39 +51,113 @@ def build(sdk):
     return signed
 
 
-def run(sdk, serial, test_apk):
-    def adb(*args):
-        return subprocess.check_output([sdk / "platform-tools/adb", "-s", serial, *args], text=True, timeout=120)
+def check_result(output, key, expected):
+    """am can exit zero on failure. Our raw Instrumentations return one result and one finish code."""
+    lines = output.splitlines()
+    if lines == [f"INSTRUMENTATION_RESULT: {key}={expected}", "INSTRUMENTATION_CODE: -1"]:
+        return
+    # Never echo the full device transcript (in particular, credential material or stack traces).
+    for line in lines:
+        failure = re.fullmatch(rf"INSTRUMENTATION_RESULT: {re.escape(key)}=FAIL-([a-z][a-z0-9-]{{0,47}})", line)
+        if failure:
+            raise SystemExit(f"{key}={expected} failed at {failure[1]}.")
+    raise SystemExit(f"Missing or invalid instrumentation completion for {key}={expected}.")
 
-    installed = adb("shell", "pm", "list", "packages", "-u").splitlines()
-    if any(f"package:{package}" in installed for package in (TARGET, TEST)):
-        raise SystemExit("Refusing to overwrite an existing EON installation. Use a disposable clean device.")
-    packages = []
-    try:
-        for package, apk in ((TARGET, BUILD / "outputs/apk/debug/app-debug.apk"), (TEST, test_apk)):
+
+def require_demo_emulator(adb, serial):
+    if not re.fullmatch(r"emulator-[0-9]+", serial):
+        raise SystemExit("Demo acceptance requires an explicitly selected disposable Android emulator.")
+    avd = adb("emu", "avd", "name").splitlines()
+    if len(avd) != 2 or not avd[0] or avd[1] != "OK":
+        raise SystemExit("Could not verify the selected emulator's AVD.")
+    api = adb("shell", "getprop", "ro.build.version.sdk").strip()
+    if not re.fullmatch("[0-9]+", api) or int(api) < 34:
+        raise SystemExit("Demo acceptance requires API 34+.")
+
+
+def require_preconfigured_apk(adb):
+    # An operator installed and configured the target, not the test APK. Don't replace, clear or
+    # uninstall their target. A matching package name (or even debug signer) is not a build ID.
+    paths = adb("shell", "pm", "path", TARGET).splitlines()
+    if len(paths) != 1 or not paths[0].startswith("package:/"):
+        raise SystemExit("Expected the single preconfigured EON debug APK.")
+    digest = hashlib.sha256()
+    with TARGET_APK.open("rb") as apk:
+        for chunk in iter(lambda: apk.read(1024 * 1024), b""):
+            digest.update(chunk)
+    remote = adb("shell", "sha256sum", shlex.quote(paths[0][len("package:"):])).split()
+    if remote[:1] != [digest.hexdigest()]:
+        raise SystemExit("Preconfigured target does not match the locally built APK.")
+
+
+def check_packages(inventory, preconfigured_allowed):
+    packages = inventory.splitlines()
+    if "package:android" not in packages or not all(line.startswith("package:") for line in packages):
+        raise SystemExit("Could not verify installed packages.")
+    if f"package:{TEST}" in packages or (not preconfigured_allowed and f"package:{TARGET}" in packages):
+        raise SystemExit("Refusing to overwrite an existing EON installation.")
+    if preconfigured_allowed and f"package:{TARGET}" not in packages:
+        raise SystemExit("Install and configure the target APK before running the allowed gate.")
+
+
+def run(sdk, serial, test_apk, *, demo_denied=False, preconfigured_allowed=False):
+    def adb(*args):
+        return subprocess.check_output([sdk / "platform-tools/adb", "-s", serial, *args],
+                                       text=True, stderr=subprocess.STDOUT, timeout=120)
+
+    def instrument(component, key, expected, *args):
+        output = adb("shell", "am", "instrument", "-w", "-r", *args, f"{TEST}/{TARGET}.{component}")
+        check_result(output, key, expected)
+        name = expected.removeprefix("PASS-") if key == "keystore" else f"{key}={expected}"
+        print(f"PASS: {name}", flush=True)
+
+    if demo_denied or preconfigured_allowed:
+        require_demo_emulator(adb, serial)
+    check_packages(adb("shell", "pm", "list", "packages", "-u", "--user", "all"), preconfigured_allowed)
+    with ExitStack() as cleanup:
+        def install(package, apk):
             if "Success" not in adb("install", "-t", apk).splitlines():
-                raise SystemExit("Installation failed.")
-            packages.append(package)
+                raise SystemExit(f"Installation failed for {package}.")
+            cleanup.callback(adb, "uninstall", package)
+
+        if preconfigured_allowed:
+            require_preconfigured_apk(adb)
+            install(TEST, test_apk)
+            instrument("DemoActionAcceptance", "demo", "PASS-allowed", "-e", "mode", "allowed")
+            return
+
+        install(TARGET, TARGET_APK)
+        install(TEST, test_apk)
         for phase in ("issue", "restart"):
             adb("shell", "am", "force-stop", TARGET)
-            lines = adb("shell", "am", "instrument", "-w", "-r", "-e", "phase", phase,
-                        f"{TEST}/{TARGET}.KeystoreAcceptance").splitlines()
-            if f"INSTRUMENTATION_RESULT: keystore=PASS-{phase}" not in lines or "INSTRUMENTATION_CODE: -1" not in lines:
-                status = next((line for line in lines if line.startswith("INSTRUMENTATION_RESULT: keystore=FAIL-")), "")
-                raise SystemExit(f"Keystore acceptance failed ({phase}). {status}")
-            print(f"PASS: {phase}")
-    finally:
-        for package in reversed(packages):
-            adb("uninstall", package)
+            instrument("KeystoreAcceptance", "keystore", f"PASS-{phase}", "-e", "phase", phase)
+        if demo_denied:
+            instrument("DemoActionAcceptance", "demo", "PASS-denied", "-e", "mode", "denied")
+        # Only after restart's single-alias and continuity checks; the native vault has its own key.
+        instrument("NativeVaultAcceptance", "nativeVault", "PASS")
 
 
-if __name__ == "__main__":
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--build-only", action="store_true")
     mode.add_argument("--serial", help="adb serial of a clean disposable API 28+ emulator/device")
-    args = parser.parse_args()
+    mode.add_argument("--preconfigured-allowed-serial", metavar="SERIAL",
+                      help="only run demo=allowed on a disposable unlocked API 34+ AVD: first install "
+                           "app-debug.apk and manually select EON as assistant and enable its service and "
+                           "shortcut. Leave the instrumentation APK uninstalled. No role or permission grants.")
+    parser.add_argument("--demo-denied", action="store_true",
+                        help="also require demo=denied on the clean, unlocked API 34+ emulator named by --serial")
+    args = parser.parse_args(argv)
+    if args.demo_denied and not args.serial:
+        parser.error("--demo-denied requires --serial")
+    return args
+
+
+if __name__ == "__main__":
+    args = parse_args()
     sdk = Path(os.environ.get("ANDROID_HOME") or os.environ["ANDROID_SDK_ROOT"])
     apk = build(sdk)
-    if args.serial:
-        run(sdk, args.serial, apk)
+    if not args.build_only:
+        run(sdk, args.serial or args.preconfigured_allowed_serial, apk, demo_denied=args.demo_denied,
+            preconfigured_allowed=args.preconfigured_allowed_serial is not None)

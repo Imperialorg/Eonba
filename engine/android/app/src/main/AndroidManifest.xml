@@ -2,7 +2,8 @@
     package="com.eon.assistant" android:versionCode="1" android:versionName="0.1">
     <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="35" />
     <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
-    <application android:label="EON" android:allowBackup="false" android:debuggable="true"
+    <application android:name=".FoundationVaultApplication"
+        android:label="EON" android:allowBackup="false" android:debuggable="true"
         android:extractNativeLibs="false" android:theme="@android:style/Theme.Material.Light">
         <activity android:name=".AssistantActivity" android:exported="true">
             <intent-filter>

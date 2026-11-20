@@ -162,6 +162,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Test instrumentation result parsing and CLI modes (host only)
+        run: python3 -m unittest discover -s app -p 'test_keystore_device_test.py'
       - name: Install Android cross-build prerequisites
         run: |
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;37.0.0" "ndk;27.3.13750724"
@@ -169,7 +171,7 @@ jobs:
           cargo install cargo-ndk --version 4.1.2 --locked
       - name: Build signed debug APK, compare ABI bindings and run host tests
         run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.3.13750724" ./gradlew :core-bindings:test :app:test :core-bindings:verifyTargetBindings
-      - name: Verify Keystore issuance and restart on a disposable Android 35 emulator
+      - name: Verify Keystore restart, denied demo actions and native vault on a disposable Android 35 emulator
         timeout-minutes: 15
         run: |
           image='system-images;android-35;google_apis;x86_64'
@@ -190,7 +192,11 @@ jobs:
           # shellcheck disable=SC2016
           timeout 180 "$adb" -s "$serial" shell 'until [ "$(getprop sys.boot_completed)" = 1 ]; do sleep 1; done'
           "$adb" -s "$serial" emu avd name | sed 's/\r$//' | grep -Fx eon-keystore
-          python3 app/keystore_device_test.py --serial "$serial"
+          # Keep this fresh AVD awake through the Keystore phases and dismiss its non-secure keyguard.
+          "$adb" -s "$serial" shell svc power stayon true
+          "$adb" -s "$serial" shell input keyevent KEYCODE_WAKEUP
+          "$adb" -s "$serial" shell wm dismiss-keyguard
+          python3 app/keystore_device_test.py --serial "$serial" --demo-denied
 
   lean-backtest:
     runs-on: ubuntu-latest

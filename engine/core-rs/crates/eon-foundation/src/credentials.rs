@@ -26,8 +26,17 @@ mod platform;
 #[path = "credentials/windows.rs"]
 mod platform;
 
+#[cfg(target_os = "android")]
+#[path = "credentials/android.rs"]
+mod platform;
+#[cfg(all(target_os = "android", debug_assertions))]
+pub use platform::check_android_vault_fixture;
+#[cfg(target_os = "android")]
+pub use platform::register_android_vm;
+
 #[cfg(not(any(
     windows,
+    target_os = "android",
     all(
         target_os = "linux",
         target_pointer_width = "64",

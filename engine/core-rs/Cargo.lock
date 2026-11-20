@@ -2591,6 +2591,7 @@ dependencies = [
  "blake3",
  "crc32fast",
  "eon-primitives",
+ "jni 0.21.1",
  "proptest",
  "rusqlite",
  "rustix 1.1.6",
@@ -2649,8 +2650,10 @@ name = "eon-uniffi"
 version = "0.1.0"
 dependencies = [
  "eon-cognition",
+ "eon-foundation",
  "eon-primitives",
  "eon-voice",
+ "jni 0.21.1",
  "serde_json",
  "uniffi",
 ]

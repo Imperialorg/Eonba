@@ -9,6 +9,9 @@ use eon_voice::endpoint::{Completeness as VoiceCompleteness, silence_threshold_m
 use eon_voice::{gain::PcmGainController, geometry::VAD_FRAME_SAMPLES};
 use std::sync::OnceLock;
 
+#[cfg(target_os = "android")]
+mod android_vault;
+
 mod dag;
 pub use dag::{DagNode, validate_task_dag};
 
