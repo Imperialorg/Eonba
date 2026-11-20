@@ -92,7 +92,7 @@ async fn established_trial(
     assert_eq!(result.unwrap().node_id, expected.to_string());
     assert_eq!(link.play_if_leader(turn, || {}), initiator);
 
-    if initiator {
+    let slowest = if initiator {
         let mut rtts = Vec::with_capacity(TRIALS);
         for _ in 0..TRIALS {
             rtts.push(link.measure_control_rtt().await.unwrap());
@@ -102,15 +102,21 @@ async fn established_trial(
             "paired control RPC (n={TRIALS}): p50={:?} p95={:?} max={:?}",
             rtts[49], rtts[94], rtts[99]
         );
-        assert!(
-            rtts[99] < MAX_RTT,
-            "not all {TRIALS} RPCs finished in <10 ms"
-        );
+        Some(rtts[TRIALS - 1])
     } else {
         for _ in 0..TRIALS {
             link.answer_control_probe().await.unwrap();
         }
         link.wait_for_control_peer_close().await.unwrap();
-    }
+        None
+    };
+    // Close even if a measurement missed its target. Otherwise the responder
+    // can report a peer timeout that obscures a completed but slow exchange.
     node.close().await;
+    if let Some(max) = slowest {
+        assert!(
+            max < MAX_RTT,
+            "not all {TRIALS} RPCs finished in <10 ms: {max:?}"
+        );
+    }
 }

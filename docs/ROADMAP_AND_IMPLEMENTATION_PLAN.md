@@ -251,12 +251,12 @@ The security work in this roadmap is defensive: inspect authorized code, depende
 
 ## Phase 8: Distributed Networking Mesh (Engine Optimized for Networking)
 
-- [ ] **Task 8.1: Multiplexed P2P QUIC Transport & 15ms Spatial Election Protocol**
+- [x] **Task 8.1: Multiplexed P2P QUIC Transport & 15ms Spatial Election Protocol**
   - **Crate**: `eon-mesh`
   - **Files**: `src/transport/quic.rs`, `src/transport/discovery.rs`, `src/transport/security.rs`, `src/transport/spatial.rs`
   - **Requirements**: Zero-config mDNS peer discovery, mutual TLS 1.3 encryption, sub-10ms RPC latency across local LAN. 15ms Spatial Arbitration Protocol ("Single Mind, Multiple Bodies") broadcasting `SensoryClaim` over Class 0 QUIC datagrams, calculating deterministic multi-factor arbitration scores (SNR, screen unlock, HID recency, speaker ID confidence), and electing a single I/O leader while enforcing follower speaker suppression.
   - **Unit Tests**: `cargo test -p eon-mesh quic_tests`, `spatial_election_tests`.
-  - **Measured subset**: After election over an explicitly paired loopback link, 100 control RPCs had p50 0.286 ms, p95 0.350 ms and max 0.376 ms. The two-node LAN test is separate: the runner denied outbound mDNS multicast on its isolated veth. No LAN latency was measured.
+  - **Verified on a two-node Linux virtual LAN**: Independently pinned peers discovered one another over mDNS, agreed on the leader and suppressed follower playback. Three consecutive runs passed the strict 100-RPC gate; maxima were 8.502, 0.566 and 0.363 ms. One earlier run missed at 10.062 ms. This measures an established connection on isolated veth interfaces, not connection setup, a physical Wi-Fi link or a hard real-time guarantee.
 
 - [ ] **Task 8.2: Split-Inference Coordinator**
   - **Crate**: `eon-mesh`
