@@ -103,9 +103,10 @@ def check_packages(inventory, preconfigured_allowed):
 MIC_PHASES = {
     "denied": "Leave microphone access unreviewed. Tap Start and leave the denial visible.",
     "complete": "With access reviewed and a nonzero virtual input, tap Start and let all 12 levels finish.",
-    "stop": "With access reviewed and a nonzero virtual input, tap Start. After progress appears, tap Stop.",
-    "hide": "With access reviewed and a nonzero virtual input, tap Start. After progress appears, dismiss the "
-            "card, pause, then invoke a fresh collapsed card.",
+    "stop": "With access reviewed and a nonzero virtual input, tap Start. At the first nonzero level, tap Stop.",
+    "hide": "Invoke over EON controls with the assistant role status visible underneath. With access reviewed "
+            "and a nonzero virtual input, tap Start. At the first nonzero level, dismiss the card. Leave the "
+            "controls visible for a second, invoke a fresh card, pause, then expand without starting.",
 }
 
 
@@ -145,7 +146,8 @@ def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, stock_assi
             require_preconfigured_apk(adb)
             install(TEST, test_apk)
             if mic_phase is not None:
-                print("Invoke the selected assistant on the unlocked AVD and expand its card. "
+                print("Invoke the selected assistant on the unlocked AVD over EON controls. Expand its card "
+                      "and pause with the meter off before tapping Start. "
                       + MIC_PHASES[mic_phase], flush=True)
                 instrument("SessionMicAcceptance", "micHud", f"PASS-{mic_phase}", "-e", "mode", mic_phase)
             elif preconfigured_hud:

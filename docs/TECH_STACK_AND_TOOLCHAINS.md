@@ -161,7 +161,7 @@ an expanded, unlocked assistant card. Selection as assistant does not start capt
 The meter shows half-second RMS levels; Stop, hide or loss of the session ends the
 take. It does not record to a file, listen in the background or measure acoustic TTFA.
 
-Two **distinct** instrumentation gates are available after building the APK:
+Use separate instrumentation gates for the stock app, selected tone HUD and selected microphone HUD:
 
 * **Clean stock device:** On a **new disposable** `system-images;android-35;google_apis;x86_64`
   AVD, verify `adb -s "$SERIAL" emu avd name` matches the AVD you just created.
@@ -179,6 +179,23 @@ Two **distinct** instrumentation gates are available after building the APK:
   close the card, wait a second, and invoke again. The observer must see a real completed
   graph, its cleared state, dismissal and a clean new card for
   `voiceHud=PASS-session`. It never injects gestures, changes roles or grants permissions.
+* **Selected-role microphone:** Use a setup-complete, unlocked, disposable API 34+ AVD.
+  Route its input exclusively to a private virtual audio source carrying a generated tone,
+  never to the host microphone. Install the matching target APK and leave the test APK
+  uninstalled. Run `python3 app/keystore_device_test.py --preconfigured-mic-serial "$SERIAL" --mic-phase denied`
+  with EON selected but microphone access **not reviewed**. From EON controls, invoke
+  the card through Android, expand it, pause with the meter off and tap Start. Leave
+  the refusal visible for the observer.
+  For the positive phases, review the permission through EON controls and Android's own
+  prompt. If selecting the assistant produced a pre-existing OS grant, use a separate
+  disposable AVD and review the permission **before** choosing EON. A grant alone is
+  not a review. Repeat the command with `complete`, `stop` and `hide`, one phase per run.
+  Start a fresh take for each. Let `complete` finish; for `stop` and `hide`, tap Stop
+  or dismiss at the first nonzero level. For `hide`, leave the EON controls with role
+  status visible for a second, invoke a fresh card, pause, then expand without starting.
+  Expect `micHud=PASS-<phase>` for each run. The observer reads the Android recording
+  operation for EON, not audio samples. An inactive operation is not a hardware power reading.
+  A build, permission dialog, silent input or built-in tone result does not verify capture.
 
 **Optional process CPU measurement:** In EON, check **Measure EON process CPU during the next profile check**, then tap **Check model profile**. The box clears after one use or when leaving the activity. `SelfProcessCpu.measure` brackets that synchronous action with two `android.os.Process.getElapsedCpuTime()` reads only when requested. The result is a delta in **CPU milliseconds across all threads of the current app process**, not action latency, CPU percentage, or time attributable solely to that code. Equal positive counters can yield a genuine 0 ms at the counter's resolution. Missing/nonpositive, decreasing or out-of-order samples and intervals exceeding 10 seconds are unavailable. Neither sample leaves the call stack as a resumable baseline, so a process restart or reboot cannot produce a delta against old data. No listener, permission, persistent record or network access is needed.
 
