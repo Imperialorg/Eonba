@@ -1,11 +1,11 @@
 //! Device loop test against the host's default audio devices (PulseAudio through ALSA in this codespace).
 //!
-//! These are acceptance tests: missing devices and driver errors both fail, never silently pass.
+//! Microphone tests require explicit opt-in; missing devices and driver errors fail, never silently pass.
 //! ALSA's first period can take over a second to arrive, so the waits are long enough to see the first callback.
 
 use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The device tests share one audio server and sink, and concurrent streams on it produce driver errors. Each test
 /// holds this lock for its whole duration.
@@ -20,6 +20,7 @@ use eon_voice::device::{capture_default_input, play_default_output};
 use eon_voice::ring::pcm_ring;
 
 #[test]
+#[ignore = "opens the default microphone; run explicitly on a consenting device or private virtual source"]
 fn default_input_delivers_frames_without_driver_errors() {
     let _device = device_guard();
     let (producer, consumer) = pcm_ring(1 << 16);
@@ -66,8 +67,12 @@ fn barge_in_flushes_queued_speech_during_playback() {
     let barge = BargeIn::new();
     let handle = play_default_output(consumer, barge.clone()).expect("a working default output device is required");
     assert!(barge.is_playing(), "must interrupt active playback");
+    let start = Instant::now();
     barge.trigger();
-    std::thread::sleep(Duration::from_millis(1500));
+    while handle.counters.barge_in_flushes.load(Ordering::Acquire) == 0 && start.elapsed() < Duration::from_secs(1) {
+        std::thread::sleep(Duration::from_micros(100));
+    }
+    let elapsed = start.elapsed();
     let flushes = handle.counters.barge_in_flushes.load(Ordering::Relaxed);
     let dropped = handle.counters.flushed_samples.load(Ordering::Relaxed);
     let errors = handle.counters.driver_errors.load(Ordering::Relaxed);
@@ -75,5 +80,9 @@ fn barge_in_flushes_queued_speech_during_playback() {
     assert_eq!(flushes, 1, "the trigger must flush exactly once");
     assert!(dropped > 0, "the flush must drop the queued speech, not play it out");
     assert!(!barge.is_pending(), "the request must be consumed");
+    eprintln!(
+        "CPAL {} Hz request to first observed callback mute <= {elapsed:?}; not acoustic latency",
+        handle.sample_rate
+    );
     drop(handle);
 }

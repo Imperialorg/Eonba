@@ -15,7 +15,8 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
 use crate::barge_in::BargeIn;
-use crate::ring::{PcmConsumer, PcmProducer};
+use crate::resample::CaptureFrames;
+use crate::ring::{PcmConsumer, PcmProducer, pcm_ring};
 
 const SCRATCH_FRAMES: usize = 256;
 /// Attempts to start playback when the driver fails before its first callback. The consumer is kept across attempts.
@@ -50,12 +51,42 @@ pub struct CaptureHandle {
     pub counters: Arc<DeviceCounters>,
 }
 
+impl CaptureHandle {
+    pub(crate) fn wait_for_input(&self) -> EonResult<()> {
+        let start = Instant::now();
+        while self.counters.frames.load(Ordering::Acquire) == 0 {
+            if self.counters.driver_errors.load(Ordering::Acquire) != 0 || start.elapsed() >= STARTUP_WAIT {
+                return Err(device_err("capture.start", "driver failed or delivered no frames"));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Ok(())
+    }
+}
+
 pub struct PlaybackHandle {
     _stream: Stream,
     pub sample_rate: u32,
     pub counters: Arc<DeviceCounters>,
     /// Stream rebuilds needed because the driver failed before the first callback.
     pub startup_retries: u32,
+}
+
+/// Explicit opt-in; constructing models or a coordinator never starts a microphone.
+/// Dropping the handle closes capture. PCM stays in the bounded local ring.
+pub fn capture_default_frames<const N: usize>() -> EonResult<(CaptureFrames<N>, CaptureHandle)> {
+    let (writer, reader) = pcm_ring(1 << 15);
+    let device = capture_default_input(writer)?;
+    Ok((CaptureFrames::new(reader, device.sample_rate)?, device))
+}
+
+fn short_period(config: &cpal::SupportedStreamConfig) -> cpal::StreamConfig {
+    let mut stream_config = config.config();
+    // A request, not a guarantee of the backend's period or acoustic latency.
+    if let cpal::SupportedBufferSize::Range { min, max } = config.buffer_size() {
+        stream_config.buffer_size = cpal::BufferSize::Fixed((config.sample_rate() / 250).clamp(*min, *max));
+    }
+    stream_config
 }
 
 fn build_capture<T>(
@@ -69,7 +100,7 @@ where
     f32: FromSample<T>,
 {
     let channels = usize::from(config.channels());
-    let stream_config = config.config();
+    let stream_config = short_period(config);
     let data_counters = Arc::clone(&counters);
     let error_counters = Arc::clone(&counters);
     let mut mono = [0.0; SCRATCH_FRAMES];
@@ -165,12 +196,7 @@ where
     T: SizedSample + FromSample<f32>,
 {
     let channels = usize::from(config.channels());
-    let mut stream_config = config.config();
-    // Request a 4 ms period where the backend permits it. The actual callback
-    // period and already submitted hardware buffers still need device measurement.
-    if let cpal::SupportedBufferSize::Range { min, max } = config.buffer_size() {
-        stream_config.buffer_size = cpal::BufferSize::Fixed((config.sample_rate() / 250).clamp(*min, *max));
-    }
+    let stream_config = short_period(config);
     let data_counters = Arc::clone(&counters);
     let error_counters = Arc::clone(&counters);
     let mut mono = [0.0; SCRATCH_FRAMES];

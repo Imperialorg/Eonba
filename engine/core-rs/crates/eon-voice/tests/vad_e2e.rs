@@ -36,6 +36,77 @@ fn load_model() -> SileroVad {
 }
 
 #[test]
+fn callback_sized_fragments_of_recorded_speech_reach_the_endpoint_at_device_rate() {
+    use eon_voice::resample::{CaptureFrames, resample_mono};
+    use eon_voice::ring::pcm_ring;
+    use eon_voice::vad::{VadEndpoint, VadStep};
+
+    let speech = read_pcm16_mono_16k(&fixture("en.wav"));
+    let mut device = resample_mono(&speech, 16_000, 44_100).unwrap();
+    device.resize(device.len() + 2 * 44_100, 0.0);
+    let (mut tx, rx) = pcm_ring(4096);
+    let mut input = CaptureFrames::new(rx, 44_100).unwrap();
+    let mut endpoint = VadEndpoint::new(load_model());
+    let mut endpoints = Vec::new();
+    for callback in device.chunks(193) {
+        assert_eq!(tx.push_slice(callback), callback.len());
+        while let VadStep::Processed(event) = endpoint.poll_capture(&mut input, "").unwrap() {
+            endpoints.extend(event);
+        }
+    }
+    assert!(!endpoints.is_empty());
+    assert!(endpoints.iter().all(|e| e.silence_ms == 800));
+}
+
+#[cfg(feature = "native")]
+#[test]
+#[ignore = "requires an explicitly configured virtual monitor; never run against an ambient microphone"]
+fn virtual_cpal_monitor_runs_the_listening_endpoint() {
+    use eon_voice::barge_in::BargeIn;
+    use eon_voice::device::{capture_default_frames, play_default_output};
+    use eon_voice::resample::resample_mono;
+    use eon_voice::ring::pcm_ring;
+    use eon_voice::vad::{VadEndpoint, VadStep};
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    assert_eq!(
+        std::env::var("EON_VOICE_TEST_VIRTUAL_MONITOR").as_deref(),
+        Ok("1"),
+        "opt in only after configuring local virtual loopback"
+    );
+    let path = std::env::var_os("EON_ZIPFORMER_TEST_WAV_0")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| fixture("0.wav"));
+    let speech = read_pcm16_mono_16k(&path);
+    let mut endpoint = VadEndpoint::new(load_model());
+    let (mut tx, rx) = pcm_ring(1 << 21);
+    let output = play_default_output(rx, BargeIn::new()).unwrap();
+    let source = resample_mono(&speech, 16_000, output.sample_rate).unwrap();
+    let (mut reader, input) = capture_default_frames().unwrap();
+    assert_eq!(tx.push_slice(&source), source.len());
+    let start = Instant::now();
+    let mut frames = 0;
+    loop {
+        assert!(start.elapsed() < Duration::from_secs(12), "no endpoint after {frames} frames");
+        match endpoint.poll_capture(&mut reader, "").unwrap() {
+            VadStep::Waiting => std::thread::sleep(Duration::from_micros(250)),
+            VadStep::Processed(event) => {
+                frames += 1;
+                if let Some(event) = event {
+                    assert_eq!(event.silence_ms, 800);
+                    break;
+                }
+            }
+        }
+    }
+    assert_eq!(input.counters.capture_drops.load(Ordering::Acquire), 0);
+    assert_eq!(input.counters.driver_errors.load(Ordering::Acquire), 0);
+    assert_eq!(output.counters.driver_errors.load(Ordering::Acquire), 0);
+    eprintln!("CPAL virtual monitor {} Hz -> Silero endpoint: {frames} frames", input.sample_rate);
+}
+
+#[test]
 fn endpoint_runs_on_released_speech_after_post_reply_session_split() {
     use eon_voice::vad::VadEndpoint;
     let path = std::env::var_os("EON_ZIPFORMER_TEST_WAV_0")

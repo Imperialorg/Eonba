@@ -11,6 +11,7 @@ use ort::value::Tensor;
 
 use crate::endpoint::{Completeness, Endpoint, Endpointer, RESUME_HOLDOFF_MS};
 use crate::geometry::{SAMPLE_RATE_HZ, VAD_FRAME_SAMPLES};
+use crate::resample::CaptureFrames;
 
 const STATE_LEN: usize = 2 * 128;
 const CONTEXT: usize = 64;
@@ -22,6 +23,13 @@ pub struct VadEndpoint {
     endpoint: Endpointer,
     holdoff_samples: usize,
     session: eon_primitives::SessionId,
+}
+
+/// Distinguishes an incomplete device frame from 32 ms of processed audio.
+#[derive(Debug, PartialEq, Eq)]
+pub enum VadStep {
+    Waiting,
+    Processed(Option<Endpoint>),
 }
 
 impl VadEndpoint {
@@ -43,6 +51,14 @@ impl VadEndpoint {
         self.endpoint = Endpointer::new();
         self.holdoff_samples = crate::geometry::samples_for_ms(RESUME_HOLDOFF_MS, SAMPLE_RATE_HZ);
         self.session = eon_primitives::SessionId::new();
+    }
+
+    /// Run on the perception worker. Never pads a short callback with fabricated silence.
+    pub fn poll_capture(&mut self, capture: &mut CaptureFrames<VAD_FRAME_SAMPLES>, partial: &str) -> EonResult<VadStep> {
+        match capture.try_read()? {
+            None => Ok(VadStep::Waiting),
+            Some(frame) => self.push(&frame, partial).map(VadStep::Processed),
+        }
     }
 
     pub fn push(&mut self, frame: &[f32; VAD_FRAME_SAMPLES], partial: &str) -> EonResult<Option<Endpoint>> {

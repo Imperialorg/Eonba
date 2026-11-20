@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 mod common;
 
-use eon_voice::resample::resample_mono;
+use eon_voice::resample::{CaptureFrames, resample_mono};
 use eon_voice::speaker::{SpeakerEmbedder, SpeakerGate, cosine};
 use eon_voice::tts::{KokoroTts, SAMPLE_RATE_HZ as TTS_RATE};
 use eon_voice::{
@@ -29,6 +29,157 @@ fn models() -> PathBuf {
 
 fn fixture() -> Vec<f32> {
     common::read_pcm16_mono_16k(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/en.wav"))
+}
+
+fn owner_recording() -> Vec<f32> {
+    // Alternate already-authorized local recording, e.g. test_wavs/1.wav from the
+    // digest-pinned LibriSpeech Zipformer archive. Never enroll from a live microphone.
+    std::env::var_os("EON_VOICE_TEST_OWNER_WAV")
+        .map_or_else(fixture, |path| common::read_pcm16_mono_16k(&PathBuf::from(path)))
+}
+
+#[test]
+fn recorded_capture_and_render_rings_make_one_auditable_owner_decision() {
+    let mut speaker = SpeakerEmbedder::load(models().join("speaker/wespeaker_resnet34.onnx")).unwrap();
+    let speech = owner_recording();
+    let half = speech.len() / 2;
+    let gate = SpeakerGate::enroll(&speaker.embed(&speech[..half]).unwrap(), 0.35).unwrap();
+    let task = TaskId::new();
+    let signal = BargeIn::new();
+    let coordinator = BargeInCoordinator::new(task.clone(), signal.clone(), gate);
+    let audit = coordinator.audit();
+    let vad = SileroVad::load(models().join("vad/silero_vad.onnx")).unwrap();
+    let mut reflex = DuplexReflex::new(coordinator, vad, speaker, Some(0)).unwrap();
+    let (mut playback, mut sink) = pcm_ring(480);
+    let (mut capture, mic_rx) = pcm_ring(2048);
+    let (mut reference, ref_rx) = pcm_ring(2048);
+    let mut mic_frames = CaptureFrames::new(mic_rx, 48_000).unwrap();
+    let mut ref_frames = CaptureFrames::new(ref_rx, 48_000).unwrap();
+    let other = std::env::var_os("EON_ZIPFORMER_TEST_WAV_0")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/0.wav"));
+    let render: Vec<_> = (0..480).map(|i| (i as f32 * std::f32::consts::TAU / 96.0).sin() * 0.1).collect();
+    let mut decisions = 0;
+    let mut verified_at = None;
+    let non_owner = common::read_pcm16_mono_16k(&other);
+    for (offset, near) in [(0, &speech[half..]), (3, &non_owner[..]), (7, &speech[half..])] {
+        let near = resample_mono(near, 16_000, 48_000).unwrap();
+        for (i, block) in near.as_chunks::<480>().0.iter().enumerate() {
+            playback.push_slice(&render);
+            let mut out = [0.0; 480];
+            signal.render(&mut sink, &mut out);
+            if offset == 0 {
+                // A backlog of owner mic frames from *before* playback. The live
+                // signal says PLAYING, but the corresponding played reference was silent.
+                out.fill(0.0);
+            }
+            let mic: [f32; 480] = std::array::from_fn(|i| {
+                (block[i] + 0.25 * out[i]).clamp(-1.0, 1.0)
+            });
+            assert_eq!(capture.push_slice(&mic), 480);
+            assert!(reflex.poll_capture(&mut mic_frames, &mut ref_frames, offset).unwrap().is_none());
+            assert_eq!(reference.push_slice(&out), 480);
+            if let Some(result) = reflex.poll_capture(&mut mic_frames, &mut ref_frames, offset).unwrap() {
+                decisions += usize::from(result.interrupted);
+                if result.interrupted {
+                    verified_at = Some((i + 1) * 10);
+                }
+            }
+            if offset != 7 {
+                assert!(audit.record().is_none(), "stale capture or non-owner interrupted playback");
+            }
+        }
+        if offset == 3 {
+            assert!(reflex.rejected_candidates() > 0, "non-owner never reached the speaker gate");
+            eprintln!("recorded non-owner: {} candidate embeddings rejected", reflex.rejected_candidates());
+        }
+    }
+    assert_eq!(decisions, 1);
+    assert!(signal.is_muted());
+    eprintln!("recorded owner: verified after {} ms of fixture audio", verified_at.unwrap());
+    drop(reflex);
+    let mut journal = Vec::new();
+    assert!(audit.append_if_present(&mut journal).unwrap());
+    assert!(audit.append_if_present(&mut journal).unwrap());
+    let event: serde_json::Value = serde_json::from_slice(&journal).unwrap();
+    assert_eq!(event["event"], "INTERRUPTED_BY_USER");
+    assert_eq!(event["token_offset"], 7);
+    assert_eq!(event["task_id"], task.as_str());
+    assert!(event["timestamp_ms"].as_u64().unwrap() > 0);
+}
+
+/// Route the default output to a *private virtual sink* and the default input to its monitor.
+/// A second CPAL stream injects released speech into that mixer, not into the AEC reference.
+#[test]
+#[ignore = "requires an explicitly configured virtual monitor; never run against an ambient microphone"]
+fn virtual_cpal_capture_verifies_speech_and_mutes_the_reply() {
+    use eon_voice::coordinator::DeviceDuplex;
+    use eon_voice::device::play_default_output;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    assert_eq!(
+        std::env::var("EON_VOICE_TEST_VIRTUAL_MONITOR").as_deref(),
+        Ok("1"),
+        "opt in only after configuring local virtual loopback"
+    );
+    let speech = owner_recording();
+    let half = speech.len() / 2;
+    let mut speaker = SpeakerEmbedder::load(models().join("speaker/wespeaker_resnet34.onnx")).unwrap();
+    let owner = SpeakerGate::enroll(&speaker.embed(&speech[..half]).unwrap(), 0.35).unwrap();
+    let vad = SileroVad::load(models().join("vad/silero_vad.onnx")).unwrap();
+    let task = TaskId::new();
+    let mut duplex = DeviceDuplex::open_default(task.clone(), owner, vad, speaker, Some(0)).unwrap();
+    let audit = duplex.audit();
+    let rate = duplex.output.sample_rate;
+    let (near_tx, near_rx) = {
+        let near = resample_mono(&speech[half..], 16_000, rate).unwrap();
+        let (mut tx, rx) = pcm_ring(near.len());
+        assert_eq!(tx.push_slice(&near), near.len());
+        (tx, rx)
+    };
+    let mut journal = Vec::new();
+    assert!(!audit.append_if_present(&mut journal).unwrap());
+    // Keep real reply samples playing during verification. The pure tone is not a TTS benchmark.
+    let period: Vec<_> = (0..rate / 100)
+        .map(|i| (i as f32 * std::f32::consts::TAU * 400.0 / rate as f32).sin() * 0.04)
+        .collect();
+    while duplex.playback_pcm.push_slice(&period) == period.len() {}
+    let start = Instant::now();
+    let source = play_default_output(near_rx, BargeIn::new()).unwrap();
+    let mut processed = 0;
+    while start.elapsed() < Duration::from_secs(8) {
+        match duplex.poll(17).unwrap() {
+            Some(block) => {
+                processed += 1;
+                if block.interrupted {
+                    break;
+                }
+                duplex.playback_pcm.push_slice(&period);
+            }
+            None => std::thread::sleep(Duration::from_micros(250)),
+        }
+    }
+    let decision = start.elapsed();
+    let request = audit.decision_instant().expect("expected an owner decision");
+    while duplex.output.counters.barge_in_flushes.load(Ordering::Acquire) == 0 && request.elapsed() < Duration::from_secs(1) {
+        std::thread::sleep(Duration::from_micros(100));
+    }
+    let mute = request.elapsed();
+    assert_eq!(duplex.output.counters.barge_in_flushes.load(Ordering::Acquire), 1);
+    assert_eq!(duplex.input.counters.capture_drops.load(Ordering::Acquire), 0);
+    assert_eq!(duplex.output.counters.reference_drops.load(Ordering::Acquire), 0);
+    assert_eq!(source.counters.driver_errors.load(Ordering::Acquire), 0);
+    assert!(audit.append_if_present(&mut journal).unwrap());
+    let record: serde_json::Value = serde_json::from_slice(&journal).unwrap();
+    assert_eq!(record["event"], "INTERRUPTED_BY_USER");
+    assert_eq!(record["task_id"], task.as_str());
+    assert_eq!(record["token_offset"], 17);
+    eprintln!(
+        "virtual CPAL input={} output={rate} Hz: {processed} paired blocks, decision {decision:?} from fixture stream launch, decision to observed callback mute <= {mute:?}",
+        duplex.input.sample_rate
+    );
+    drop((source, near_tx));
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! Barge-in signal shared between the speech detector and the playback callback (docs/implementation/04, section 3).
 //!
 //! When the user starts speaking over the assistant, the detector calls `trigger`. The next playback callback sees the
-//! request, flushes the TTS ring and writes silence. The detector never touches the ring itself,
+//! request and writes silence. Queued and late TTS are discarded in bounded batches. The detector never touches the ring itself,
 //! so it never blocks the audio thread.
 
 use std::sync::Arc;
@@ -13,6 +13,8 @@ const IDLE: u8 = 0;
 const PLAYING: u8 = 1;
 const REQUESTED: u8 = 2;
 const MUTED: u8 = 3;
+// rtrb's discard walks slots in debug builds. Silencing must never depend on the queue depth.
+const DISCARD_BUDGET: usize = 1024;
 
 /// One reply's playback signal. A cancelled reply cannot resume (including late producer writes).
 /// Start a fresh ring and signal for the next reply.
@@ -84,7 +86,7 @@ impl BargeIn {
             out.fill(0.0);
             return Rendered {
                 samples: 0,
-                flushed: samples + consumer.flush(),
+                flushed: samples + consumer.discard_at_most(DISCARD_BUDGET),
                 acknowledged: self.take(),
                 muted: true,
             };
@@ -144,6 +146,23 @@ impl SpeechOnsetDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_large_backlog_is_immediately_inaudible_but_reclaimed_in_bounded_batches() {
+        let (mut tx, mut rx) = crate::ring::pcm_ring(8 * DISCARD_BUDGET);
+        tx.push_slice(&[0.8; 8 * DISCARD_BUDGET]);
+        let barge = BargeIn::new();
+        let mut out = [0.0; 8];
+        barge.render(&mut rx, &mut out);
+        barge.trigger();
+        for i in 0..8 {
+            let result = barge.render(&mut rx, &mut out);
+            assert!(result.muted && result.flushed <= DISCARD_BUDGET);
+            assert_eq!(result.acknowledged, i == 0);
+            assert_eq!(out, [0.0; 8]);
+        }
+        assert_eq!(rx.available(), 0);
+    }
 
     #[test]
     fn a_trigger_is_taken_exactly_once() {
