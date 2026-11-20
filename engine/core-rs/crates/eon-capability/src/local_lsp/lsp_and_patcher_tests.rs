@@ -1,0 +1,250 @@
+use super::*;
+use std::fs;
+use std::os::unix::fs::symlink;
+
+struct Fixture(PathBuf);
+
+impl Fixture {
+    fn new() -> Self {
+        let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        fs::create_dir_all(&parent).unwrap();
+        let root = parent
+            .canonicalize()
+            .unwrap()
+            .join(format!("eon-lsp-test-{:016x}", getrandom::u64().unwrap()));
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("a.py"), "def f():\n    return '🙂'\n").unwrap();
+        fs::write(root.join("b.py"), "def g():\n    return 2\n").unwrap();
+        Self(root)
+    }
+
+    fn start(&self, mode: &str) -> LocalLsp {
+        self.try_start(mode, Duration::from_secs(3)).unwrap()
+    }
+
+    fn try_start(&self, mode: &str, deadline: Duration) -> io::Result<LocalLsp> {
+        // Fixed test fixture, never part of production config. -I -S prevents
+        // imports from the workspace, user site, environment or startup hooks.
+        let config = OperatorServer {
+            kind: ServerKind::Pyright,
+            executable: Path::new("/usr/bin/python3").canonicalize().unwrap(),
+            runtime: ["/usr/lib", "/lib64"]
+                .iter()
+                .map(|s| Path::new(s).canonicalize().unwrap())
+                .collect(),
+            deadline,
+        };
+        LocalLsp::spawn(
+            &config,
+            &self.0,
+            &[
+                "-I",
+                "-S",
+                "-c",
+                include_str!("peer_fixture.py"),
+                mode,
+                self.0.join("a.py").to_str().unwrap(),
+            ],
+        )
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+const POS: Position = Position { line: 0, character: 0 };
+
+#[test]
+fn failed_or_stalled_handshake_never_returns_a_ready_session() {
+    let f = Fixture::new();
+    for (mode, expected) in [
+        ("bad-capabilities", io::ErrorKind::InvalidData),
+        ("exit-before-ready", io::ErrorKind::UnexpectedEof),
+        ("stall-before-ready", io::ErrorKind::TimedOut),
+    ] {
+        let deadline = if mode == "stall-before-ready" {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_secs(3)
+        };
+        let error = f.try_start(mode, deadline).err().expect("handshake should fail");
+        assert_eq!(error.kind(), expected, "{mode}: {error}");
+    }
+}
+
+#[test]
+fn operator_configuration_is_explicit_and_never_uses_a_shell_or_script() {
+    let f = Fixture::new();
+    let timeout = Duration::from_secs(1);
+    for path in ["rust-analyzer", "/bin/sh"] {
+        assert!(OperatorServer::new(ServerKind::RustAnalyzer, Path::new(path), &[], timeout).is_err());
+    }
+    let script = f.0.join("rust-analyzer");
+    fs::write(&script, "#!/bin/sh\n").unwrap();
+    assert!(OperatorServer::new(ServerKind::RustAnalyzer, &script, &[], timeout).is_err());
+    let mut empty = LocalLspPool::start(&[], &f.0).unwrap();
+    assert!(empty.session(ServerKind::RustAnalyzer).is_none());
+    empty.shutdown().unwrap();
+    assert_eq!(
+        virtual_uri("/virtual", "pkg/ℹ 50%#.py"),
+        "file:///virtual/pkg/%E2%84%B9%2050%25%23.py"
+    );
+}
+
+fn reaped(pid: u32) {
+    let mut status = 0;
+    // SAFETY: this is only observing our test child and providing writable status storage.
+    assert_eq!(unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) }, -1);
+    assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
+}
+
+#[test]
+fn scoped_stdio_session_answers_read_only_queries_and_shuts_down() {
+    let f = Fixture::new();
+    let mut client = f.start("pull");
+    let pid = client.child.0.as_ref().unwrap().id();
+    client.open("a.py").unwrap();
+    client.open("b.py").unwrap();
+    assert!(client.open("a.py").is_err());
+    assert!(client.open("../a.py").is_err());
+    assert!(client.open(f.0.join("a.py").to_str().unwrap()).is_err());
+    assert!(client.hover_type("unknown.py", POS).is_err());
+    assert_eq!(client.hover_type("a.py", POS).unwrap().as_deref(), Some("int"));
+    assert_eq!(client.goto_definition("a.py", POS).unwrap()[0].relative_path, "b.py");
+    assert_eq!(client.find_references("a.py", POS).unwrap().len(), 2);
+    assert_eq!(client.diagnostics("a.py").unwrap()[0].message, "fixture message");
+    client.shutdown().unwrap();
+    reaped(pid);
+    assert_eq!(
+        fs::read_to_string(f.0.join("a.py")).unwrap(),
+        "def f():\n    return '🙂'\n"
+    );
+}
+
+#[test]
+fn opaque_documents_reject_external_locations_and_cache_push_diagnostics() {
+    let f = Fixture::new();
+    let mut push = f.start("push");
+    push.open("a.py").unwrap();
+    let first = push.diagnostics("a.py").unwrap();
+    assert_eq!(first, push.diagnostics("a.py").unwrap());
+    assert_eq!(first[0].range.start, POS);
+    push.shutdown().unwrap();
+    let mut outside = f.start("outside");
+    outside.open("a.py").unwrap();
+    assert_eq!(
+        outside.goto_definition("a.py", POS).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+    let pid = outside.child.0.as_ref().unwrap().id();
+    drop(outside);
+    reaped(pid);
+}
+
+#[test]
+fn corrupt_responses_and_unrelated_traffic_poison_the_session() {
+    let f = Fixture::new();
+    for mode in ["flood", "mismatch"] {
+        let mut client = f.start(mode);
+        let pid = client.child.0.as_ref().unwrap().id();
+        client.open("a.py").unwrap();
+        assert_eq!(
+            client.hover_type("a.py", POS).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            client.hover_type("a.py", POS).unwrap_err().kind(),
+            io::ErrorKind::NotConnected
+        );
+        reaped(pid);
+    }
+}
+
+#[test]
+fn incomplete_body_blocked_input_and_ignored_exit_are_bounded_and_reaped() {
+    let f = Fixture::new();
+    for mode in ["timeout", "blocked-stdin", "ignore-exit"] {
+        let mut client = f.start(mode);
+        client.deadline = Duration::from_millis(100);
+        let pid = client.child.0.as_ref().unwrap().id();
+        let start = Instant::now();
+        let err = match mode {
+            "timeout" => {
+                client.open("a.py").unwrap();
+                client.hover_type("a.py", POS).unwrap_err()
+            }
+            "blocked-stdin" => {
+                // Escaping control characters makes this larger than a default
+                // pipe even on kernels with a 64 KiB initial pipe capacity.
+                fs::write(f.0.join("many.py"), vec![1; MAX_DOCUMENT]).unwrap();
+                client.open("many.py").unwrap_err()
+            }
+            _ => client.shutdown().unwrap_err(),
+        };
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "{mode} exceeded the outer test budget"
+        );
+        reaped(pid);
+    }
+}
+
+#[test]
+fn preview_changes_only_unique_top_level_block_and_never_writes() {
+    let f = Fixture::new();
+    let w = Workspace::open(&f.0).unwrap();
+    let before = "// keep\nfn first() {}\nfn f() { /* old */ }\n";
+    fs::write(f.0.join("a.rs"), before).unwrap();
+    let p = preview_replacement(&w, "a.rs", "f", "fn f() { /* new */ }").unwrap();
+    assert_eq!(p.before, before);
+    assert_eq!(p.after, "// keep\nfn first() {}\nfn f() { /* new */ }\n");
+    assert_eq!(p.expected_sha256, w.read_range("a.rs", 0, MAX_DOCUMENT).unwrap().sha256);
+    assert_eq!(fs::read_to_string(f.0.join("a.rs")).unwrap(), before);
+    let p = preview_replacement(&w, "a.py", "f", "def f():\n    return 1").unwrap();
+    assert_eq!(p.after, "def f():\n    return 1\n");
+    for bad in [
+        "fn nope() {}",
+        "fn f() {",
+        "fn f() {}\nfn sneaked() {}",
+        "const A:u8=3;\nfn f() {}",
+    ] {
+        assert!(preview_replacement(&w, "a.rs", "f", bad).is_err());
+    }
+    for source in ["fn f() {}\nfn f() {}", "mod m { fn f() {} }", "fn f(){}\nfn broken("] {
+        fs::write(f.0.join("a.rs"), source).unwrap();
+        assert!(preview_replacement(&w, "a.rs", "f", "fn f() { 1; }").is_err());
+    }
+}
+
+#[test]
+fn path_scope_and_document_budget_also_apply_to_previews() {
+    let f = Fixture::new();
+    let other = Fixture::new();
+    let w = Workspace::open(&f.0).unwrap();
+    symlink(other.0.join("a.py"), f.0.join("link.py")).unwrap();
+    let rep = "def f():\n    return 8";
+    for path in ["link.py", "../a.py", other.0.join("a.py").to_str().unwrap()] {
+        assert!(preview_replacement(&w, path, "f", rep).is_err());
+    }
+    fs::write(f.0.join("big.py"), vec![b'x'; MAX_DOCUMENT + 1]).unwrap();
+    assert!(snapshot(&w, "big.py").is_err());
+    assert!(preview_replacement(&w, "a.py", "f", &"x".repeat(MAX_DOCUMENT + 1)).is_err());
+    assert_eq!(
+        fs::read_to_string(other.0.join("a.py")).unwrap(),
+        "def f():\n    return '🙂'\n"
+    );
+    let mut config = OperatorServer {
+        kind: ServerKind::Pyright,
+        executable: f.0.join("a.py"),
+        runtime: vec![],
+        deadline: Duration::from_secs(1),
+    };
+    assert!(LocalLsp::start(&config, &f.0).is_err());
+    config.executable = PathBuf::from("/operator-only/server");
+    config.runtime.push(other.0.parent().unwrap().to_path_buf());
+    assert!(LocalLsp::start(&config, &f.0).is_err());
+}

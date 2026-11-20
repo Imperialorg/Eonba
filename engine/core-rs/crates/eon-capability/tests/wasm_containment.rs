@@ -1,8 +1,30 @@
+mod approval_fixture;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use eon_capability::{EonError, EonResult, wasm_tool::call_i32_export};
+use eon_capability::{
+    EonError, EonResult, mcp_pinning::ToolDescriptor, registry::AllowedTool,
+    wasm_tool::call_i32_export,
+};
+
+fn assert_registry_rejects_imports(module: &[u8]) {
+    let descriptor = ToolDescriptor {
+        name: "fixture".into(),
+        description: "local containment check".into(),
+        input_schema: "{}".into(),
+        annotations: "{}".into(),
+    };
+    // Even exact operator approval cannot grant an import.
+    let mut registry = approval_fixture::prepared([AllowedTool {
+        descriptor: descriptor.clone(),
+        module_blake3: blake3::hash(module).into(),
+    }])
+    .unwrap();
+    assert!(
+        matches!(registry.register(descriptor, module), Err(EonError::SecurityViolation(m)) if m.contains("import"))
+    );
+}
 
 fn assert_missing_import(outcome: EonResult<i32>, namespace: &str, name: &str) {
     let Err(EonError::OperationFailed { operation, reason }) = outcome else {
@@ -30,8 +52,9 @@ fn host_io_and_socket_creation_are_not_linked() {
         // Even an unused import must be resolved before the guest can start.
         let module = format!(
             r#"(module (import "{namespace}" "{name}" (func {signature}))
-            (func (export "run") (param i32) (result i32) local.get 0))"#
+            (memory (export "memory") 1) (func (export "run") (param i32) (result i32) local.get 0))"#
         );
+        assert_registry_rejects_imports(module.as_bytes());
         assert_missing_import(
             call_i32_export(module.as_bytes(), "run", 0, 1000),
             namespace,
@@ -63,6 +86,7 @@ fn path_open_is_not_linked_and_the_host_sentinel_is_unchanged() {
             i64.const 66 i64.const 0 i32.const 0 i32.const 0 call $open))"#,
         bytes.len()
     );
+    assert_registry_rejects_imports(module.as_bytes());
     let outcome = call_i32_export(module.as_bytes(), "run", 0, 1000);
     let observed = fs::read(&path);
     fs::remove_file(path).unwrap();
