@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use eon_foundation::owned_dir::OwnedDirectory;
 
-use super::invalid;
+use super::{MAX_OPEN, invalid};
 
 pub(super) struct Provision {
     pub group: PathBuf,
@@ -47,6 +47,9 @@ impl ModuleNames {
     }
 
     pub fn insert(&mut self, name: &str) -> io::Result<()> {
+        if self.names.len() >= MAX_OPEN || self.names.contains(name) {
+            return Err(invalid("duplicate or full Python module catalog"));
+        }
         // The server's read-only filesystem case probe cannot create files.
         // Avoid aliases; admit only flat, lowercase ASCII Python module names.
         let stem = name

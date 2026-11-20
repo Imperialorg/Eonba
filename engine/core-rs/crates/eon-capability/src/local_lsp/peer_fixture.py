@@ -34,7 +34,7 @@ caps = {
     "textDocumentSync": 1 if mode == "full" else {"openClose": True, "change": 2},
     "workspaceSymbolProvider": {},
 }
-if mode == "pull":
+if mode in ("pull", "pull-with-pushes"):
     caps["diagnosticProvider"] = {"identifier": "lint"}
 if mode == "immutable":
     caps = {"textDocumentSync": {"openClose": True}}
@@ -50,6 +50,26 @@ send({"id": init["id"], "result": {"capabilities": caps}})
 assert recv()["method"] == "initialized"
 if mode == "blocked-stdin":
     time.sleep(60)
+if mode == "fail-during-open":
+    def created_marker():
+        event = recv()
+        assert event["method"] == "workspace/didChangeWatchedFiles"
+        change, = event["params"]["changes"]
+        assert change["type"] == 1
+        return change["uri"]
+
+    first = created_marker()
+    opened = recv()
+    assert opened["method"] == "textDocument/didOpen"
+    assert opened["params"]["textDocument"]["uri"] == first
+    second = created_marker()
+    assert int(sys.stdin.buffer.readline().split(b":")[1]) > 300_000
+    assert sys.stdin.buffer.readline() == b"\r\n"
+    assert b'"method":"textDocument/didOpen"' in sys.stdin.buffer.read(100)
+    # Confirm the marker notification and the partial didOpen reached the real
+    # pipe before disconnecting. No workspace or marker-directory access.
+    send({"method": "test/partialDidOpen", "params": {"uri": second}})
+    sys.exit(0)
 
 position = {"line": 0, "character": 0}
 span = {"start": position, "end": position}
@@ -115,8 +135,14 @@ while True:
         send({"id": m["id"], "result": [{"uri": u, "range": span} for u in docs]})
     elif method == "textDocument/diagnostic":
         assert m["params"]["identifier"] == "lint"
-        send({"id": m["id"], "result": {"kind": "full", "items": items}})
+        report = items * 257 if mode == "pull-with-pushes" else items
+        send({"id": m["id"], "result": {"kind": "full", "items": report}})
     elif method == "textDocument/hover":
+        if mode == "pull-with-pushes":
+            # Both pushes are within the wire budget. The second exceeds the
+            # item budget for a requested report, not for the pending hover.
+            publish(docs[-1], items, version)
+            publish(docs[-1], items * 257, version)
         if mode == "timeout":
             sys.stdout.buffer.write(b"Content-Length: 15\r\n\r\n{}")
             sys.stdout.buffer.flush()

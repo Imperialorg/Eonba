@@ -538,11 +538,22 @@ impl LocalLsp {
         Instant::now() + self.deadline
     }
 
-    fn send(&mut self, packet: Value, end: Instant) -> io::Result<()> {
+    fn connected(&self) -> io::Result<()> {
         if self.child.0.is_none() {
             return Err(io::ErrorKind::NotConnected.into());
         }
-        self.wire.send(&packet, end).inspect_err(|_| self.child.reap())
+        Ok(())
+    }
+
+    fn retire(&mut self) {
+        self.child.reap();
+        // Includes a marker staged by open() before didOpen was delivered.
+        self.python_names = None;
+    }
+
+    fn send(&mut self, packet: Value, end: Instant) -> io::Result<()> {
+        self.connected()?;
+        self.wire.send(&packet, end).inspect_err(|_| self.retire())
     }
 
     fn notify(&mut self, method: &str, params: Value, end: Instant) -> io::Result<()> {
@@ -566,7 +577,7 @@ impl LocalLsp {
         for _ in 0..MAX_MESSAGES {
             if let Some(reply) = self
                 .receive(end, Some(self.request_id))
-                .inspect_err(|_| self.child.reap())?
+                .inspect_err(|_| self.retire())?
             {
                 if reply.get("error").is_some() {
                     return Err(io::Error::other("LSP request rejected"));
@@ -574,7 +585,7 @@ impl LocalLsp {
                 return Ok(reply["result"].clone());
             }
         }
-        self.child.reap();
+        self.retire();
         Err(invalid("too many unrelated LSP messages"))
     }
 
@@ -598,7 +609,9 @@ impl LocalLsp {
             } else if self.kind == ServerKind::RustAnalyzer && method == "experimental/serverStatus" {
                 self.rust_ready = msg["params"]["quiescent"] == true
                     && matches!(msg["params"]["health"].as_str(), Some("ok" | "warning"));
-            } else if method == "textDocument/publishDiagnostics" {
+            } else if method == "textDocument/publishDiagnostics"
+                && matches!(self.capabilities.diagnostics, Diagnostics::Push)
+            {
                 let p = &msg["params"];
                 if let Some(doc) = p["uri"].as_str().and_then(|u| self.docs.get_mut(u))
                     && p.get("version").map_or(doc.allow_unversioned, |v| v.as_i64() == Some(i64::from(doc.version)))
@@ -628,8 +641,9 @@ impl LocalLsp {
     /// Open a workspace snapshot; no disk-backed project is passed to the server.
     /// Generated file URIs are under an inaccessible virtual root, not on disk.
     pub fn open(&mut self, relative_path: &str) -> io::Result<()> {
+        self.connected()?;
         require(self.capabilities.sync != Sync::None, "server does not synchronize open documents")?;
-        if self.docs.len() == MAX_OPEN || self.docs.values().any(|d| d.path == relative_path) {
+        if self.docs.len() >= MAX_OPEN || self.docs.values().any(|d| d.path == relative_path) {
             return Err(invalid("document already open or session full"));
         }
         let language = self.kind.language(relative_path)?;
@@ -700,11 +714,13 @@ impl LocalLsp {
     pub fn close(&mut self, path: &str) -> io::Result<()> {
         let uri = self.uri(path)?;
         self.notify("textDocument/didClose", json!({"textDocument":{"uri":uri}}), self.end())?;
-        self.docs.remove(&uri);
         if let Some(names) = self.python_names.as_mut() {
-            names.remove(path)?;
+            // didClose already succeeded. Do not reuse a session whose
+            // on-disk catalog cannot be kept consistent with that message.
+            names.remove(path).inspect_err(|_| self.retire())?;
             self.module_marker_changed(&uri, 3)?;
         }
+        self.docs.remove(&uri);
         self.has_closed = true;
         Ok(())
     }
@@ -853,21 +869,19 @@ impl LocalLsp {
             }
             return diagnostics(&value["items"]);
         }
-        if self.child.0.is_none() {
-            return Err(io::ErrorKind::NotConnected.into());
-        }
+        self.connected()?;
         for consumed in 0..=MAX_MESSAGES {
-            if let Some(items) = &self.docs[&uri].diagnostics
-                && !self.wire.readable(end).inspect_err(|_| self.child.reap())?
+            if !self.wire.readable(end).inspect_err(|_| self.retire())?
+                && let Some(items) = &self.docs[&uri].diagnostics
             {
                 return Ok(items.clone());
             }
             if consumed == MAX_MESSAGES {
                 break;
             }
-            self.receive(end, None).inspect_err(|_| self.child.reap())?;
+            self.receive(end, None).inspect_err(|_| self.retire())?;
         }
-        self.child.reap();
+        self.retire();
         Err(invalid("diagnostic message budget exhausted"))
     }
 

@@ -3,7 +3,7 @@ use std::ffi::CString;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,6 +54,7 @@ fn lsp_and_patcher_tests_pyright_kernel_boundary() {
     assert!(err.to_string().contains("unapproved Pyright SEA digest"));
     let mut cmd = Command::new(&exe);
     cmd.arg("--stdio");
+    let expected_image = fs::File::open(&exe).unwrap();
     confine_command(&mut cmd, &policy, worker(&digest)).unwrap();
     let marker_c = CString::new(marker.as_os_str().as_bytes()).unwrap();
     // SAFETY: only async-signal-safe negative probes in our own child, after
@@ -98,11 +99,19 @@ fn lsp_and_patcher_tests_pyright_kernel_boundary() {
         });
     }
     let mut child = cmd.spawn().unwrap();
+    // A successful exec in the last negative probe would also make spawn
+    // succeed. Observe the actual inode while the child is still ours.
+    let live_image = fs::metadata(format!("/proc/{}/exe", child.id()));
     let enrolled = fs::read_to_string(group.join("cgroup.procs"));
-    child.kill().unwrap();
-    child.wait().unwrap();
+    let killed = child.kill();
+    let reaped = child.wait();
     fs::remove_file(marker).unwrap();
     fs::remove_dir(names).unwrap();
+    killed.unwrap();
+    reaped.unwrap();
+    let live = live_image.unwrap();
+    let pinned = expected_image.metadata().unwrap();
+    assert_eq!((live.dev(), live.ino()), (pinned.dev(), pinned.ino()));
     assert!(
         enrolled
             .unwrap()

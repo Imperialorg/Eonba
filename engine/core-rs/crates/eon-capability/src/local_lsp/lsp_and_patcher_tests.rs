@@ -127,6 +127,17 @@ fn scoped_stdio_session_answers_read_only_queries_and_shuts_down() {
 }
 
 #[test]
+fn pull_session_ignores_unsolicited_pushes_but_bounds_requested_reports() {
+    let f = Fixture::new();
+    let mut client = f.start("pull-with-pushes");
+    client.open("a.py").unwrap();
+    assert_eq!(client.hover_type("a.py", POS).unwrap().as_deref(), Some("int"));
+    assert!(client.docs[&client.uri("a.py").unwrap()].diagnostics.is_none());
+    assert_eq!(client.diagnostics("a.py").unwrap_err().kind(), io::ErrorKind::InvalidData);
+    client.shutdown().unwrap();
+}
+
+#[test]
 fn opaque_documents_reject_external_locations_and_cache_push_diagnostics() {
     let f = Fixture::new();
     let mut push = f.start("push");
@@ -262,6 +273,74 @@ fn incomplete_body_blocked_input_and_ignored_exit_are_bounded_and_reaped() {
         );
         reaped(pid);
     }
+}
+
+#[test]
+fn failed_did_open_retires_markers_and_dead_session_cannot_repopulate_them() {
+    let f = Fixture::new();
+    let state = Fixture::new();
+    let mut client = f.start("fail-during-open");
+    client.wire.limit_test_pipe();
+    let catalog = pyright::ModuleNames::new(&state.0, &f.0).unwrap();
+    let root = catalog.root.clone();
+    client.virtual_root = root.to_str().unwrap().into();
+    client.python_names = Some(catalog);
+    let pid = client.child.0.as_ref().unwrap().id();
+    client.open("a.py").unwrap();
+    assert_eq!(fs::metadata(root.join("a.py")).unwrap().len(), 0);
+
+    // Too large for the bounded pipe after JSON escaping: the peer closes
+    // stdin after reading the header and the start of this didOpen payload.
+    fs::write(f.0.join("many.py"), vec![1; MAX_DOCUMENT]).unwrap();
+    assert_eq!(client.open("many.py").unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+    let receipt = client.wire.recv(client.end()).unwrap();
+    assert_eq!(receipt["method"], "test/partialDidOpen");
+    assert_eq!(receipt["params"]["uri"], virtual_uri(&client.virtual_root, "many.py"));
+    reaped(pid);
+    assert!(!root.try_exists().unwrap());
+    assert!(client.python_names.is_none());
+    assert_eq!(client.docs.len(), 1); // no document was published for the failed open
+    let version = client.version;
+    for i in 0..=MAX_OPEN {
+        let name = format!("retry{i}.py");
+        fs::write(f.0.join(&name), "").unwrap();
+        assert_eq!(client.open(&name).unwrap_err().kind(), io::ErrorKind::NotConnected);
+    }
+    // Also reject before trying to snapshot even a missing document.
+    assert_eq!(client.open("missing.py").unwrap_err().kind(), io::ErrorKind::NotConnected);
+    assert_eq!(client.version, version);
+    assert!(!root.try_exists().unwrap());
+}
+
+#[test]
+fn module_catalog_caps_markers_independently_of_document_admission() {
+    let f = Fixture::new();
+    let state = Fixture::new();
+    let mut catalog = pyright::ModuleNames::new(&state.0, &f.0).unwrap();
+    for i in 0..MAX_OPEN {
+        catalog.insert(&format!("module{i}.py")).unwrap();
+    }
+    assert!(catalog.insert("overflow.py").is_err());
+    assert!(!catalog.root.join("overflow.py").try_exists().unwrap());
+    assert_eq!(fs::read_dir(&catalog.root).unwrap().count(), MAX_OPEN);
+    catalog.remove("module0.py").unwrap();
+    catalog.insert("replacement.py").unwrap();
+    assert_eq!(fs::read_dir(&catalog.root).unwrap().count(), MAX_OPEN);
+}
+
+#[test]
+fn marker_cleanup_failure_after_did_close_retires_the_session() {
+    let f = Fixture::new();
+    let state = Fixture::new();
+    let mut client = f.start("blocked-stdin");
+    let catalog = pyright::ModuleNames::new(&state.0, &f.0).unwrap();
+    let root = catalog.root.clone();
+    client.python_names = Some(catalog);
+    client.open("a.py").unwrap();
+    fs::remove_file(root.join("a.py")).unwrap();
+    assert_eq!(client.close("a.py").unwrap_err().kind(), io::ErrorKind::NotFound);
+    assert_eq!(client.open("b.py").unwrap_err().kind(), io::ErrorKind::NotConnected);
+    assert!(!root.try_exists().unwrap());
 }
 
 #[test]

@@ -77,6 +77,14 @@ pub(super) struct Wire {
 }
 
 impl Wire {
+    #[cfg(test)]
+    pub(super) fn limit_test_pipe(&self) {
+        // Make a partial-write test independent of the host's default pipe size.
+        // SAFETY: this is our live child-stdin fd; F_SETPIPE_SZ takes a byte count.
+        let size = unsafe { libc::fcntl(self.input.as_raw_fd(), libc::F_SETPIPE_SZ, 4096) };
+        assert!((1..=64 * 1024).contains(&size), "unexpected test pipe size: {size}");
+    }
+
     pub fn new(input: ChildStdin, output: ChildStdout) -> io::Result<Self> {
         nonblocking(&input)?;
         nonblocking(&output)?;
