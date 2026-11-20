@@ -21,7 +21,7 @@ pub mod pre_cognition;
 pub mod resample;
 pub mod ring;
 #[cfg(feature = "onnx-speech")]
-pub mod runtime;
+pub use eon_primitives::onnx as runtime;
 #[cfg(feature = "native")]
 pub mod speaker;
 #[cfg(feature = "native")]

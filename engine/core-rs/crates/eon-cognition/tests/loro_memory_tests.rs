@@ -484,7 +484,9 @@ fn released_bge_indexes_reopens_and_recalls_without_keyword_overlap() {
         },
         PathBuf::from,
     );
-    let mut model = BgeMicroV2::load(dir).expect("install the pinned BGE graph and tokenizer");
+    // BGE must coexist with workers already using the shared environment.
+    eon_primitives::onnx::environment().unwrap();
+    let mut model = BgeMicroV2::load(&dir).expect("install the pinned BGE graph and tokenizer");
     let file = Fixture::new("bge");
     let doc = LoroDoc::new();
     let manual = "Repairing a car engine at the garage. ".repeat(140);
@@ -525,7 +527,9 @@ fn released_bge_indexes_reopens_and_recalls_without_keyword_overlap() {
     assert_eq!(best[0].note.text(), manual);
     assert_eq!(best[0].note.label(), UntrustedNote::LABEL);
     drop(db);
+    drop(model);
     let mut db = open(file.db(), 4);
+    let mut model = BgeMicroV2::load(&dir).unwrap();
     assert!(
         db.bind_embedding_space(EmbeddingSpace::new("some-other-384d-model", 384).unwrap())
             .is_err()

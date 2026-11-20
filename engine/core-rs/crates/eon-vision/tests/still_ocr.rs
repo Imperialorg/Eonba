@@ -45,6 +45,8 @@ fn check(page: &OcrPage, dimensions: (u32, u32), expected: &[(&str, [u32; 4])]) 
 #[test]
 fn grounds_independently_rendered_labels_in_reading_order() {
     let (det, rec) = models();
+    // Another model worker may already have initialized ORT.
+    eon_primitives::onnx::environment().unwrap();
     let mut ocr = PaddleOcr::from_models(&det, &rec).unwrap();
     check(
         &ocr.recognize_jpeg(SETTINGS, BUDGET).unwrap(),
@@ -55,6 +57,8 @@ fn grounds_independently_rendered_labels_in_reading_order() {
             ("Cancel", [89, 166, 193, 190]),
         ],
     );
+    drop(ocr);
+    let mut ocr = PaddleOcr::from_models(&det, &rec).unwrap();
     check(
         &ocr.recognize_jpeg(ACCOUNT, BUDGET).unwrap(),
         (1280, 720),

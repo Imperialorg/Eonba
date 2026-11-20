@@ -11,7 +11,7 @@ llama-backend = ["dep:llama-cpp-2"]
 local-inference = ["llama-backend", "dep:eon-capability", "dep:serde_json"]
 sqlite-memory = ["dep:rusqlite"]
 loro-memory = ["sqlite-memory", "dep:loro", "dep:postcard", "dep:blake3"]
-bge-memory = ["loro-memory", "dep:ort", "dep:sha2", "dep:tokenizers"]
+bge-memory = ["loro-memory", "dep:ort", "dep:sha2", "dep:tokenizers", "eon-primitives/onnx-runtime"]
 objective-compiler = ["dep:eon-kernel", "dep:serde_json", "dep:memmap2", "dep:rustix"]
 
 [dependencies]
@@ -21,7 +21,7 @@ eon-kernel = { path = "../eon-kernel", optional = true }
 eon-primitives = { path = "../eon-primitives" }
 llama-cpp-2 = { version = "0.1", optional = true }
 loro = { version = "1", default-features = false, optional = true }
-ort = { version = "=2.0.0-rc.15", optional = true }
+ort = { workspace = true, optional = true }
 postcard = { version = "1", default-features = false, optional = true }
 rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 serde_json = { version = "1", optional = true }

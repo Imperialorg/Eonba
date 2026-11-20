@@ -162,13 +162,9 @@ impl PaddleOcr {
                 ));
             }
         }
-        let env = ort::init()
-            .with_name("eon-vision")
-            .with_telemetry(false)
-            .build()
-            .map_err(failed)?;
+        let env = eon_primitives::onnx::environment()?;
         let load = |graph| {
-            Session::builder(&env)
+            Session::builder(env)
                 .map_err(failed)?
                 .with_intra_threads(1)
                 .map_err(failed)?

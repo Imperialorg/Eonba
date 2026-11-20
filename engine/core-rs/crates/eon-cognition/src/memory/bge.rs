@@ -79,12 +79,7 @@ impl BgeMicroV2 {
         // padding=True, pad to longest in batch (no padding for batch size 1).
         tokenizer.with_padding(None);
         let model = MODEL.read(dir)?;
-        let env = ort::init()
-            .with_name("eon-bge")
-            .with_telemetry(false)
-            .build()
-            .map_err(runtime_error)?;
-        let session = Session::builder(&env)
+        let session = Session::builder(eon_primitives::onnx::environment()?)
             .map_err(runtime_error)?
             .with_intra_threads(2)
             .map_err(runtime_error)?

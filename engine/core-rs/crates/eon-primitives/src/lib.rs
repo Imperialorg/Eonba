@@ -1,6 +1,8 @@
 pub mod dag;
 pub mod error;
 pub mod id;
+#[cfg(feature = "onnx-runtime")]
+pub mod onnx;
 pub mod result;
 pub mod time;
 
