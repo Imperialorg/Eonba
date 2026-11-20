@@ -159,13 +159,17 @@ impl Stream<'_> {
         Ok((self.tokens.len() > old_len).then(|| self.model.detokenize(&self.tokens)))
     }
 
-    pub fn finish(mut self) -> EonResult<String> {
+    pub fn text_token_ids(&self) -> &[i64] {
+        &self.tokens
+    }
+
+    pub fn finish(mut self) -> EonResult<(String, Vec<i64>)> {
         self.features.input_finished();
         self.features
             .features
             .extend(std::iter::repeat_with(|| vec![0.0; NUM_MEL_BINS]).take(CHUNK_FRAMES));
         self.decode_ready()?;
-        Ok(self.model.detokenize(&self.tokens))
+        Ok((self.model.detokenize(&self.tokens), self.tokens))
     }
 
     fn decode_ready(&mut self) -> EonResult<()> {

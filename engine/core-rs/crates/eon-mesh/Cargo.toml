@@ -7,6 +7,7 @@ license.workspace = true
 
 [features]
 native-zipformer = ["dep:eon-voice", "dep:sha2", "dep:serde_json"]
+token-readback = ["native-zipformer", "eon-voice/native"]
 
 [dependencies]
 blake3 = "1"
@@ -34,3 +35,7 @@ tempfile = "3"
 [[test]]
 name = "split_zipformer"
 required-features = ["native-zipformer"]
+
+[[test]]
+name = "split_token_readback"
+required-features = ["token-readback"]

@@ -51,6 +51,33 @@ enum Chunk {
     Last(Vec<u8>),
 }
 
+pub(super) fn verified_component(dir: &Path, component: &str) -> EonResult<PathBuf> {
+    let lock: Lock = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../../scripts/models.lock.json"
+    )))
+    .map_err(|_| unavailable())?;
+    let id = format!("zipformer-en-2023-06-26-{component}");
+    let asset = lock.models.iter().find(|m| m.id == id).ok_or_else(unavailable)?;
+    let path = dir.join(asset.dest.file_name().ok_or_else(unavailable)?);
+    let file = File::open(&path).map_err(|_| unavailable())?;
+    let size = asset.size_bytes.ok_or_else(unavailable)?;
+    let mut digest = Sha256::new();
+    if io::copy(&mut file.take(size + 1), &mut digest).map_err(|_| unavailable())? != size
+        || format!("{:x}", digest.finalize()) != *asset.sha256.as_ref().ok_or_else(unavailable)?
+    {
+        return Err(unavailable());
+    }
+    Ok(path)
+}
+
+pub(super) fn verify_model(dir: &Path) -> EonResult<()> {
+    for component in ["encoder-int8", "decoder", "joiner-int8", "tokens"] {
+        verified_component(dir, component)?;
+    }
+    Ok(())
+}
+
 pub(super) struct Online {
     input: mpsc::Sender<Chunk>,
     result: JoinHandle<EonResult<String>>,
@@ -77,24 +104,7 @@ impl PinnedZipformer {
     /// installation that does not change while models are loaded. The runtime
     /// is the one linked by eon-voice; session initialization failures are errors.
     pub fn load(model_dir: &Path) -> EonResult<Self> {
-        let lock: Lock = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../../scripts/models.lock.json"
-        )))
-        .map_err(|_| unavailable())?;
-        for component in ["encoder-int8", "decoder", "joiner-int8", "tokens"] {
-            let id = format!("zipformer-en-2023-06-26-{component}");
-            let asset = lock.models.iter().find(|m| m.id == id).ok_or_else(unavailable)?;
-            let file = File::open(model_dir.join(asset.dest.file_name().ok_or_else(unavailable)?))
-                .map_err(|_| unavailable())?;
-            let size = asset.size_bytes.ok_or_else(unavailable)?;
-            let mut digest = Sha256::new();
-            if io::copy(&mut file.take(size + 1), &mut digest).map_err(|_| unavailable())? != size
-                || format!("{:x}", digest.finalize()) != *asset.sha256.as_ref().ok_or_else(unavailable)?
-            {
-                return Err(unavailable());
-            }
-        }
+        verify_model(model_dir)?;
         let model = ZipformerAsr::load(model_dir).map_err(|_| unavailable())?;
         Ok(Self(Arc::new(Mutex::new(model))))
     }

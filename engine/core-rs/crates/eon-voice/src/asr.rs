@@ -121,9 +121,32 @@ impl ZipformerStream<'_> {
     pub fn finish(self) -> EonResult<String> {
         match self.decoder {
             #[cfg(feature = "onnx-speech")]
-            Decoder::Ort(stream) => stream.finish(),
+            Decoder::Ort(stream) => stream.finish().map(|(text, _)| text),
             #[cfg(feature = "sherpa-onnx")]
             Decoder::Sherpa(stream) => stream.finish(),
+        }
+    }
+
+    /// Append-only, nonblank **text** token IDs actually selected by the greedy
+    /// transducer. Never reconstruct IDs by splitting a transcript.
+    #[cfg(feature = "onnx-speech")]
+    pub fn text_token_ids(&self) -> Option<&[i64]> {
+        match &self.decoder {
+            Decoder::Ort(stream) => Some(stream.text_token_ids()),
+            #[cfg(feature = "sherpa-onnx")]
+            Decoder::Sherpa(_) => None,
+        }
+    }
+
+    /// Include IDs emitted while flushing the final acoustic context.
+    #[cfg(feature = "onnx-speech")]
+    pub fn finish_with_text_tokens(self) -> EonResult<(String, Vec<i64>)> {
+        match self.decoder {
+            Decoder::Ort(stream) => stream.finish(),
+            #[cfg(feature = "sherpa-onnx")]
+            Decoder::Sherpa(_) => Err(EonError::CapabilityNotFound {
+                capability_id: "direct Zipformer text-token stream".into(),
+            }),
         }
     }
 }

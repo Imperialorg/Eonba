@@ -129,7 +129,11 @@ cd engine/core-rs
 cargo test --locked -p eon-mesh --features token-readback --test split_token_readback -- --test-threads=1
 ```
 
-The test uses the release recording/transcript and a second wire implementation that can partition or corrupt a reply. It checks the PCM consumed by the edge render callback using independent ASR. This is native loopback with an in-memory output, not a physical mobile/driver measurement, low-latency guarantee, or general remote assistant. Acoustic inference and waveform synthesis still run at the edge; rechecking the worker’s computation is intentional.
+The test uses the release recording/transcript and a second wire implementation that can partition or corrupt a reply. It checks the PCM consumed by the edge render callback using independent ASR. The default tests open no audio devices.
+
+On Linux, `split_inference_tests_final_reaches_private_cpal_output` is an additional ignored, output-only gate. Use **only** a dedicated Pulse server with the single `eon_vad` null sink: set `PULSE_SERVER` to its private `unix:/…` socket, `PULSE_SINK=eon_vad`, `PULSE_SOURCE=eon_vad.monitor`, and `ALSA_CONFIG_PATH` to a file containing only `pcm.!default { type pulse server "<PULSE_SERVER>" }` plus newline (substitute the socket address). Set `EON_VOICE_TEST_PRIVATE_OUTPUT=1`, `EON_VOICE_TEST_VIRTUAL_MONITOR=1`, and `PULSE_LATENCY_MSEC=100`, then select the test with `-- --ignored`. It checks actual CPAL callback frame counts, driver errors, and ASR on the post-render reference. It does not open the monitor source, measure acoustic latency, or certify physical mobile hardware. Acoustic inference and waveform synthesis still run at the edge; rechecking the worker’s computation is intentional.
+
+On the release recording, the edge sent 11 nonfinal chunks (38 ASR IDs before the flush). The 24 kHz ring consumed 162,000 samples; the 48 kHz private CPAL callback consumed 324,000 after resampling. The default Pulse buffer produced 14 driver errors. The 100 ms private-buffer run passed the same strict zero-error check; it is not evidence for a smaller output latency.
 
 ---
 

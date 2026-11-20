@@ -85,8 +85,63 @@ pub fn phonemize(text: &str) -> EonResult<String> {
 pub struct KokoroTts {
     session: Session,
     ports: (&'static str, &'static str),
-    vocab: HashMap<char, i64>,
+    frontend: KokoroFrontend,
     voice: Vec<f32>,
+}
+
+/// Pronunciation only. Does not load the waveform model or open an audio device.
+pub struct KokoroFrontend {
+    vocab: HashMap<char, i64>,
+}
+
+/// One local pronunciation, or a peer's byte-identical verified pronunciation.
+/// There is deliberately no constructor accepting unchecked network token IDs.
+pub struct PreparedClause {
+    text: String,
+    ids: Vec<u8>,
+}
+
+impl PreparedClause {
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn ids(&self) -> &[u8] {
+        &self.ids
+    }
+
+    /// Reject mismatches without losing the checked local fallback.
+    pub fn accept_verified_ids(&mut self, received: Vec<u8>) -> bool {
+        if self.ids != received {
+            return false;
+        }
+        self.ids = received;
+        true
+    }
+}
+
+impl KokoroFrontend {
+    pub fn load() -> EonResult<Self> {
+        Ok(Self { vocab: load_vocab()? })
+    }
+
+    pub fn prepare(&self, text: &str) -> EonResult<PreparedClause> {
+        let ids = phonemize(text)?
+            .chars()
+            .filter_map(|c| self.vocab.get(&c))
+            .take(MAX_TOKENS + 1)
+            .map(|&id| u8::try_from(id).map_err(|_| tts_err("vocab", "invalid phoneme ID")))
+            .collect::<EonResult<Vec<_>>>()?;
+        if ids.is_empty() || ids.len() > MAX_TOKENS {
+            return Err(EonError::ValidationError(
+                "expected 1..=509 Kokoro phoneme tokens".into(),
+            ));
+        }
+        Ok(PreparedClause {
+            text: text.to_owned(),
+            ids,
+        })
+    }
 }
 
 impl KokoroTts {
@@ -130,7 +185,7 @@ impl KokoroTts {
         Ok(Self {
             session,
             ports,
-            vocab: load_vocab()?,
+            frontend: KokoroFrontend::load()?,
             voice,
         })
     }
@@ -167,23 +222,19 @@ impl KokoroTts {
                 "speed {speed} is outside 0.5 to 2.0"
             )));
         }
-        let phonemes = phonemize(text)?;
-        let tokens: Vec<i64> = phonemes
-            .chars()
-            .filter_map(|c| self.vocab.get(&c).copied())
-            .take(MAX_TOKENS + 1)
-            .collect();
-        if tokens.is_empty() {
-            return Err(EonError::ValidationError("text has no speakable phonemes".into()));
+        let clause = self.frontend.prepare(text)?;
+        self.synthesize_prepared(&clause, speed)
+    }
+
+    pub(crate) fn synthesize_prepared(&mut self, clause: &PreparedClause, speed: f32) -> EonResult<Vec<f32>> {
+        if !SPEED_RANGE.contains(&speed) {
+            return Err(EonError::ValidationError("invalid Kokoro playback speed".into()));
         }
-        if tokens.len() > MAX_TOKENS {
-            return Err(EonError::ValidationError("Kokoro clause exceeds token budget".into()));
-        }
-        let row = tokens.len();
+        let row = clause.ids.len();
         let style = self.voice[row * STYLE_DIM..(row + 1) * STYLE_DIM].to_vec();
-        let mut ids = Vec::with_capacity(tokens.len() + 2);
+        let mut ids = Vec::with_capacity(row + 2);
         ids.push(0);
-        ids.extend(tokens);
+        ids.extend(clause.ids.iter().map(|&id| i64::from(id)));
         ids.push(0);
 
         let input_ids = Tensor::from_array(([1usize, ids.len()], ids)).map_err(|e| tts_err("input", e))?;

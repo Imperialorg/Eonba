@@ -3,7 +3,9 @@
 //! is played or executed. Verification deliberately trades duplicate work for
 //! not having to trust the workstation's claimed tokens.
 //!
-//! The separate, opt-in `zipformer` service offloads actual acoustic inference.
+//! The separate, opt-in `zipformer` service offloads acoustic inference over
+//! PCM. `zipformer::readback` uses a different token-only protocol; it never
+//! negotiates down to the PCM service.
 
 #[cfg(feature = "native-zipformer")]
 pub mod zipformer;

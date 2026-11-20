@@ -10,7 +10,7 @@ use crate::barge_in::BargeIn;
 use crate::device::{PlaybackHandle, play_default_output_with_reference};
 use crate::resample::resample_mono;
 use crate::ring::{PcmConsumer, PcmProducer, pcm_ring};
-use crate::tts::{KokoroTts, MAX_CLAUSE_BYTES, SAMPLE_RATE_HZ, clauses};
+use crate::tts::{KokoroTts, MAX_CLAUSE_BYTES, PreparedClause, SAMPLE_RATE_HZ, clauses};
 
 const MAX_QUEUED_CLAUSES: usize = 32;
 const MAX_QUEUED_BYTES: usize = 8192;
@@ -88,8 +88,29 @@ fn prepare_bridge(mut pcm: Vec<f32>) -> EonResult<Vec<f32>> {
 pub struct CommitmentGate {
     epoch: u64,
     lease: Option<LeaseId>,
-    pending: VecDeque<String>,
+    pending: VecDeque<Clause>,
     playback: BargeIn,
+}
+
+enum Clause {
+    Text(String),
+    Prepared(PreparedClause),
+}
+
+impl Clause {
+    fn text(&self) -> &str {
+        match self {
+            Self::Text(text) => text,
+            Self::Prepared(clause) => clause.text(),
+        }
+    }
+
+    fn synthesize(&self, tts: &mut KokoroTts, speed: f32) -> EonResult<Vec<f32>> {
+        match self {
+            Self::Text(text) => tts.synthesize(text, speed),
+            Self::Prepared(clause) => tts.synthesize_prepared(clause, speed),
+        }
+    }
 }
 
 impl CommitmentGate {
@@ -111,19 +132,24 @@ impl CommitmentGate {
 
     /// Free text is always a claim, even when it happens to start like a bridge.
     pub fn queue(&mut self, text: &str) -> EonResult<()> {
+        self.check_capacity(text.len(), || clauses(text).take(MAX_QUEUED_CLAUSES + 1).count())?;
+        if clauses(text).any(|s| s.len() > MAX_CLAUSE_BYTES) {
+            return Err(EonError::ValidationError("reply clause too long".into()));
+        }
+        self.pending.extend(clauses(text).map(|s| Clause::Text(s.to_owned())));
+        Ok(())
+    }
+
+    fn check_capacity(&self, extra_bytes: usize, extra_clauses: impl FnOnce() -> usize) -> EonResult<()> {
         if self.playback.is_muted() {
             return Err(EonError::ValidationError("reply was cancelled".into()));
         }
-        let bytes: usize = self.pending.iter().map(String::len).sum();
-        if text.len() > MAX_QUEUED_BYTES - bytes
-            || clauses(text).take(MAX_QUEUED_CLAUSES + 1).count() > MAX_QUEUED_CLAUSES - self.pending.len()
-            || clauses(text).any(|s| s.len() > MAX_CLAUSE_BYTES)
-        {
+        let bytes: usize = self.pending.iter().map(|c| c.text().len()).sum();
+        if extra_bytes > MAX_QUEUED_BYTES - bytes || extra_clauses() > MAX_QUEUED_CLAUSES - self.pending.len() {
             return Err(EonError::ValidationError(
                 "reply text queue full; no clauses accepted".into(),
             ));
         }
-        self.pending.extend(clauses(text).map(str::to_owned));
         Ok(())
     }
 
@@ -148,15 +174,15 @@ impl CommitmentGate {
         }
     }
 
-    fn ready(&self) -> Option<&str> {
+    fn ready(&self) -> Option<&Clause> {
         self.lease()?;
-        self.pending.front().map(String::as_str)
+        self.pending.front()
     }
 
     /// Software-only path; driver callers should use `ReplyRenderer` which also fences already queued PCM.
     pub fn synthesize_next(&mut self, tts: &mut KokoroTts, speed: f32) -> EonResult<Option<Vec<f32>>> {
         let Some(text) = self.ready() else { return Ok(None) };
-        let samples = tts.synthesize(text, speed)?;
+        let samples = text.synthesize(tts, speed)?;
         self.pending.pop_front();
         Ok((!self.playback.is_muted()).then_some(samples))
     }
@@ -231,6 +257,17 @@ impl ReplyRenderer {
         self.gate.queue(text)
     }
 
+    /// Stage a finalized pronunciation. The same epoch/lease and revocation
+    /// checks govern both plain text and prepared model inputs.
+    pub fn queue_prepared(&mut self, clause: PreparedClause) -> EonResult<()> {
+        self.gate.check_capacity(clause.text().len(), || 1)?;
+        if clauses(clause.text()).count() != 1 {
+            return Err(EonError::ValidationError("expected one readback clause".into()));
+        }
+        self.gate.pending.push_back(Clause::Prepared(clause));
+        Ok(())
+    }
+
     pub fn lease_acquired(&mut self, epoch: u64, lease: LeaseId) {
         self.gate.lease_acquired(epoch, lease);
     }
@@ -250,10 +287,10 @@ impl ReplyRenderer {
     /// Publish a partial ring write, or synthesize and publish at most one committed clause.
     /// Zero means no space, no ready clause, or cancellation; never busy-wait on the callback.
     pub fn pump(&mut self, tts: &mut KokoroTts, speed: f32) -> EonResult<usize> {
-        self.pump_with(|text| tts.synthesize(text, speed))
+        self.pump_with(|clause| clause.synthesize(tts, speed))
     }
 
-    fn pump_with(&mut self, synthesize: impl FnOnce(&str) -> EonResult<Vec<f32>>) -> EonResult<usize> {
+    fn pump_with(&mut self, synthesize: impl FnOnce(&Clause) -> EonResult<Vec<f32>>) -> EonResult<usize> {
         if self.gate.playback.is_muted() || self.staged.is_some() {
             return Ok(self.publish());
         }
@@ -312,7 +349,7 @@ mod commitment_gate_tests {
         assert!(gate.queue(&"a".repeat(MAX_CLAUSE_BYTES + 1)).is_err());
         assert!(gate.queue(&" ".repeat(MAX_QUEUED_BYTES)).is_err());
         assert_eq!(gate.pending.len(), 1);
-        assert_eq!(gate.pending[0], "First.");
+        assert_eq!(gate.pending[0].text(), "First.");
     }
 
     #[test]
@@ -327,7 +364,7 @@ mod commitment_gate_tests {
         worker.queue("First claim. Second claim.").unwrap();
         assert_eq!(worker.start_bridge(&cache, Bridge::Report).unwrap(), 2);
         assert!(worker.start_bridge(&cache, Bridge::Notice).is_err());
-        let no_run = |_: &str| panic!("should not start synthesis");
+        let no_run = |_: &Clause| panic!("should not start synthesis");
         assert_eq!(worker.pump_with(no_run).unwrap(), 0);
         let mut played = [0.; 2];
         signal.render(&mut rx, &mut played);
@@ -340,7 +377,7 @@ mod commitment_gate_tests {
         assert_eq!(
             worker
                 .pump_with(|text| {
-                    assert_eq!(text, "First claim.");
+                    assert_eq!(text.text(), "First claim.");
                     Ok(vec![0.4, 0.5, 0.6])
                 })
                 .unwrap(),
@@ -390,7 +427,7 @@ mod commitment_gate_tests {
         gate.lease_acquired(3, LeaseId::new());
         assert!(gate.ready().is_none());
         gate.lease_acquired(4, LeaseId::new());
-        assert_eq!(gate.ready(), Some("Affirmative."));
+        assert_eq!(gate.ready().map(Clause::text), Some("Affirmative."));
         gate.invalidate(4);
         gate.lease_acquired(4, LeaseId::new());
         assert!(gate.ready().is_none());
@@ -403,7 +440,7 @@ mod commitment_gate_tests {
         let mut gate = CommitmentGate::new(3, signal.clone());
         gate.queue("Deployed.").unwrap();
         gate.lease_acquired(3, LeaseId::new());
-        assert_eq!(gate.ready(), Some("Deployed."));
+        assert_eq!(gate.ready().map(Clause::text), Some("Deployed."));
         signal.trigger();
         assert!(gate.ready().is_none());
     }

@@ -8,6 +8,9 @@ mod model;
 mod wire;
 pub use model::PinnedZipformer;
 
+#[cfg(feature = "token-readback")]
+pub mod readback;
+
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -55,12 +58,16 @@ pub struct SpeechPeer {
 
 impl SpeechPeer {
     pub async fn bind(bind: SocketAddr, key: SecretKey, paired: EndpointId) -> EonResult<Self> {
+        Self::bind_protocol(bind, key, paired, ALPN).await
+    }
+
+    async fn bind_protocol(bind: SocketAddr, key: SecretKey, paired: EndpointId, alpn: &[u8]) -> EonResult<Self> {
         if key.public() == paired {
             return Err(not_paired());
         }
         let endpoint = Endpoint::builder(Minimal)
             .secret_key(key)
-            .alpns(vec![ALPN.to_vec()])
+            .alpns(vec![alpn.to_vec()])
             .relay_mode(RelayMode::Disabled)
             .clear_ip_transports()
             .bind_addr(bind)
