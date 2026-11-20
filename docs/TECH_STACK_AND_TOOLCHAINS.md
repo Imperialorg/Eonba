@@ -190,11 +190,13 @@ Use separate instrumentation gates for the stock app, selected tone HUD and sele
   prompt. If selecting the assistant produced a pre-existing OS grant, use a separate
   disposable AVD and review the permission **before** choosing EON. A grant alone is
   not a review. Repeat the command with `complete`, `stop` and `hide`, one phase per run.
-  Start a fresh take for each. Let `complete` finish; for `stop` and `hide`, tap Stop
-  or dismiss at the first nonzero level. For `hide`, leave the EON controls with role
+  Start a fresh take for each. Let `complete` finish. For `stop` and `hide`, leave
+  the first nonzero level visible for half a second, then tap Stop or dismiss directly
+  without collapsing. For `hide`, leave the EON controls with role
   status visible for a second, invoke a fresh card, pause, then expand without starting.
-  Expect `micHud=PASS-<phase>` for each run. The observer reads the Android recording
-  operation for EON, not audio samples. An inactive operation is not a hardware power reading.
+  Expect `micHud=PASS-<phase>` for each run. The observer correlates clicks on this card
+  with snapshots of EON's Android recording operation. It cannot see activity between
+  snapshots, read PCM samples or measure power to a physical microphone.
   A build, permission dialog, silent input or built-in tone result does not verify capture.
 
 **Optional process CPU measurement:** In EON, check **Measure EON process CPU during the next profile check**, then tap **Check model profile**. The box clears after one use or when leaving the activity. `SelfProcessCpu.measure` brackets that synchronous action with two `android.os.Process.getElapsedCpuTime()` reads only when requested. The result is a delta in **CPU milliseconds across all threads of the current app process**, not action latency, CPU percentage, or time attributable solely to that code. Equal positive counters can yield a genuine 0 ms at the counter's resolution. Missing/nonpositive, decreasing or out-of-order samples and intervals exceeding 10 seconds are unavailable. Neither sample leaves the call stack as a resumable baseline, so a process restart or reboot cannot produce a delta against old data. No listener, permission, persistent record or network access is needed.

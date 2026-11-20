@@ -12,6 +12,7 @@ import android.os.Bundle;
 import android.os.Process;
 import android.os.SystemClock;
 import android.text.TextUtils;
+import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import java.util.List;
 import java.util.function.BooleanSupplier;
@@ -20,8 +21,8 @@ import java.util.regex.Pattern;
 
 /**
  * Manual, read-only observer in the test APK's process. The operator supplies virtual input;
- * this test cannot identify its source. AppOps reports a running client operation, not PCM,
- * recorder object lifetime, or power to a physical microphone.
+ * this test cannot identify its source. Targeted AppOps snapshots say nothing about sub-poll
+ * activity, PCM, recorder object lifetime, or power to a physical microphone.
  */
 public final class SessionMicAcceptance extends Instrumentation {
     private static final String EON = "com.eon.assistant";
@@ -34,12 +35,13 @@ public final class SessionMicAcceptance extends Instrumentation {
     private static final String STOPPED = "Mic off · stopped · levels cleared";
     private static final String NONZERO = "([1-9][0-9]?|100)%";
     private static final Pattern PROGRESS = Pattern.compile(
-            "Measuring microphone · (?:[1-9]|1[01])/12 half-second levels · RMS " + NONZERO);
+            "Measuring microphone · ([1-9]|1[0-2])/12 half-second levels · RMS (0|[1-9][0-9]?|100)%");
     private static final Pattern COMPLETE = Pattern.compile(
             "Mic off · 12 levels complete · highest RMS " + NONZERO);
     private static final long MANUAL_MS = 40_000;
     private static final long RELEASE_MS = 1_000;
     private static final long QUIET_MS = 600;
+    private static final long MAX_SAMPLE_GAP_MS = 800;
 
     private Bundle arguments;
     private String mode;
@@ -49,6 +51,10 @@ public final class SessionMicAcceptance extends Instrumentation {
     private int uid;
     private int cardWindow;
     private int observedRms;
+    private long lastSample, lastInactive, progressUptime;
+    private boolean armed;
+    private volatile long startClick, stopClick;
+    private volatile boolean toggleClicked;
 
     @Override public void onCreate(Bundle args) {
         super.onCreate(args);
@@ -76,7 +82,31 @@ public final class SessionMicAcceptance extends Instrumentation {
 
     private boolean active() {
         // Unlike startWatchingActive, this does not subscribe to other packages' mic activity.
-        return ops.isOpActive(AppOpsManager.OPSTR_RECORD_AUDIO, uid, EON);
+        long before = now();
+        boolean running = ops.isOpActive(AppOpsManager.OPSTR_RECORD_AUDIO, uid, EON);
+        if (armed) require(now() - lastSample <= MAX_SAMPLE_GAP_MS);
+        lastSample = before;
+        if (!running) lastInactive = before;
+        return running;
+    }
+
+    private void watchCardClicks() {
+        final int window = cardWindow;
+        final long since = SystemClock.uptimeMillis();
+        ui.setOnAccessibilityEventListener(event -> {
+            long t = event.getEventTime(); // uptime, not elapsedRealtime
+            if (t <= since || event.getEventType() != AccessibilityEvent.TYPE_VIEW_CLICKED
+                    || event.getWindowId() != window || !TextUtils.equals(EON, event.getPackageName())) return;
+            AccessibilityNodeInfo source = event.getSource(0); // no descendant prefetch or event text
+            if (source == null || source.getWindowId() != window || !TextUtils.equals(EON, source.getPackageName())) return;
+            String id = source.getViewIdResourceName();
+            if ((EON + ":id/hud_toggle").equals(id)) toggleClicked = true;
+            if (!(EON + ":id/hud_mic").equals(id)) return;
+            // View.performClick emits this *after* the click handler. The label may already
+            // have changed. Match the fixed control, then corroborate its observed transition.
+            if (startClick == 0) startClick = t;
+            else stopClick = stopClick == 0 ? t : -1;
+        });
     }
 
     private AccessibilityNodeInfo root() {
@@ -114,17 +144,24 @@ public final class SessionMicAcceptance extends Instrumentation {
     }
 
     private boolean terminal(AccessibilityNodeInfo r) {
+        String s = sameCard(r) ? text(r, "hud_mic_status") : "";
+        if (!"complete".equals(mode)) {
+            Matcher level = PROGRESS.matcher(s);
+            if (level.matches()) require(Integer.parseInt(level.group(1)) <= 6);
+        }
         if ("hide".equals(mode)) {
             // Invoke over the EON controls activity. Null, launcher, a collapsed card, or even
             // another EON window with no mic text is NOT evidence that the card was dismissed.
             if (sameCard(r)) {
-                require(!text(r, "hud_mic_status").startsWith("Mic off"));
+                AccessibilityNodeInfo toggle = node(r, "hud_toggle");
+                require(!toggleClicked && (toggle == null || !TextUtils.equals("Show session details", toggle.getContentDescription()))
+                        && !OFF.equals(text(r, "hud_title")) && !START.equalsIgnoreCase(text(r, "hud_mic"))
+                        && !s.startsWith("Mic off"));
                 return false;
             }
             return node(r, "hud_title") == null && node(r, "assistant_role_status") != null;
         }
         if (!sameCard(r) || !idleControls(r)) return false;
-        String s = text(r, "hud_mic_status");
         require(!s.startsWith("Mic off · measurement unavailable"));
         if ("complete".equals(mode)) {
             Matcher peak = COMPLETE.matcher(s);
@@ -148,7 +185,7 @@ public final class SessionMicAcceptance extends Instrumentation {
             if (done) {
                 // Allow sampling jitter, but not one short capture followed by a UI-only timer.
                 if ("complete".equals(mode)) require(lastActive - start >= 5_000);
-                if (!ended) until("record-op-release", now() + RELEASE_MS, () -> {
+                if (!ended) until("record-op-release", Math.min(deadline, now() + RELEASE_MS), () -> {
                     require(terminal(root()));
                     return !active();
                 });
@@ -189,6 +226,9 @@ public final class SessionMicAcceptance extends Instrumentation {
             cardWindow = r.getWindowId();
             return true;
         });
+        require(!active()); // start timing from a verified clean, inactive card
+        watchCardClicks();
+        armed = true;
         if ("denied".equals(mode)) {
             until("denied", now() + MANUAL_MS, () -> {
                 require(!active());
@@ -205,25 +245,39 @@ public final class SessionMicAcceptance extends Instrumentation {
             });
             // For Stop/hide, finish well before a six-second take could end naturally. Neither
             // waiting out a leak nor observing a completed card and THEN dismissing should pass.
-            long start = now(), end = start + ("complete".equals(mode) ? 8_000 : 3_800);
+            long start = now(), activeUptime = SystemClock.uptimeMillis();
+            long end = lastInactive + ("complete".equals(mode) ? 8_000 : 3_800);
             until("nonzero-progress", end, () -> {
                 require(active());
+                if (startClick == 0) {
+                    require(now() - start <= MAX_SAMPLE_GAP_MS);
+                    return false;
+                }
+                require(stopClick == 0 && Math.abs(startClick - activeUptime) <= MAX_SAMPLE_GAP_MS);
                 AccessibilityNodeInfo r = root();
                 require(sameCard(r));
                 Matcher rms = PROGRESS.matcher(text(r, "hud_mic_status"));
-                if (!rms.matches() || !"EON · Mic on".equals(text(r, "hud_title"))
+                if (!rms.matches() || "0".equals(rms.group(2)) || !"EON · Mic on".equals(text(r, "hud_title"))
                         || !STOP.equalsIgnoreCase(text(r, "hud_mic")) || node(r, "hud_mic_graph") == null) return false;
+                require(Integer.parseInt(rms.group(1)) <= ("complete".equals(mode) ? 11 : 3));
                 require(active());
-                observedRms = Integer.parseInt(rms.group(1));
+                observedRms = Integer.parseInt(rms.group(2));
+                progressUptime = SystemClock.uptimeMillis();
                 return true;
             });
             finishTake(start, end);
         }
+        long terminalUptime = SystemClock.uptimeMillis();
         long quiet = now() + QUIET_MS;
         until("inactive-hold", quiet + RELEASE_MS, () -> {
             require(!active() && terminal(root()) && !active());
             return now() >= quiet;
         });
+        step = "card-click";
+        require(startClick > 0 && startClick <= terminalUptime && !toggleClicked);
+        require("stop".equals(mode) ? stopClick >= progressUptime && stopClick <= terminalUptime : stopClick == 0);
+        armed = false;
+        ui.setOnAccessibilityEventListener(null);
         if ("hide".equals(mode)) fresh();
     }
 
@@ -245,6 +299,8 @@ public final class SessionMicAcceptance extends Instrumentation {
             ui = getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
             AccessibilityServiceInfo info = ui.getServiceInfo();
             info.packageNames = new String[]{EON};
+            info.eventTypes = AccessibilityEvent.TYPE_VIEW_CLICKED;
+            info.notificationTimeout = 0;
             info.flags |= AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
                     | AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS; // the level graph
             ui.setServiceInfo(info);
@@ -255,7 +311,8 @@ public final class SessionMicAcceptance extends Instrumentation {
                 require(test.checkSelfPermission(WATCH) == PackageManager.PERMISSION_GRANTED);
                 observe();
             } finally {
-                ui.dropShellPermissionIdentity();
+                try { ui.setOnAccessibilityEventListener(null); }
+                finally { ui.dropShellPermissionIdentity(); }
             }
             result.putString("micHud", "PASS-" + mode);
             code = Activity.RESULT_OK;

@@ -103,9 +103,11 @@ def check_packages(inventory, preconfigured_allowed):
 MIC_PHASES = {
     "denied": "Leave microphone access unreviewed. Tap Start and leave the denial visible.",
     "complete": "With access reviewed and a nonzero virtual input, tap Start and let all 12 levels finish.",
-    "stop": "With access reviewed and a nonzero virtual input, tap Start. At the first nonzero level, tap Stop.",
+    "stop": "With access reviewed and a nonzero virtual input, tap Start. Let the first nonzero level remain "
+            "visible for half a second, then tap Stop.",
     "hide": "Invoke over EON controls with the assistant role status visible underneath. With access reviewed "
-            "and a nonzero virtual input, tap Start. At the first nonzero level, dismiss the card. Leave the "
+            "and a nonzero virtual input, tap Start. Half a second after the first nonzero level, dismiss "
+            "without collapsing or tapping Stop. Leave the "
             "controls visible for a second, invoke a fresh card, pause, then expand without starting.",
 }
 
