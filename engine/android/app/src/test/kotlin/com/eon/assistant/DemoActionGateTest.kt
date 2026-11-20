@@ -12,6 +12,9 @@ class DemoActionGateTest {
     private class Node(val offers: DemoAction? = null, vararg children: Node) {
         val children = children.toMutableList()
         var available = true
+        var route = DemoRoute.NATIVE
+        var value = 0
+        var step = if (offers == DemoAction.SCROLL_SAMPLES_FORWARD) 104 else 1
     }
 
     private class Fixture {
@@ -19,21 +22,26 @@ class DemoActionGateTest {
         val samples = Node(DemoAction.SCROLL_SAMPLES_FORWARD, Node(), Node())
         val root = Node(null, count, samples)
         var epoch: Any? = Any()
+        var window = Any()
         var time = 700L
         val reads = mutableListOf<Int>()
         val checked = mutableListOf<Node>()
         val actions = mutableListOf<Pair<Node, DemoAction>>()
+        val routes = mutableListOf<DemoRoute>()
         var onCheck: () -> Unit = {}
         var onDispatch: () -> Boolean = { true }
+        var updateState = true
         val gate = DemoActionGate(count, samples, { slot ->
             reads.add(slot)
             root.children.getOrNull(slot)
         }, { node, action ->
             checked.add(node)
             onCheck()
-            node.available && node.offers == action
-        }, { epoch }, { time }) { node, action ->
+            if (node.available && node.offers == action) DemoOffer(node.route, node.value, node.step) else null
+        }, { epoch?.let { DemoScope(it, window) } }, { time }, { node, _ -> node.value }) { node, action, offer ->
             actions.add(node to action)
+            routes.add(offer.route)
+            if (updateState) node.value += offer.maxDelta
             onDispatch()
         }
         fun click() = assertNotNull(gate.review(DemoAction.CLICK_COUNTER))
@@ -47,10 +55,12 @@ class DemoActionGateTest {
             assertEquals(before, actions.size)
             assertTrue(gate.confirm(r))
             assertFalse(gate.confirm(r))
+            assertTrue(gate.verify(r))
+            assertFalse(gate.verify(r))
             assertEquals(before + 1, actions.size)
             assertEquals(target to action, actions.last())
         }
-        assertEquals(listOf(0, 0, 1, 1), reads)
+        assertEquals(setOf(0, 1), reads.toSet())
     }
 
     @Test fun unrelatedSameShapedNodesCannotBeSubstitutedAndAreNotInspected() = with(Fixture()) {
@@ -86,7 +96,7 @@ class DemoActionGateTest {
         assertFalse(gate.confirm(r))
         time--
         assertFalse(gate.confirm(r))
-        assertEquals(listOf(1), reads)
+        assertEquals(listOf(1, 1), reads)
         assertTrue(actions.isEmpty())
     }
 
@@ -99,7 +109,7 @@ class DemoActionGateTest {
         val second = click()
         epoch = Any() // Same package and Views, but not the same uninterrupted connection.
         assertFalse(gate.confirm(second))
-        assertEquals(listOf(0, 0), reads)
+        assertEquals(listOf(0, 0, 0, 0), reads)
         assertTrue(actions.isEmpty())
     }
 
@@ -119,6 +129,17 @@ class DemoActionGateTest {
         assertTrue(actions.isEmpty())
     }
 
+    @Test fun canceledAcquisitionAndReparentDuringOfferAreNotAuthorizations() = with(Fixture()) {
+        onCheck = gate::cancel
+        assertNull(gate.review(DemoAction.CLICK_COUNTER))
+        onCheck = {}
+        val r = click()
+        onCheck = { root.children[0] = Node(DemoAction.CLICK_COUNTER, count) }
+        assertFalse(gate.confirm(r))
+        assertFalse(gate.confirm(r))
+        assertTrue(actions.isEmpty())
+    }
+
     @Test fun reentryAndProviderFailureDoNotReopenApproval() = with(Fixture()) {
         val r = click()
         onDispatch = {
@@ -128,5 +149,78 @@ class DemoActionGateTest {
         assertFailsWith<IllegalStateException> { gate.confirm(r) }
         assertFalse(gate.confirm(r))
         assertEquals(1, actions.size)
+    }
+
+    @Test fun unavailableNativeActionCanUseOnlyReviewedLocalRouteAndVerifyOnce() = with(Fixture()) {
+        for (node in listOf(count, samples)) {
+            node.route = DemoRoute.LOCAL_HIT
+            val r = assertNotNull(gate.review(node.offers!!))
+            assertEquals(DemoRoute.LOCAL_HIT, r.offer.route)
+            assertFalse(gate.verify(r))
+            assertTrue(gate.confirm(r))
+            assertFalse(gate.confirm(r))
+            assertTrue(gate.verify(r))
+            assertFalse(gate.verify(r))
+        }
+        assertEquals(listOf(DemoRoute.LOCAL_HIT, DemoRoute.LOCAL_HIT), routes)
+    }
+
+    @Test fun routeStateViewportAndWindowCannotChangeUnderReview() = with(Fixture()) {
+        val native = scroll()
+        samples.route = DemoRoute.LOCAL_HIT
+        assertFalse(gate.confirm(native))
+        val local = scroll()
+        samples.route = DemoRoute.NATIVE
+        assertFalse(gate.confirm(local))
+        samples.route = DemoRoute.LOCAL_HIT
+        val moved = scroll()
+        samples.value += 2
+        assertFalse(gate.confirm(moved))
+        val resized = scroll()
+        samples.step--
+        assertFalse(gate.confirm(resized))
+        val otherWindow = scroll()
+        window = Any()
+        assertFalse(gate.confirm(otherWindow))
+        assertTrue(actions.isEmpty())
+    }
+
+    @Test fun ambiguousNativeFailureDoesNotFallBackEvenIfEffectOccurred() = with(Fixture()) {
+        val r = click()
+        onDispatch = { count.route = DemoRoute.LOCAL_HIT; false }
+        assertFalse(gate.confirm(r))
+        assertFalse(gate.verify(r))
+        assertFalse(gate.confirm(r))
+        assertEquals(1, count.value)
+        assertEquals(listOf(DemoRoute.NATIVE), routes)
+    }
+
+    @Test fun acceptedDispatchIsNotProofOfAnEffectOrLicenseToRetry() = with(Fixture()) {
+        updateState = false
+        for (node in listOf(count, samples)) {
+            for (delta in listOf(0, -1, node.step + 1)) {
+                node.value = 20
+                val r = assertNotNull(gate.review(node.offers!!))
+                assertTrue(gate.confirm(r))
+                node.value += delta
+                assertFalse(gate.verify(r))
+                assertFalse(gate.confirm(r))
+            }
+        }
+        assertEquals(6, actions.size)
+    }
+
+    @Test fun delayedObservationCannotReadReplacementOrAuthorizeAnything() = with(Fixture()) {
+        val r = scroll()
+        assertTrue(gate.confirm(r))
+        root.children[1] = Node(DemoAction.SCROLL_SAMPLES_FORWARD).also { it.value = samples.value }
+        assertFalse(gate.verify(r))
+        root.children[1] = samples
+        val next = scroll()
+        assertTrue(gate.confirm(next))
+        gate.cancel()
+        assertFalse(gate.verify(next))
+        assertFalse(gate.confirm(next))
+        assertEquals(2, actions.size)
     }
 }

@@ -5,4 +5,6 @@
     <item type="id" name="demo_review_scroll" />
     <item type="id" name="demo_confirm" />
     <item type="id" name="demo_cancel" />
+    <item type="id" name="demo_status" />
+    <item type="id" name="demo_sample_mode" />
 </resources>

@@ -19,6 +19,45 @@ The Android subsystem provides:
 4. **Multimodal Screen Perception**: Captures screen frames via `MediaProjection` and streams keyframes to `eon-vision` for OmniParser-v2 UI element detection.
 5. **Quick Settings Tile**: `EonTileService` allows one-tap toggling of EON between Dormant, Silent Copilot, and Full-Duplex Voice modes.
 
+### Shipped boundary: the private action demo (API 34+)
+
+The inspection shortcut is read-only. Actions are available only in the foreground
+`DemoActionActivity`, on its own counter and sample list. To try the fallback on stock
+widgets, choose **Try samples without native actions**, then review and confirm a
+counter click or list scroll. Changing sample mode clears approval; it does not grant
+authority. The confirmation names the route. An advertised native action takes
+precedence; once attempted, even a false return or a missing effect **never** causes
+a fallback or retry.
+
+The fallback is **activity-local hit testing and UI dispatch**, not an Android input
+gesture. A display gesture cannot be bound to the reviewed `View` at delivery. Instead,
+the activity derives the unclipped control's center in its own decor at review and
+again at confirmation. That point must lie on the known button or a known list row,
+with no overlapping sibling on its path. No coordinates are accepted, saved or
+exported. The activity calls `performClick()` on that button or `scrollBy()` by at
+most one viewport on that list; it never synthesizes touch events, flings, or uses
+`AccessibilityService.dispatchGesture`. No manifest permission is needed for this route.
+
+The 15-second, one-use review binds the route, control, starting value, window token,
+and inspection-service epoch. Dispatch requires the unlocked, resumed, focused,
+full-screen demo, the assistant role, and the enabled service and shortcut. The only
+success signal is a counter increase of exactly one or observed forward scroll of
+at most one viewport. Native scrolling may animate, so it gets one delayed **read**,
+not another dispatch. A canceled or stale review cannot be replayed.
+
+From `engine/android`, build `:app:assembleDebug` and use the existing device gates:
+
+```sh
+python3 app/keystore_device_test.py --serial "$CLEAN_AVD" --demo-denied
+python3 app/keystore_device_test.py --preconfigured-allowed-serial "$OPERATOR_AVD"
+```
+
+Both require explicitly selected, disposable API 34+ emulators. For the allowed
+gate, manually install the matching target APK, select EON as assistant, and enable
+its accessibility service and shortcut. Leave the device unlocked and the test APK
+uninstalled. Neither gate sets roles or enables services. They are separate tests:
+passing the clean-device denial gate is not evidence that the allowed gate ran.
+
 ---
 
 ## 2. Android Manifest & Permissions (`AndroidManifest.xml`)
