@@ -1,48 +1,74 @@
-use eon_kernel::model::Objective;
+use eon_kernel::model::{Objective, Workflow};
 use eon_primitives::{EonError, EonResult, TaskId};
 
+use super::checkout::stage_candidates;
 use super::{
-    Attention, CompiledObjective, Confirmation, ConfirmedPreview, Decision, ReadRequest,
-    ReadWorkspace, StagedPreview, compile_words, intent_words, invalid, snapshot,
+    Attention, CompiledObjective, Confirmation, ConfirmedPreview, Decision, PrivateCheckouts,
+    ReadRequest, ReadWorkspace, StagedPreview, WorktreeStore, compile_words, intent_words, invalid,
 };
 
 /// Two separately validated single-read DAGs, never an implicit best guess.
-pub struct CandidatePreview([StagedPreview; 2]);
+pub struct CandidatePreview {
+    trees: PrivateCheckouts,
+    workflows: [Workflow; 2],
+}
 
-/// Only `read file A or B` with two distinct, independently approved paths.
-/// Ordinary `compile` still rejects ambiguous input. Both branches must succeed
-/// against private CoW views of one sealed capture, or neither is presented.
+pub struct CandidatePresentation([StagedPreview; 2]);
+
+/// Two distinct, independently approved read clauses, or `read file A or B`.
+/// Read-only DAG previews use the same filesystem branches as editable
+/// checkouts, but cannot stage edits. Ordinary `compile` rejects ambiguity.
 pub fn preview_candidates(
     objective: &Objective,
     workspace: &ReadWorkspace,
+    store: &WorktreeStore,
 ) -> EonResult<CandidatePreview> {
-    let [left, right] = candidate_plans(objective)?;
-    Ok(CandidatePreview(snapshot::alternatives(
-        workspace, left, right,
-    )?))
+    let (trees, workflows) = stage_candidates(objective, workspace, store)?;
+    Ok(CandidatePreview { trees, workflows })
 }
 
 pub(super) fn candidate_plans(objective: &Objective) -> EonResult<[CompiledObjective; 2]> {
     let words = intent_words(&objective.description)?;
-    let [verb, file, a, or, b] = words.as_slice() else {
-        return Err(invalid("expected exactly two explicit file alternatives"));
+    let (left, right) = match words.as_slice() {
+        [verb, file, a, or, b]
+            if file.eq_ignore_ascii_case("file") && or.eq_ignore_ascii_case("or") =>
+        {
+            (
+                compile_words(objective, &[verb, file, a])?,
+                compile_words(objective, &[verb, file, b])?,
+            )
+        }
+        words => {
+            let i = words
+                .windows(2)
+                .position(|w| w[0].eq_ignore_ascii_case("or") && w[1].eq_ignore_ascii_case("read"))
+                .ok_or_else(|| invalid("expected two explicit read alternatives"))?;
+            (
+                compile_words(objective, &words[..i])?,
+                compile_words(objective, &words[i + 1..])?,
+            )
+        }
     };
-    if !file.eq_ignore_ascii_case("file") || !or.eq_ignore_ascii_case("or") || a == b {
-        return Err(invalid("expected distinct read file alternatives"));
+    match (left.reads(), right.reads()) {
+        ([a], [b]) if (&a.path, a.offset, a.length) != (&b.path, b.offset, b.length) => {
+            Ok([left, right])
+        }
+        _ => Err(invalid("expected exactly two distinct single reads")),
     }
-    let left = compile_words(objective, &[verb, file, a])?;
-    let right = compile_words(objective, &[verb, file, b])?;
-    Ok([left, right])
 }
 
 impl CandidatePreview {
     /// UI summaries and per-presentation selection IDs, not bytes or workflows.
     pub fn requests(&self) -> impl Iterator<Item = &ReadRequest> {
-        self.0.iter().flat_map(StagedPreview::requests)
+        self.trees.choices().map(|c| &c.request)
     }
 
-    pub fn present(self, attention: Attention) -> EonResult<Confirmation<Self>> {
-        Confirmation::start(self, attention)
+    pub fn present(self, attention: Attention) -> EonResult<Confirmation<CandidatePresentation>> {
+        Confirmation::start_with(attention, || {
+            self.trees
+                .read_previews(self.workflows)
+                .map(CandidatePresentation)
+        })
     }
 }
 
@@ -53,7 +79,7 @@ pub enum CandidateDecision {
     Confirm(TaskId),
 }
 
-impl Confirmation<CandidatePreview> {
+impl Confirmation<CandidatePresentation> {
     /// Consume both alternatives. A stale/foreign selection, denial, loss of
     /// attention or expiry cannot release even the first candidate.
     pub fn select(

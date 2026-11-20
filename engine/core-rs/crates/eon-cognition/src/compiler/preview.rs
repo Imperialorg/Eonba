@@ -96,14 +96,17 @@ pub struct Confirmation<T = StagedPreview> {
 
 impl<T> Confirmation<T> {
     pub(super) fn start(preview: T, attention: Attention) -> EonResult<Self> {
-        Self::start_with(attention, || preview)
+        Self::start_with(attention, || Ok(preview))
     }
 
-    pub(super) fn start_with(attention: Attention, freeze: impl FnOnce() -> T) -> EonResult<Self> {
+    pub(super) fn start_with(
+        attention: Attention,
+        freeze: impl FnOnce() -> EonResult<T>,
+    ) -> EonResult<Self> {
         verify_attention(attention)?;
         let presented_at = Instant::now();
         Ok(Self {
-            preview: freeze(),
+            preview: freeze()?,
             presented_at,
         })
     }
@@ -162,5 +165,19 @@ mod compiler_tests {
         assert!(window_open(start, deadline - tick));
         assert!(!window_open(start, deadline));
         assert!(!window_open(start, deadline + tick));
+    }
+
+    #[test]
+    fn freezing_cannot_restart_the_consent_clock() {
+        let window = Confirmation::start_with(Attention::Verified, || {
+            std::thread::sleep(CONFIRMATION_WINDOW);
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            window
+                .approve(Decision::Confirm, Attention::Verified)
+                .is_err()
+        );
     }
 }

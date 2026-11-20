@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use eon_cognition::compiler::{
     Attention, CONFIRMATION_WINDOW, CandidateDecision, Decision, ReadSnapshot, ReadWorkspace,
-    checkout_candidates, compile, preview_candidates,
+    WorktreeStore, checkout_candidates, compile, preview_candidates,
 };
 use rustix::fs::Mode;
 
@@ -19,6 +19,12 @@ use super::objective;
 impl Fixture {
     fn workspace(&self, public: &[&str]) -> ReadWorkspace {
         ReadWorkspace::from_directory(File::open(self.root()).unwrap(), public).unwrap()
+    }
+
+    fn store(&self) -> WorktreeStore {
+        let scratch = self.path().join("scratch");
+        mkdir(&scratch);
+        WorktreeStore::from_directory(File::open(scratch).unwrap()).unwrap()
     }
 }
 
@@ -237,7 +243,9 @@ fn structured_alternatives_release_only_the_chosen_snapshot_and_validated_dag() 
     let ws = f.workspace(&["A", "B"]);
     let objective = objective("Read file A OR B");
     assert!(compile(&objective).is_err());
-    let candidates = preview_candidates(&objective, &ws).unwrap();
+    let candidates = preview_candidates(&objective, &ws, &f.store()).unwrap();
+    let scratch = f.path().join("scratch");
+    assert_eq!(fs::read_dir(&scratch).unwrap().count(), 2);
     let choices: Vec<_> = candidates.requests().collect();
     assert_eq!(
         choices.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
@@ -247,9 +255,9 @@ fn structured_alternatives_release_only_the_chosen_snapshot_and_validated_dag() 
     assert_ne!(id, choices[0].task_id);
     fs::remove_file(f.root().join("A")).unwrap();
     fs::write(f.root().join("B"), b"changed").unwrap();
-    let (workflow, reads) = candidates
-        .present(Attention::Verified)
-        .unwrap()
+    let window = candidates.present(Attention::Verified).unwrap();
+    assert_eq!(fs::read_dir(&scratch).unwrap().count(), 0);
+    let (workflow, reads) = window
         .select(CandidateDecision::Confirm(id.clone()), Attention::Verified)
         .unwrap()
         .into_parts();
@@ -271,6 +279,7 @@ fn ambiguous_candidate_grammar_and_capture_fail_as_a_unit() {
     write(&f.root().join("B"), b"b");
     write(&f.root().join("Private"), b"not approved");
     let ws = f.workspace(&["A", "B", "Missing"]);
+    let store = f.store();
     for intent in [
         "read whatever looks useful",
         "read file A",
@@ -284,13 +293,18 @@ fn ambiguous_candidate_grammar_and_capture_fail_as_a_unit() {
         "read file A or\nB",
         "read file A or B;run",
         "write file A or B",
+        "read file A or read file A",
+        "read file A or read file Missing",
+        "read file A or read file B then read file A",
+        "read file A then read file B or read file A",
+        "read file A or read file B or read file A",
     ] {
         assert!(
-            preview_candidates(&objective(intent), &ws).is_err(),
+            preview_candidates(&objective(intent), &ws, &store).is_err(),
             "{intent}"
         );
         assert!(
-            checkout_candidates(&objective(intent), &ws).is_err(),
+            checkout_candidates(&objective(intent), &ws, &store).is_err(),
             "{intent}"
         );
     }
@@ -302,7 +316,8 @@ fn candidate_presentation_is_one_window_not_refreshable_on_selection() {
     write(&f.root().join("A"), b"a");
     write(&f.root().join("B"), b"b");
     let ws = f.workspace(&["A", "B"]);
-    let choices = || preview_candidates(&objective("read file A or B"), &ws).unwrap();
+    let store = f.store();
+    let choices = || preview_candidates(&objective("read file A or B"), &ws, &store).unwrap();
     assert!(choices().present(Attention::Unverified).is_err());
     let window = || {
         let pair = choices();

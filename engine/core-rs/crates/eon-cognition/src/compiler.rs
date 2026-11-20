@@ -6,17 +6,24 @@
 //! ```
 //!
 //! `read file` requests the first 4096 bytes; `at offset` defaults to zero.
+//! The Linux candidate APIs also accept two single reads separated by `or`,
+//! including the shorthand `read file A or B`. Neither is selected by default.
 //! Unrecognized input is never forwarded to an inference engine, shell or tool.
 
 #[cfg(target_os = "linux")]
 mod candidates;
 #[cfg(target_os = "linux")]
 mod checkout;
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../tests/compiler_tests/fixture.rs"]
+mod fixture;
 mod preview;
 #[cfg(target_os = "linux")]
 mod snapshot;
 #[cfg(target_os = "linux")]
 mod workspace;
+#[cfg(target_os = "linux")]
+mod worktree;
 
 use eon_kernel::model::{Objective, Task, TaskSpec, TaskType, Workflow};
 use eon_kernel::resource::{CanonicalResourceKey, Demand, Requirement, ResourceRank};
@@ -24,7 +31,9 @@ use eon_primitives::{EonError, EonResult, TaskId, WorkflowId};
 use serde_json::json;
 
 #[cfg(target_os = "linux")]
-pub use candidates::{CandidateDecision, CandidatePreview, preview_candidates};
+pub use candidates::{
+    CandidateDecision, CandidatePresentation, CandidatePreview, preview_candidates,
+};
 #[cfg(target_os = "linux")]
 pub use checkout::{
     CheckoutChoice, CheckoutPresentation, PrivateCheckouts, SelectedCheckout, checkout_candidates,
@@ -37,6 +46,8 @@ pub use preview::{
 pub use snapshot::ReadSnapshot;
 #[cfg(target_os = "linux")]
 pub use workspace::ReadWorkspace;
+#[cfg(target_os = "linux")]
+pub use worktree::{CheckoutBacking, CheckoutDirectory, WorktreeStore};
 
 pub const MAX_INTENT_BYTES: usize = 2048;
 pub const MAX_READS: usize = 8;

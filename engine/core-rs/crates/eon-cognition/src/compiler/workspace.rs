@@ -75,6 +75,11 @@ impl ReadWorkspace {
         }
     }
 
+    pub(super) fn root_identity(&self) -> EonResult<(u64, u64)> {
+        let m = self.root.metadata().map_err(failed)?;
+        Ok((m.dev(), m.ino()))
+    }
+
     fn locate<'a>(&self, path: &'a str) -> EonResult<CheckedPath<'a>> {
         self.authorize(path)?;
         let mut dir = self.root.try_clone().map_err(failed)?;
@@ -237,13 +242,9 @@ pub(super) fn failed(error: impl Into<io::Error>) -> EonError {
 }
 
 #[cfg(test)]
-#[path = "../../tests/compiler_tests/fixture.rs"]
-mod fixture;
-
-#[cfg(test)]
 mod compiler_tests {
+    use super::super::fixture::{Fixture, mkdir, write};
     use super::*;
-    use fixture::{Fixture, mkdir, write};
     use std::fs::{Permissions, rename, set_permissions};
     use std::os::unix::fs::PermissionsExt;
 
