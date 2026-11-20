@@ -290,6 +290,29 @@ fn preview_changes_only_unique_top_level_block_and_never_writes() {
 }
 
 #[test]
+fn python_preview_rejects_conflicting_declarations_but_preserves_unrelated_ones() {
+    let f = Fixture::new();
+    let w = Workspace::open(&f.0).unwrap();
+    let path = f.0.join("a.py");
+    let ordinary = "async def f(): return 1\n";
+    let replacement = "async def f(): return 3";
+    for conflict in ["@wrap\ndef f(): return 2\n", "class f: pass\n", "@wrap\nclass f: pass\n"] {
+        for source in [format!("{ordinary}{conflict}"), format!("{conflict}{ordinary}")] {
+            fs::write(&path, &source).unwrap();
+            assert!(preview_replacement(&w, "a.py", "f", replacement).is_err(), "{source}");
+        }
+    }
+
+    let prefix = "@wrap\nclass C:\n    def f(self): pass\n\n";
+    let suffix = "\n@wrap\nasync def g(): pass\n";
+    let source = format!("{prefix}{ordinary}{suffix}");
+    fs::write(&path, &source).unwrap();
+    let preview = preview_replacement(&w, "a.py", "f", replacement).unwrap();
+    assert_eq!(preview.after, format!("{prefix}{replacement}\n{suffix}"));
+    assert_eq!(fs::read_to_string(path).unwrap(), source);
+}
+
+#[test]
 fn ecma_preview_requires_one_unambiguous_concrete_top_level_declaration() {
     let f = Fixture::new();
     let w = Workspace::open(&f.0).unwrap();

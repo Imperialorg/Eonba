@@ -314,6 +314,8 @@ pub fn function_blocks(lang: Lang, source: &str) -> EonResult<Vec<FunctionBlock>
 
 /// Exact, unique top-level function in a syntactically complete source. Unlike the
 /// inspection API this never selects a method, a nested function or a recovered tree.
+/// In Python, uniqueness is checked among function and class declarations directly in the module,
+/// including decorated ones. Only undecorated functions are editable; assignments are not analyzed.
 pub fn checked_top_level_function(lang: Lang, source: &str, symbol: &str) -> EonResult<FunctionBlock> {
     let tree = parse(lang, source)?;
     let root = tree.root_node();
@@ -322,13 +324,23 @@ pub fn checked_top_level_function(lang: Lang, source: &str, symbol: &str) -> Eon
     }
     let mut cursor = root.walk();
     let mut found = root.named_children(&mut cursor).filter(|node| {
-        node.kind() == lang.function_kind()
-            && node.child_by_field_name("name").is_some_and(|name| &source[name.byte_range()] == symbol)
+        let definition = match (lang, node.kind()) {
+            (Lang::Python, "decorated_definition") => node.child_by_field_name("definition"),
+            (Lang::Python, "class_definition") => Some(*node),
+            (_, kind) if kind == lang.function_kind() => Some(*node),
+            _ => None,
+        };
+        definition
+            .and_then(|def| def.child_by_field_name("name"))
+            .is_some_and(|name| &source[name.byte_range()] == symbol)
     });
-    let node = found.next().ok_or_else(|| parse_error("top-level function not found"))?;
+    let first = found.next();
     if found.next().is_some() {
         return Err(parse_error("ambiguous top-level function"));
     }
+    let node = first
+        .filter(|node| node.kind() == lang.function_kind())
+        .ok_or_else(|| parse_error("top-level function not found"))?;
     Ok(FunctionBlock {
         name: symbol.into(),
         start_line: node.start_position().row + 1,
