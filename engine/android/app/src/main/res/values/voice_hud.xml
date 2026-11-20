@@ -1,7 +1,16 @@
 <resources>
     <bool name="voice_hud_supported">false</bool>
-    <string name="voice_session_status">EON assistant session is open.\nMicrophone, screen capture and context inspection are off.</string>
+    <string name="voice_hud_title">EON · Mic off</string>
+    <string name="voice_hud_ready">Session open</string>
+    <string name="voice_hud_checking">Checking model profile…</string>
+    <string name="voice_hud_checked">Profile check complete</string>
+    <string name="voice_hud_failed">Profile check unavailable</string>
+    <string name="voice_hud_recommendation">Suggested profile: %1$s</string>
+    <string name="voice_hud_privacy">This session takes no audio, screenshots or app context. The dots show session open, profile check requested, and result. The optional check uses device memory size; it does not load a model.</string>
+    <string name="voice_hud_expand">Show session details</string>
+    <string name="voice_hud_collapse">Hide session details</string>
+    <string name="voice_hud_check">Check model profile</string>
     <string name="open_eon_controls">Open EON controls</string>
     <string name="close_voice_session">End session</string>
-    <string name="voice_hud_help">With EON selected, use your device’s assistant gesture while unlocked to open the session controls. Nothing is recorded.</string>
+    <string name="voice_hud_help">With EON selected, use your assistant gesture while unlocked to open the floating session card. Expand it for a local model profile check, or end the session with the close button. Nothing is recorded.</string>
 </resources>
