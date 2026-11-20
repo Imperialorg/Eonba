@@ -13,8 +13,10 @@ blake3 = "1"
 bytes = "1"
 eon-primitives = { path = "../eon-primitives" }
 eon-voice = { path = "../eon-voice", optional = true, default-features = false, features = ["onnx-speech"] }
+if-addrs = "0.15.0"
 iroh = "1.4"
 loro = "1"
+mdns-sd = { version = "0.22.0", default-features = false, features = ["async"] }
 postcard = { version = "1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }

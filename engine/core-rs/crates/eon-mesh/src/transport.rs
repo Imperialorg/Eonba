@@ -5,10 +5,16 @@
 //! unless a peer address points elsewhere. Protocol negotiation uses an ALPN string, so a peer that does not speak it
 //! is refused during the handshake.
 
+use std::net::{SocketAddr, SocketAddrV4};
+
+use crate::lan::permits;
 use crate::qos::TrafficClass;
 use bytes::Bytes;
 use eon_primitives::{EonError, EonResult};
-use iroh::endpoint::{presets::Minimal, Connection, Endpoint};
+use if_addrs::Ifv4Addr;
+use iroh::endpoint::{
+    presets::Minimal, BindOpts, Builder, Connection, Endpoint, NetReportConfig, PortmapperConfig,
+};
 use iroh::{EndpointAddr, EndpointId, RelayMode, SecretKey};
 
 /// Application protocol identifier. Peers that do not offer it are refused during the handshake.
@@ -28,29 +34,50 @@ fn transport_err(operation: &str, reason: impl std::fmt::Display) -> EonError {
 pub struct PeerNode {
     endpoint: Endpoint,
     paired: Option<EndpointId>,
+    lan: Option<Ifv4Addr>,
 }
 
 impl PeerNode {
     /// Binds an endpoint that accepts `alpn` connections and uses no relays.
     pub async fn start_with_alpn(alpn: &[u8]) -> EonResult<Self> {
-        Self::bind(alpn, None, None).await
+        Self::bind(Endpoint::builder(Minimal), alpn, None, None).await
     }
 
     /// Both devices provision each other's public key out of band. An address announcement
     /// alone never authorizes a peer. Reuse the local secret when reconnecting after restart.
     pub async fn start_paired(secret: SecretKey, remote: EndpointId) -> EonResult<Self> {
-        Self::bind(PAIRED_ALPN, Some(secret), Some(remote)).await
+        Self::bind(Endpoint::builder(Minimal), PAIRED_ALPN, Some(secret), Some(remote)).await
     }
 
-    async fn bind(alpn: &[u8], secret: Option<SecretKey>, paired: Option<EndpointId>) -> EonResult<Self> {
-        let mut builder = Endpoint::builder(Minimal)
-            .alpns(vec![alpn.to_vec()])
-            .relay_mode(RelayMode::Disabled);
+    pub(crate) async fn bind_paired_lan(
+        secret: SecretKey,
+        remote: EndpointId,
+        local: &Ifv4Addr,
+    ) -> EonResult<(Self, SocketAddrV4)> {
+        let builder = Endpoint::builder(Minimal)
+            .clear_ip_transports()
+            .portmapper_config(PortmapperConfig::Disabled)
+            .net_report_config(NetReportConfig::minimal())
+            .bind_addr_with_opts(
+                (local.ip, 0),
+                BindOpts::default().set_prefix_len(local.prefixlen).set_is_default_route(false),
+            )
+            .map_err(|e| transport_err("bind", e))?;
+        let mut node = Self::bind(builder, PAIRED_ALPN, Some(secret), Some(remote)).await?;
+        node.lan = Some(local.clone());
+        match node.endpoint.bound_sockets().as_slice() {
+            [SocketAddr::V4(addr)] if *addr.ip() == local.ip => Ok((node, *addr)),
+            _ => Err(transport_err("bind", "expected a single LAN socket")),
+        }
+    }
+
+    async fn bind(builder: Builder, alpn: &[u8], secret: Option<SecretKey>, paired: Option<EndpointId>) -> EonResult<Self> {
+        let mut builder = builder.alpns(vec![alpn.to_vec()]).relay_mode(RelayMode::Disabled);
         if let Some(secret) = secret {
             builder = builder.secret_key(secret);
         }
         let endpoint = builder.bind().await.map_err(|e| transport_err("bind", e))?;
-        Ok(Self { endpoint, paired })
+        Ok(Self { endpoint, paired, lan: None })
     }
 
     pub fn paired_id(&self) -> Option<EndpointId> {
@@ -117,6 +144,10 @@ impl PeerNode {
             .accept()
             .await
             .ok_or_else(|| transport_err("accept", "endpoint closed"))?;
+        if self.lan.as_ref().is_some_and(|lan| !permits(lan, &incoming.remote_addr().into())) {
+            incoming.ignore();
+            return Err(EonError::SecurityViolation("off-link mesh source".into()));
+        }
         let connection = incoming.await.map_err(|e| transport_err("handshake", e))?;
         if self.paired.is_some_and(|id| id != connection.remote_id()) {
             connection.close(403u32.into(), b"unpaired");
@@ -129,6 +160,11 @@ impl PeerNode {
         let peer = peer.into();
         if self.paired.is_some_and(|id| id != peer.id) {
             return Err(EonError::SecurityViolation("unpaired mesh destination".into()));
+        }
+        if self.lan.as_ref().is_some_and(|lan| {
+            peer.addrs.is_empty() || !peer.addrs.iter().all(|path| permits(lan, path))
+        }) {
+            return Err(EonError::SecurityViolation("off-link mesh destination".into()));
         }
         let alpn = if self.paired.is_some() { PAIRED_ALPN } else { ALPN };
         self.endpoint
