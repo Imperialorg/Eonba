@@ -57,7 +57,7 @@
   - **Files**: `src/identity.rs`, `src/permissions.rs`, `src/credentials.rs`, `src/scrubber.rs`
   - **Requirements**: Ownership identities (System, User, EphemeralAgent). Permission bitflags (`READ_WORKSPACE`, `MUTATE_WORKSPACE`, `EXECUTE_PROCESS`, `CYBER_OPERATIONS`, `NETWORK_ACCESS`, `DEVICE_CONTROL`, `SPAWN_SUBAGENT`). Opaque credential handles (`secret://<vault_key>`) with late-binding memory resolution from hardware OS enclaves (Android Keystore, Windows DPAPI, Linux Keyring). In-flight `JournalScrubber` redacting tokens and high-entropy strings ($\mathcal{H} > 4.5$) before journal disk commitment.
   - **Journal verification**: `cargo test --locked -p eon-foundation` checks the stored frame and its replay for recognized credential fixtures, including unlabelled high-entropy hex. This does not guarantee detection of arbitrary secrets.
-  - **Platform status**: The Linux native keyring test passed. The Android Rust broker retains owner-scoped encrypted entries and binds only to child stdin through a dedicated AndroidKeyStore alias, separate from inspection grants. Signed debug APKs and three ABI builds passed. CI selects the Windows DPAPI tests, the two-phase Android inspection test and the native vault instrumentation. Native Windows and device execution remain unverified; an emulator does not attest physical hardware.
+  - **Platform status**: Linux keyring and Android API 35 emulator tests passed. After force-stop, the original AndroidKeyStore key decrypted the saved inspection probe. The separate native vault passed its Rust broker and child-stdin binding test. Native Windows DPAPI still needs a Windows run; the emulator does not attest physical hardware backing.
 
 ---
 
@@ -138,8 +138,8 @@
   - **Files**: `src/providers/lsp.rs`, `src/patch/ast_patcher.rs`
   - **Requirements**: Embedded JSON-RPC LSP client multiplexer for `rust-analyzer`, `clangd`, `kotlin-language-server`, `pyright`, and `vtsls` providing sub-50ms diagnostic queries (`goto_definition`, `find_references`, `hover_type`, `diagnostics`). Symbol-scoped AST search/replace block patcher replacing fragile line-number diffs.
   - **Unit Tests**: `cargo test -p eon-capability lsp_and_patcher_tests`.
-  - **Verified subset**: On a two-file C project, confined clangd 18 and 21 answered cross-file definitions, references, hover and fresh diagnostics. Warm diagnostic p95 was below 3 ms, but cold queries exceeded 50 ms. The other four production servers have not passed this gate.
-  - **Remaining servers**: Confined rust-analyzer exited during initialization when the worker denied `clone3`. Node exited before loading Pyright when the worker denied `fcntl(0, F_GETFL)`. Neither produced diagnostics; Kotlin Language Server and vtsls remain untested. The worker policy was not relaxed.
+  - **Verified subset**: Confined clangd and rust-analyzer answered cross-file definitions, references, hover and fresh diagnostics on two-file projects. A task-capped rust-analyzer 1.99.1 worker took 122.8 ms from launch to its first diagnostic, 0.117 ms warm diagnostic p95 and 0.783 ms edit-to-diagnostic p95. It sees only supplied snapshots of a dependency-free library, not the workspace or Cargo build scripts.
+  - **Remaining servers**: Pyright, Kotlin Language Server and vtsls have not passed this gate. Cold queries do not meet the 50 ms target.
 
 ---
 
@@ -173,11 +173,12 @@
   - **Unit Tests**: `cargo test -p eon-voice barge_in_tests` verifying instantaneous buffer flush.
   - **Verified backend**: While committed Kokoro speech was playing, a held-out owner recording triggered `INTERRUPTED_BY_USER`. An independent 48 kHz Linux null-sink monitor matched the interrupted waveform and observed sustained silence within 2.48 ms of authorization in all three trials. Authorization itself took 3.300 seconds of recorded speech. Not an onset-to-stop or physical speaker latency claim.
 
-- [ ] **Task 5.5: AEC Loopback & Biometric Speaker Verification**
+- [x] **Task 5.5: AEC Loopback & Biometric Speaker Verification**
   - **Crate**: `eon-voice`
   - **Files**: `src/aec.rs`, `src/speaker_id.rs`
   - **Requirements**: `webrtc-audio-processing` reverse reference stream fed from the 24kHz TTS playback ring buffer to eliminate self-interruption on open speaker. WeSpeaker 256-dim cosine similarity check (< 2ms) to prevent crowd/TV false barge-in triggers.
   - **Unit Tests**: `cargo test -p eon-voice aec_and_speaker_id_tests`.
+  - **Verified on recorded Linux duplex audio**: With a 24 kHz post-render reference and two simulated echo paths, neither echo alone nor independently voiced competing speech interrupted playback. Held-out owner speech did at 800 ms, with the original 0.35 threshold. The 256-value cosine check took 7.69 µs p95 of batch means; obtaining the embedding took 13.37 ms median. This is a controlled two-voice test, not a population-wide crowd/TV or physical output latency result.
 
 ---
 
@@ -188,7 +189,7 @@
   - **Files**: `src/router.rs`, `src/reflex.rs`, `src/tactical_slm.rs`, `src/strategic_frontier.rs`
   - **Requirements**: Route latency < 20ms for Tier 0 reflex, < 120ms for Tier 1 local SLM. Dual-stream split: silent `<think>...</think>` scratchpad routed to HUD/CLI, post-`</think>` tokens to TTS.
   - **Unit Tests**: `cargo test -p eon-cognition router_tests`.
-  - **Latency evidence**: On Linux, 2,000 complete reflex turns had a p95 of 621 ns. The opt-in `router_native_gate` times 40 complete local responses after warmup and requires the pinned P0 GGUF. That model was unavailable here, so there is no Tier 1 latency result.
+  - **Latency evidence**: On Linux, 2,000 complete reflex turns had a p95 of 621 ns. With the pinned P0 GGUF, 40 warm Tier 1 turns produced validated speech. Their p50 was 481.48 ms, p95 531.10 ms and max 550.23 ms. The 120 ms target was not met.
 
 - [x] **Task 6.2: Appraisal Engine & Hybrid Cognitive Memory**
   - **Crate**: `eon-cognition`
@@ -215,7 +216,7 @@
   - **Files**: `src/omniparser.rs`, `src/keyframe_sampler.rs`, `src/ring_buffer.rs`, `src/lib.rs`
   - **Requirements**: OmniParser-v2 (< 30ms YOLO element detector + PaddleOCR ONNX) for UI grounding when accessibility trees are obfuscated. Adaptive 1–5 FPS video keyframe sampler and 30-second rolling visual memory in shared memory. Integration with `Qwen2.5-VL-3B-Instruct`.
   - **Unit Tests**: `cargo test -p eon-vision vision_tests`.
-  - **Verified subset**: Each accepted Linux shared frame gets a separate sealed anonymous file. Live histories expire producer descriptors while idle. The opt-in CPU PaddleOCR backend recognized five labels on two independently rendered JPEGs and located them in pixel coordinates. It can read one selected frame without access to the ring. Screen capture, icon detection, VLM inference and the 30 ms detector target remain unverified.
+  - **Verified subset**: PaddleOCR reads text and the opt-in OmniParser detector localizes unlabeled icons on one selected, sealed JPEG without access to its history. Two drawn icons were located and a blank image produced none. The complete CPU detector path took 291.40 ms warm p95, above the 30 ms target. No VLM result.
 
 ---
 
@@ -228,12 +229,14 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/ast/tree_sitter_engine.rs`, `src/ast/synthesizer.rs`, `src/ast/self_healing_compiler.rs`, `src/ast/repomap.rs`, `src/ast/dap.rs`
   - **Requirements**: Tree-sitter AST parsing across Rust, Kotlin, C/C++, Python, TypeScript. PageRank architectural RepoMap generator. Embedded Debug Adapter Protocol (DAP) client bridge (`dev.dap`) interfacing with `codelldb`, `debugpy`, and `jdwp` to inspect live stack frames, conditional breakpoints, and heap allocations. Automated compiler diagnostic capture and localized syntax tree repair.
   - **Unit Tests**: `cargo test -p eon-cyber ast_tests`, `self_healing_tests`, `dap_tests`.
+  - **Verified subset**: A bounded repair loop uses compiler diagnostics or Python AST lint on a fixed benign corpus. Across four languages, 48 of 50 cases passed independent behavior checks after one edit, 49 within three revisions. Kotlin uses guarded token edits. This does not supply the remaining analysis grammars, RepoMap or live debugger integrations.
 
 - [ ] **Task 7.2: Defensive source review, repair proposals and platform telemetry**
   - **Crate**: `eon-cyber`
   - **Files**: `src/defense/taint_auditor.rs`, `src/defense/auto_patch.rs`, `src/defense/telemetry.rs`
   - **Requirements**: Review authorized source for patterns associated with CWE-119, CWE-89, CWE-362 and observable timing differences. Produce reviewable constant-time and bounds-checking edits, without executing submitted code or patching a running process. Collect opt-in, metadata-only telemetry on supported Linux/Android eBPF, Windows ETW and stock Android backends. Distinguish observed evidence from unsupported rules and unavailable sensors.
   - **Verification**: Exercise both matching and nonmatching source, compile and test the reviewed repair, check that reports do not disclose the source, and test each claimed telemetry backend on its supported host. Local `/proc/self/io` counters do not establish eBPF, ETW or VPN coverage.
+  - **Stock Android evidence**: An opted-in local action measured 334 ms of process-wide CPU time on an API 35 emulator. The app does not open a network connection, accept a target PID or persist a baseline. No Android eBPF, VPN or Windows ETW result.
 
 - [x] **Task 7.3: Offline dependency and advisory assessment**
   - **Crate**: `eon-cyber`
@@ -258,12 +261,12 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Unit Tests**: `cargo test -p eon-mesh quic_tests`, `spatial_election_tests`.
   - **Verified on a two-node Linux virtual LAN**: Independently pinned peers discovered one another over mDNS, agreed on the leader and suppressed follower playback. Three consecutive runs passed the strict 100-RPC gate; maxima were 8.502, 0.566 and 0.363 ms. One earlier run missed at 10.062 ms. This measures an established connection on isolated veth interfaces, not connection setup, a physical Wi-Fi link or a hard real-time guarantee.
 
-- [ ] **Task 8.2: Split-Inference Coordinator**
+- [x] **Task 8.2: Split-Inference Coordinator**
   - **Crate**: `eon-mesh`
   - **Files**: `src/split_inference.rs`
   - **Requirements**: Dynamically streams speech tokens from mobile edge to workstation compute node, streaming verified results back to edge audio driver. Seamless offline fallback.
   - **Unit Tests**: `cargo test -p eon-mesh split_inference_tests`.
-  - **Verified subset**: An opted-in, pinned Zipformer worker returns interim text before the edge finishes sending the authorized PCM. If the connection breaks after a preview, the edge transcribes the original recording locally. The edge sends PCM, not tokens; previews cannot authorize actions and there is no playback path.
+  - **Verified native edge readback**: With separate consent for one recording, the edge streamed actual Zipformer text-token IDs to a pinned worker, checked the returned caption and pronunciation against its local result, and queued only the verified final clause. Partition or corruption preserved local readback; partials granted no playback authority. A matching lease released 324,000 samples to a private 48 kHz Linux CPAL output. Both peer roles ran on Linux, not on physical mobile hardware. This is dictation readback, not general remote command execution.
 
 - [x] **Task 8.3: CRDT State Synchronizer**
   - **Crate**: `eon-mesh`
@@ -276,7 +279,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/transport/iroh_node.rs`, `src/transport/qos_lanes.rs`
   - **Requirements**: `iroh` integration for Ed25519 node addressing, zero-config STUN hole-punching and DERP relay routing across 5G/Wi-Fi roaming. 4-class QUIC QoS prioritization using RFC 9221 datagrams for Class 0 voice/barge-in (< 5ms) and reliable streams for Class 1/2/3. Wire serialization via `proto/eon.proto`.
   - **Unit Tests**: `cargo test -p eon-mesh iroh_and_qos_tests`.
-  - **Verified subset**: A private relay carried all four traffic classes between mutually pinned peers, including audio, an epoch event, a Loro delta and verified bulk chunks. Relay counters confirmed actual transit. There was no public discovery, STUN, external TLS relay test or carrier roaming measurement.
+  - **Verified subset**: Mutually pinned peers reconnected through the original private relay after an outage, retained the bandwidth budget and exchanged all four traffic classes without replaying unacknowledged frames. Relay counters confirmed transit. This is not direct migration, STUN, external TLS or carrier roaming.
 
 ---
 
@@ -299,13 +302,13 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/main/kotlin/com/eon/android/accessibility/EonAccessibilityService.kt`, `ScreenInspector.kt`
   - **Requirements**: Traverses active `AccessibilityNodeInfo` hierarchy, finds target buttons/inputs, executes clicks/scrolls, provides coordinate fallback.
   - **Unit Tests**: Android test harness with simulated UI hierarchies.
-  - **Verified subset**: On API 34+ a private EON demo offers two actions, increment its counter or scroll its sample list. Each requires a separate, expiring confirmation tied to that control. The system inspection shortcut remains read-only. Host tests passed; the device scenarios have only been compiled.
+  - **Verified subset**: A private EON demo can review one counter click or list scroll, use a local hit test if the native action is absent, and check the resulting change. It never retries an attempted action or dispatches gestures outside the activity. Fifteen host tests and the clean API 35 denied scenario passed. The positive device scenario still needs an operator-selected assistant and enabled service and shortcut.
 
 - [ ] **Task 9.4: Persistent Overlay HUD & Visualizer**
   - **Directory**: `clients/android/overlay/`
   - **Files**: `src/main/kotlin/com/eon/android/ui/EonOverlayManager.kt`, `AudioVisualizerView.kt`
   - **Requirements**: Persistent unobtrusive floating presence. Visualizes thought state, active listening wave, and task completion notices.
-  - **Verified subset**: The user-invoked assistant session shows a collapsible card for an optional local model-profile check. Dismissal or revocation invalidates outstanding results. Host tests verify the state transitions, not device presentation. There is no live task feed or microphone waveform.
+  - **Verified subset**: The collapsible assistant card can show progress and completion for a local model-profile check or analysis of an OS-installed notification tone. On a clean API 35 emulator the production decoder produced levels, cancellation stopped delivery, and the unattached view displayed and cleared the result. This was not an OS-invoked assistant session, live task feed or microphone waveform.
 
 - [ ] **Task 9.5: Native Digital Assistant Role & OS Survival (`ROLE_ASSISTANT`)**
   - **Directory**: `clients/android/app/`
@@ -354,3 +357,4 @@ The security work in this roadmap is defensive: inspect authorized code, depende
     3. **Defensive regression suite**: Use labeled source-code fixtures and patched counterparts to check detection, false positives, redaction, and remediation without constructing exploits or executing target code.
     4. **Noisy Duplex Audio Suite**: Synthetic audio benchmark with heavy acoustic background noise (coffee shop babble, street traffic, television dialog); asserts zero false barge-ins via WeSpeaker speaker verification and TTFA < 200ms.
   - **Acceptance Criteria**: `cargo test --test eval_harness` executes the complete evaluation suite with 100% pass rate.
+  - **Repair result**: Manual 06 §3.6 records the toolchains, exact corpus and per-language outcomes. The 96% one-edit result clears the repair threshold but does not establish a noisy-scene TTFA below 200 ms or a passing combined evaluation.

@@ -188,6 +188,32 @@ Spawn 3 in-process `iroh 1.4` nodes (`Phone`, `Workstation`, `Server`) over a vi
 
 ---
 
+### 3.6 Benign polyglot repair (7.1 / 10.6)
+
+This is a closed local benchmark, not a way to run a submission. On Linux, put `cargo`, `rustc`, a native linker, `kotlinc`, `java`, `python3`, `tsc` and `node` on `PATH`. Use an installed Kotlin/JVM distribution with its standard library and a populated Cargo cache for `--offline`. From this checkout:
+
+```bash
+R=/home/runner/work/Eonba/Eonba
+cargo build --locked --offline --manifest-path "$R/engine/core-rs/Cargo.toml" -j2 -p eon-cyber --no-default-features --bin eon-repair-edit
+cargo test --locked --offline --manifest-path "$R/engine/core-rs/Cargo.toml" -j2 -p eon-cyber --no-default-features --test benign_repair
+python3 -B -m unittest discover -s "$R/scripts/eval" -p test_polyglot_repair.py
+python3 -B "$R/scripts/eval/polyglot_repair.py"
+```
+
+The only selector is `--language rust|kotlin|python|typescript`. `scripts/eval/repair/corpus/` contains 50 labeled subjects and separately authored behavior checks. Digests pin both **inputs**, not proposed repairs. Test vectors within a subject count only once.
+
+| Partition (tested tools) | Diagnostic / edit selection | Passed in one edit | Passed within loop |
+|---|---|---:|---:|
+| Rust (rustc 1.99.1, edition 2021 subjects) | rustc JSON spans and suggestions; tree-sitter validates the revision | 16/17 | 16/17 |
+| Kotlin (kotlinc-jvm 2.4.21, JDK 17) | K2 diagnostic names, positions and types; guarded token edits, **not** a Kotlin tree-sitter grammar | 10/10 | 10/10 |
+| Python (CPython 3.12.3) | Semantic lint on the standard-library AST; localized edits | 12/12 | 12/12 |
+| TypeScript (tsc 7.0.2, Node 24.22.1) | Strict ES2022 `.ts` diagnostics and TypeScript tree-sitter nodes; not JS/TSX | 10/11 | 11/11 |
+| **Total** | | **48/50 (96%)** | **49/50 (98%)** |
+
+Each baseline must have a subject diagnostic; for Python the original must also fail the independent behavior checks. Each iteration gets the current subject and diagnostic, not the label, checks, expected outputs or a fixed source file. There is one deterministic trajectory, at most three revisions, no behavior-guided search. A pass requires a clean diagnostic pass **and** successful execution of the checks. The TypeScript date subtraction needed two revisions (one per operand). The Rust format-string case stays in the denominator: knowing an argument is unused doesn't determine where to put it. Exit 0 requires strictly over 80% in one edit and no mislabeled baseline or behavior failure; infrastructure failure does not produce a complete score.
+
+Compilation and execution use fresh mode-0700 work areas under `engine/core-rs/target`, fixed argument vectors, bounded files/logs, CPU limits, 45-second child deadlines and a 15-minute suite deadline. No source path, compiler flags, command, debugger, network service or model is accepted from a submitter. This trusts the checkout and installed tools; it is **not** an untrusted-code sandbox or a general SWE-bench score. It does not extend the CPG or LSP dialect sets, exercise a DAP bridge, or modify historical kernel fixtures.
+
 ## 4. Master Phased Execution Playbook (Order of Implementation)
 
 Follow this dependency-ordered sequence. Do **not** skip ahead to higher-level crates until the lower-level crate compiles cleanly (`cargo clippy -- -D warnings`) and passes its gate tests:

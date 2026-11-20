@@ -167,7 +167,7 @@ for the operator-installed image, never a project executable.
 
 ```bash
 set -euo pipefail
-manifest=/home/runner/work/Eonba/Eonba/engine/core-rs/Cargo.toml
+manifest="$(git rev-parse --show-toplevel)/engine/core-rs/Cargo.toml"
 exe=$(rustup which rust-analyzer)
 libs=$(ldd "$exe" | awk '$2=="=>"{print $3} $1~/^\//{print $1}' | paste -sd:)
 gate() {

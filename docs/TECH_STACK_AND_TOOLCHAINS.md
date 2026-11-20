@@ -138,12 +138,50 @@ From `engine/android`, using the SDK/NDK setup above:
 CARGO_TARGET_DIR="$PWD/../core-rs/target" ./gradlew --offline :app:test :app:assembleDebug
 python3 app/keystore_device_test.py --build-only
 "$ANDROID_HOME/platform-tools/adb" devices -l
-python3 app/keystore_device_test.py --serial emulator-5554  # substitute a clean disposable API 28+ device
+python3 app/keystore_device_test.py --serial "$SERIAL"  # only the disposable API 28+ emulator you just created
 ```
 
 The `android-debug` CI job runs the last command on a fresh API 35 x86_64 emulator. For a manual run, use a disposable target with neither EON package installed. Require both `PASS: issue` and `PASS: restart`. The first phase exercises authorization, invalidation and release, then encrypts a public fixture. After force-stop the second phase must decrypt that fixture with the surviving key, reject the old handle, and redeem a fresh one. An alias with the same name but a different key is not enough.
 
 JVM tests and `--build-only` do not exercise AndroidKeyStore. A passing emulator run does not attest physical hardware backing or verify the system shortcut UI.
+
+**Assistant HUD (API 31+, no microphone or media-library permission).** With EON already
+selected as assistant, invoke it while unlocked using the system assistant gesture. Expand
+the card and tap **Analyze built-in notification tone**. This measures the first notification
+sound on Android's **internal** media volume, not the user's selected ringtone, a recording,
+or audio from another app. Nothing plays. Each bar is a 100 ms PCM16 RMS level (the last
+can be shorter), on a fixed 0–100% full-scale axis. Progress counts measured windows, up to
+12; completion reports the highest RMS. An absent, unreadable or unsupported tone gives
+an unavailable result, not a sample waveform. Stop/clear, collapse, hide, lock or loss of the
+assistant binding retires the tone data. No levels or audio are saved.
+
+Two **distinct** instrumentation gates are available after building the APK:
+
+* **Clean stock device:** On a **new disposable** `system-images;android-35;google_apis;x86_64`
+  AVD, verify `adb -s "$SERIAL" emu avd name` matches the AVD you just created.
+  Run `python3 app/keystore_device_test.py --serial "$SERIAL" --demo-denied --stock-hud`.
+  Expect `PASS: issue`, `PASS: restart`, `demo=PASS-denied`, `voiceHud=PASS-stock`, and
+  `nativeVault=PASS`. The HUD gate checks EON is not selected, reads and cancels the real
+  built-in tone, and renders measured levels in an **unattached** production view. It
+  does not invoke a voice session.
+* **Selected-role session:** On a separate disposable, unlocked API 34+ AVD, an operator
+  must have installed the matching target APK and already chosen EON through Android's UI.
+  No accessibility service is needed. Leave the test APK uninstalled and run
+  `python3 app/keystore_device_test.py --preconfigured-hud-serial "$SERIAL"`. Follow its
+  prompt: invoke EON, expand, analyze, wait for completion, close, pause, and invoke again.
+  The observer must see a real completed graph, dismissal and a clean new card for
+  `voiceHud=PASS-session`. It never injects gestures, changes roles or grants permissions.
+
+**Optional process CPU measurement:** In EON, check **Measure EON process CPU during the next profile check**, then tap **Check model profile**. The box clears after one use or when leaving the activity. `SelfProcessCpu.measure` brackets that synchronous action with two `android.os.Process.getElapsedCpuTime()` reads only when requested. The result is a delta in **CPU milliseconds across all threads of the current app process**, not action latency, CPU percentage, or time attributable solely to that code. Equal positive counters can yield a genuine 0 ms at the counter's resolution. Missing/nonpositive, decreasing or out-of-order samples and intervals exceeding 10 seconds are unavailable. Neither sample leaves the call stack as a resumable baseline, so a process restart or reboot cannot produce a delta against old data. No listener, permission, persistent record or network access is needed.
+
+With matching debug and instrumentation APKs already installed on an explicitly selected **disposable AVD**, run the separate gate (no arguments or grants):
+
+```sh
+"$ANDROID_HOME/platform-tools/adb" -s "$DISPOSABLE_AVD_SERIAL" shell am instrument -w -r \
+  com.eon.assistant.keystoretest/com.eon.assistant.SelfCpuAcceptance
+```
+
+Require `selfCpu=PASS`, a positive `processCpuMs`, and `INSTRUMENTATION_CODE: -1`. This checks the production Android counter around bounded in-process CRC32 work; it does not exercise network/UID byte counters, VPN capture, ETW or eBPF.
 
 ---
 
@@ -257,25 +295,60 @@ Push normalized 16 kHz mono samples into one `start_utterance()` stream per utte
 ### 7.2 Mobile audio boundary
 The packaged `libeon_uniffi.so` uses the portable voice features. Its test input is one PCM frame supplied by the caller. The acceleration matrix above describes target backends, not a verified Android microphone connection to AAudio, Sherpa or a hardware execution provider.
 
-### Local still-image text grounding (`eon-vision`, opt-in)
+### Local still-image grounding (`eon-vision`, opt-in)
 
-The `paddle-ocr` feature runs the PP-OCRv4 detector and recognizer on CPU. `PaddleOcr::from_models` checks the **exact model bytes** and reads the character dictionary from the recognizer. The pins are from the two model entries in the `RECORD` of [RapidOCR's 1.4.4 wheel on PyPI](https://pypi.org/project/rapidocr-onnxruntime/1.4.4/#files). To provision the graphs from the repository root (Bash; no Python package is installed or imported):
+`paddle-ocr` reads text; `omniparser-icons` proposes icon regions. Both are off by default. They run locally with `ort` 2.0.0-rc.15 and do not capture screens, select frames automatically, authorize clicks or invoke a VLM.
+
+On x86-64 Linux, run this once in Bash from anywhere in the checkout to provision the CI-pinned ONNX Runtime 1.31.0 CPU library. Use the same shell for the model-specific commands below. The wheel is extracted, not installed.
 
 ```bash
-set -e
-models=perception/models/vision/ppocr-v4
+set -eu
+repo="$(git rev-parse --show-toplevel)"
+manifest="$repo/engine/core-rs/Cargo.toml"
+ort="$repo/engine/core-rs/target/vision-ort-1.31.0"
+mkdir -p "$ort"
+python3 -m pip download --only-binary=:all: --no-deps --require-hashes \
+  --implementation cp --abi cp312 --python-version 312 --platform manylinux_2_28_x86_64 \
+  --dest "$ort" -r <(echo 'onnxruntime==1.31.0 --hash=sha256:5e129d6c56abd53e659cb70f00a108d6824086470ff99c2e47a82e5786563db3')
+unzip -jo "$ort"/onnxruntime-1.31.0-*.whl 'onnxruntime/capi/libonnxruntime.so.1.31.0' -d "$ort"
+ln -sf libonnxruntime.so.1.31.0 "$ort/libonnxruntime.so.1"
+ln -sf libonnxruntime.so.1 "$ort/libonnxruntime.so"
+export ORT_LIB_PATH="$ort" ORT_PREFER_DYNAMIC_LINK=1 LD_LIBRARY_PATH="$ort${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+```
+
+#### PaddleOCR text lines
+
+The `paddle-ocr` feature runs the PP-OCRv4 detector and recognizer on CPU. `PaddleOcr::from_models` checks the **exact model bytes** and reads the character dictionary from the recognizer. The pins are from the two model entries in the `RECORD` of [RapidOCR's 1.4.4 wheel on PyPI](https://pypi.org/project/rapidocr-onnxruntime/1.4.4/#files). No Python package is installed or imported:
+
+```bash
+models="$repo/perception/models/vision/ppocr-v4"
 mkdir -p "$models"
 python3 -m pip download --only-binary=:all: --no-deps --require-hashes --dest "$models" \
   -r <(echo 'rapidocr-onnxruntime==1.4.4 --hash=sha256:971d7d5f223a7a808662229df1ef69893809d8457d834e6373d3854bc1782cbf')
 unzip -jo "$models/rapidocr_onnxruntime-1.4.4-py3-none-any.whl" \
   'rapidocr_onnxruntime/models/ch_PP-OCRv4_det_infer.onnx' \
   'rapidocr_onnxruntime/models/ch_PP-OCRv4_rec_infer.onnx' -d "$models"
-CARGO_BUILD_JOBS=6 cargo test --locked --manifest-path engine/core-rs/Cargo.toml \
+CARGO_BUILD_JOBS=6 cargo test --locked --manifest-path "$manifest" \
   -p eon-vision --features paddle-ocr
 ```
-
-Use the same ONNX Runtime 1.31 CPU library as the native speech tests above (`ORT_LIB_PATH`, `ORT_PREFER_DYNAMIC_LINK=1` and `LD_LIBRARY_PATH` for a pre-provisioned Linux library). After setup, inference needs no network. The feature is off by default.
 
 Call `recognize_jpeg(bytes, budget)` with an authorized still, or on Linux pass the result of `LiveSharedVisualMemory::select(sequence)` to `recognize_selected`. The latter reads only that sealed descriptor and checks the JPEG dimensions against the selected frame. Neither API captures a screen, accepts a JPEG filename, acts on text, or grants access. Results are untrusted horizontal text lines, in reading order, with half-open pixel bounds in the stored raster, not EXIF-rotated display coordinates. A blank image returns an empty list; selectors are never returned. This is not OmniParser widget/icon detection, VLM reasoning, or a click dispatcher.
 
 Each call accepts at most 8 MiB of JPEG, 4,096 pixels per axis and 4,194,304 pixels total. The detector input is at most 960×960; more than 64 text candidates is an error. Recognition runs one crop at a time (at most 960×48). A caller deadline of up to 10 seconds covers the whole frame; ORT cancellation is cooperative and bounded decode/resize steps can finish after the deadline. A timeout does not return a partial page. The real-model tests compare text and all four edges against independently rendered JPEGs and exercise an older sealed selection after its capture history stops.
+
+#### OmniParser-v2 icon proposals
+
+The [ONNX Community export commit](https://huggingface.co/onnx-community/OmniParser-v2.0_icon_detect/commit/f0fbccdf5f56c2a689f669b95cb4f67bcf4e12b1) identifies Microsoft's `icon_detect/model.pt` as its source. The FP32 ONNX graph uses embedded tensors and standard operators. As a provenance cross-check, the three classifier head weights and biases (`model.23.cv3.{0,1,2}.2`) matched raw storage pairs 594/595, 620/621 and 646/647 of the locked Microsoft archive exactly after FP16→FP32 conversion. Inference requires neither pickle nor upstream Python code. The graph is **AGPL-3.0**, outside all hardware profiles; review the license before distributing it.
+
+```bash
+python3 "$repo/scripts/download_models.py" --ids omniparser-v2-icon-detect-onnx
+cargo test --locked --manifest-path "$manifest" -p eon-vision --features omniparser-icons
+cargo test --release --locked --manifest-path "$manifest" -p eon-vision --features omniparser-icons \
+  --test still_icons selected_still_cpu_latency -- --ignored --exact --nocapture --test-threads=1
+```
+
+`omniparser::IconDetector::from_model` verifies the length and SHA-256 before passing any graph bytes to ORT. Reuse the detector. Pass an authorized JPEG byte slice to `detect_jpeg`, or on Linux pass the capture owner's explicit `LiveSharedVisualMemory::select(sequence)` result to `detect_selected`. `IconPage` returns single-class scores and half-open bounds in the stored raster, not names, text or clickability.
+
+- **Geometry and limits:** The model takes RGB `[1,3,640,640]` in `[0,1]`, with aspect-preserving resize and centered gray (114) padding. Its `[1,5,8400]` head returns center x/y, width/height and one class score. Scores below 0.25 are discarded; single-class NMS uses IoU 0.45. Boxes are clipped to content and projected back using the actual rounded resize dimensions. The input and deadline limits are the same as for OCR; more than 256 surviving icons is an error, not a truncated page.
+- **Functional checks:** Two independently rendered toolbar tiles matched their bounds (IoU ≥ 0.6) in both landscape and portrait. A blank image gave no proposals. Detecting an older sealed selection after the history stopped left the shared seek position unchanged. These cases are not a recall benchmark: borderless glyphs were not detected reliably.
+- **CPU latency:** The release test checks every result and gates nearest-rank warm p95 at **<30 ms**. It times a selected 801×317 JPEG from positional read through decode, letterbox, inference and NMS, with eight intra-op threads. On a shared AMD EPYC 9V45, first call was 74.53 ms; after four additional warmups, 30 measured calls gave p50 130.33 ms and **p95 291.40 ms: target not met**. These are end-to-end times, not isolated kernel or mobile measurements.
