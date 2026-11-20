@@ -4,6 +4,10 @@
 //! ASR. Enough content words must come back, so the test fails on silence or on speech that is not intelligible.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+#[path = "common/kokoro_release.rs"]
+mod kokoro_release;
 
 use eon_voice::asr::ZipformerAsr;
 use eon_voice::resample::resample_mono;
@@ -11,7 +15,7 @@ use eon_voice::tts::{KokoroTts, SAMPLE_RATE_HZ};
 use eon_voice::{
     LeaseId,
     barge_in::BargeIn,
-    commitment::{Bridge, BridgeCache, CommitmentGate},
+    commitment::{Bridge, BridgeCache, CommitmentGate, ReplyRenderer},
 };
 
 fn repo_models() -> PathBuf {
@@ -30,18 +34,28 @@ fn synthesized_speech_is_intelligible_to_the_pinned_asr() {
         tts_model.exists() && voice.exists(),
         "missing Kokoro assets; run: python3 scripts/download_models.py --ids kokoro-v1.0-int8 kokoro-v1.0-voice-af_heart"
     );
-    let mut tts = KokoroTts::load(&tts_model, &voice).expect("pinned Kokoro model must load");
+    let tts = KokoroTts::load(&tts_model, &voice).expect("pinned Kokoro model must load");
+    check_intelligibility(tts);
+}
+
+fn check_intelligibility(mut tts: KokoroTts) {
+    let start = Instant::now();
     let speech = tts
         .synthesize("Hello world, this is a test of the voice.", 1.0)
         .expect("synthesis must succeed");
 
     let seconds = speech.len() as f32 / SAMPLE_RATE_HZ as f32;
+    let synthesis = start.elapsed();
+    eprintln!(
+        "Kokoro waveform={seconds:.3}s synthesis={synthesis:?} RTF={:.3}",
+        synthesis.as_secs_f32() / seconds
+    );
     assert!(seconds > 1.5, "speech is only {seconds:.2} s");
     let peak = speech.iter().fold(0.0f32, |m, s| m.max(s.abs()));
     assert!(peak > 0.05, "speech is silent (peak {peak})");
 
     let at_16k = resample_mono(&speech, SAMPLE_RATE_HZ, 16_000).expect("resampling must succeed");
-    let asr_model = models.join("asr");
+    let asr_model = repo_models().join("asr");
     let mut asr = ZipformerAsr::load(&asr_model).expect("pinned Zipformer models must load");
     let transcript = asr
         .transcribe(&at_16k)
@@ -49,9 +63,18 @@ fn synthesized_speech_is_intelligible_to_the_pinned_asr() {
         .to_uppercase();
 
     let content_words = ["HELLO", "WORLD", "THIS", "TEST", "VOICE"];
-    let found = content_words.iter().filter(|w| transcript.contains(*w)).count();
+    let found = content_words
+        .iter()
+        .filter(|w| transcript.split_whitespace().any(|token| token == **w))
+        .count();
     eprintln!("ROUND_TRIP transcript={transcript:?} found={found}");
     assert!(found >= 3, "round trip recovered {found} of 5 words: {transcript:?}");
+}
+
+#[test]
+#[ignore = "requires explicitly selected and hash-checked upstream release graph; not the pinned graph test"]
+fn alternate_release_is_intelligible_to_the_pinned_asr() {
+    check_intelligibility(kokoro_release::load(&repo_models()));
 }
 
 #[test]
@@ -90,15 +113,25 @@ fn streaming_delivers_the_first_clause_before_the_reply_is_finished() {
 #[test]
 fn cached_bridge_and_committed_clause_meet_synthesis_budgets() {
     let models = repo_models();
-    let mut tts = KokoroTts::load(
+    let tts = KokoroTts::load(
         models.join("tts/kokoro-v1.0-int8.onnx"),
         models.join("tts/voices/af_heart.bin"),
     )
     .unwrap();
+    check_synthesis_budgets(tts);
+}
+
+#[test]
+#[ignore = "requires explicitly selected and hash-checked upstream release graph; uses the same fixed budgets"]
+fn alternate_release_cached_bridge_and_committed_clause_meet_synthesis_budgets() {
+    check_synthesis_budgets(kokoro_release::load(&repo_models()));
+}
+
+fn check_synthesis_budgets(mut tts: KokoroTts) {
     let cache = BridgeCache::warm(&mut tts, 1.0).unwrap();
     let start = std::time::Instant::now();
     let mut gate = CommitmentGate::new(1, BargeIn::new());
-    gate.queue("The test report is ready.");
+    gate.queue("The test report is ready.").unwrap();
     let bridge = gate.bridge(&cache, Bridge::Report).unwrap();
     let first = start.elapsed();
     assert!(bridge.iter().any(|s| s.abs() > 0.05));
@@ -111,4 +144,76 @@ fn cached_bridge_and_committed_clause_meet_synthesis_budgets() {
     // Software availability only, not endpoint-to-speaker TTFA.
     assert!(first < std::time::Duration::from_millis(170));
     assert!(rtf < 0.15);
+}
+
+/// Output only, never opens a microphone. Start a private virtual sink explicitly.
+#[test]
+#[ignore = "requires private virtual output, espeak-ng and the verified upstream release graph"]
+fn alternate_release_prefix_and_claim_reach_the_cpal_render_reference() {
+    use std::sync::atomic::Ordering;
+
+    assert_eq!(std::env::var("EON_VOICE_TEST_PRIVATE_OUTPUT").as_deref(), Ok("1"));
+    let mut tts = kokoro_release::load(&repo_models());
+    let (mut worker, device, mut reference) = ReplyRenderer::open_default(1).unwrap();
+    let rate = device.sample_rate;
+    let cache = BridgeCache::warm_for_output(&mut tts, 1.0, rate).unwrap();
+    reference.flush(); // Exclude startup/warm-up silence and its reference accounting.
+    let baseline_drops = reference.dropped();
+    let start = Instant::now();
+    worker.queue("The test report is ready.").unwrap();
+    let prefix = worker.start_bridge(&cache, Bridge::Report).unwrap();
+    assert!(prefix > 0);
+    let mut buf = [0.; 1024];
+    let mut played = Vec::new();
+    while start.elapsed() < Duration::from_secs(2) {
+        let n = reference.pop_slice(&mut buf);
+        played.extend_from_slice(&buf[..n]);
+        if buf[..n].iter().any(|s| s.abs() > 0.01) {
+            break;
+        }
+        std::thread::sleep(Duration::from_micros(500));
+    }
+    let first = start.elapsed();
+    assert!(played.iter().any(|s| s.abs() > 0.01), "no rendered prefix");
+    worker.lease_acquired(1, LeaseId::new());
+    let mut written = worker.pump(&mut tts, 1.0).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let n = reference.pop_slice(&mut buf);
+        played.extend_from_slice(&buf[..n]);
+        written += worker.pump(&mut tts, 1.0).unwrap();
+        if device.counters.frames.load(Ordering::Acquire) as usize == prefix + written {
+            // All offered audio has been consumed; poll again in case a partial clause is still staged.
+            let tail = worker.pump(&mut tts, 1.0).unwrap();
+            written += tail;
+            if tail == 0 {
+                break;
+            }
+        }
+        assert!(Instant::now() < deadline, "render stalled");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    while reference.available() != 0 {
+        let n = reference.pop_slice(&mut buf);
+        played.extend_from_slice(&buf[..n]);
+    }
+    assert_eq!(device.counters.driver_errors.load(Ordering::Acquire), 0);
+    assert_eq!(reference.dropped(), baseline_drops, "post-render reference overran");
+    let sample_16k = resample_mono(&played, rate, 16_000).unwrap();
+    let transcript = ZipformerAsr::load(repo_models().join("asr"))
+        .unwrap()
+        .transcribe(&sample_16k)
+        .unwrap();
+    eprintln!(
+        "virtual CPAL {rate}Hz: first observed non-silent reference={first:?}, \
+         first write={prefix}, later submitted={written}, rendered transcript={transcript:?}"
+    );
+    let transcript = transcript.to_uppercase();
+    let mut words = transcript.split_whitespace();
+    assert_eq!(words.next(), Some("REPORT"), "the rendered prefix must be intelligible");
+    assert!(words.any(|word| word == "TEST") && words.any(|word| word == "READY"));
+    assert!(
+        first < Duration::from_millis(170),
+        "cached prefix to virtual callback, not acoustic TTFA"
+    );
 }

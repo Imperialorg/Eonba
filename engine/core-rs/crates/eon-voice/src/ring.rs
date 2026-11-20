@@ -35,6 +35,12 @@ pub fn pcm_ring(capacity: usize) -> (PcmProducer, PcmConsumer) {
 }
 
 impl PcmProducer {
+    /// Worker-side TTS backpressure: offer at most this many samples and retain the unwritten tail.
+    #[cfg(feature = "native")]
+    pub(crate) fn writable(&self) -> usize {
+        self.inner.slots()
+    }
+
     /// Writes as many samples as fit and returns how many were written. The rest are dropped and counted.
     pub fn push_slice(&mut self, samples: &[f32]) -> usize {
         let (written, lost) = self.inner.push_partial_slice(samples);

@@ -45,6 +45,15 @@
   },
   "models": [
     {
+      "id": "kokoro-v1.0-release-int8",
+      "dest": "perception/models/tts/release/kokoro-v1.0.int8.onnx",
+      "url": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx",
+      "sha256": "6e742170d309016e5891a994e1ce1559c702a2ccd0075e67ef7157974f6406cb",
+      "size_bytes": 92361271,
+      "license": "Apache-2.0",
+      "notes": "Explicit opt-in Taylor Chu INT8 export (tokens/style/speed to audio). Not the graph used by default profiles. Use the pinned af_heart voice."
+    },
+    {
       "id": "bge-micro-v2-int8",
       "dest": "perception/models/embeddings/bge-micro-v2/model_quantized.onnx",
       "url": "https://huggingface.co/TaylorAI/bge-micro-v2/resolve/3edf6d7de0faa426b09780416fe61009f26ae589/onnx/model_quantized.onnx",

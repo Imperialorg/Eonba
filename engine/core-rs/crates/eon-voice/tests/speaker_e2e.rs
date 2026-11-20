@@ -8,6 +8,8 @@
 use std::path::PathBuf;
 
 mod common;
+#[path = "common/kokoro_release.rs"]
+mod kokoro_release;
 
 use eon_voice::resample::{CaptureFrames, resample_mono};
 use eon_voice::speaker::{SpeakerEmbedder, SpeakerGate, cosine};
@@ -184,18 +186,28 @@ fn virtual_cpal_capture_verifies_speech_and_mutes_the_reply() {
 
 #[test]
 fn same_speaker_scores_above_the_gate_and_the_assistant_voice_below_it() {
-    let mut embedder = SpeakerEmbedder::load(models().join("speaker/wespeaker_resnet34.onnx"))
-        .expect("pinned WeSpeaker model must load");
-    let speech = fixture();
-    let half = speech.len() / 2;
-    let owner = embedder.embed(&speech[..half]).unwrap();
-    let same_speaker = embedder.embed(&speech[half..]).unwrap();
-
-    let mut tts = KokoroTts::load(
+    let tts = KokoroTts::load(
         models().join("tts/kokoro-v1.0-int8.onnx"),
         models().join("tts/voices/af_heart.bin"),
     )
     .expect("pinned Kokoro model must load");
+    check_assistant_voice(tts);
+}
+
+#[test]
+#[ignore = "requires explicitly selected and hash-checked upstream release graph; not the pinned graph test"]
+fn alternate_release_voice_does_not_interrupt_and_held_out_owner_does() {
+    check_assistant_voice(kokoro_release::load(&models()));
+}
+
+fn check_assistant_voice(mut tts: KokoroTts) {
+    let mut embedder = SpeakerEmbedder::load(models().join("speaker/wespeaker_resnet34.onnx"))
+        .expect("pinned WeSpeaker model must load");
+    let speech = owner_recording();
+    let half = speech.len() / 2;
+    let owner = embedder.embed(&speech[..half]).unwrap();
+    let same_speaker = embedder.embed(&speech[half..]).unwrap();
+
     let assistant = tts
         .synthesize(
             "Affirmative. I am running the test now, and the report follows shortly.",
@@ -254,7 +266,11 @@ fn same_speaker_scores_above_the_gate_and_the_assistant_voice_below_it() {
             break;
         }
     }
-    assert!(interrupted, "sustained verified near-end speech must cancel TTS");
+    assert!(
+        interrupted,
+        "sustained verified near-end speech must cancel TTS ({} rejected candidates)",
+        reflex.rejected_candidates()
+    );
     let result = signal.render(&mut rx, &mut out);
     assert!(result.acknowledged && result.flushed > 0);
     assert_eq!(out, [0.0; 160]);
