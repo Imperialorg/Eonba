@@ -6,6 +6,7 @@
 //! The native policy is for trusted workers, not arbitrary binaries. Deadlines bound
 //! protocol I/O, not kernel/filesystem latency or the worker's CPU and memory use.
 //! Helpers must remain in the worker's process group until it shuts down.
+mod capabilities;
 mod preview;
 mod wire;
 
@@ -20,6 +21,7 @@ use serde_json::{Value, json};
 
 use crate::sandbox::{ConfinementPolicy, WorkerIo, confine_command};
 use crate::workspace::Workspace;
+use capabilities::{Capabilities, Diagnostics, Sync, require};
 pub use preview::{ReplacementPreview, preview_replacement};
 use wire::Wire;
 
@@ -83,7 +85,16 @@ impl ServerKind {
     fn args(self) -> &'static [&'static str] {
         match self {
             Self::Pyright | Self::Vtsls => &["--stdio"],
-            Self::Clangd => &["--enable-config=0", "--background-index=0", "--clang-tidy=0"],
+            Self::Clangd => &[
+                // Use the built-in fallback, not a disk compilation database
+                // (even with --sync, its change broadcaster starts a thread).
+                "--compile_args_from=lsp",
+                "--sync",
+                "--pch-storage=memory",
+                "--enable-config=0",
+                "--background-index=0",
+                "--clang-tidy=0",
+            ],
             _ => &[],
         }
     }
@@ -150,6 +161,24 @@ pub struct Position {
 }
 
 impl Position {
+    /// End position of a bounded UTF-8 snapshot, excluding CR/LF terminators.
+    fn document_end(text: &str) -> Self {
+        let mut pos = Self { line: 0, character: 0 };
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            if matches!(c, '\r' | '\n') {
+                if c == '\r' {
+                    chars.next_if_eq(&'\n');
+                }
+                pos.line += 1;
+                pos.character = 0;
+            } else {
+                pos.character += c.len_utf16() as u32;
+            }
+        }
+        pos
+    }
+
     fn param(self) -> io::Result<Value> {
         if self.line > i32::MAX as u32 || self.character > i32::MAX as u32 {
             return Err(invalid("position out of range"));
@@ -197,6 +226,13 @@ pub struct Location {
     pub range: Range,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct WorkspaceSymbol {
+    pub name: String,
+    pub kind: u8,
+    pub location: Location,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub range: Range,
@@ -225,6 +261,9 @@ fn diagnostics(items: &Value) -> io::Result<Vec<Diagnostic>> {
 
 struct Document {
     path: String,
+    version: i32,
+    end: Position,
+    allow_unversioned: bool,
     diagnostics: Option<Vec<Diagnostic>>,
 }
 
@@ -259,7 +298,9 @@ pub struct LocalLsp {
     kind: ServerKind,
     deadline: Duration,
     request_id: u64,
-    pull_diagnostics: bool,
+    capabilities: Capabilities,
+    version: i32,
+    has_closed: bool,
 }
 
 /// One preconfigured session per language. Looking up an unprovisioned kind never
@@ -370,24 +411,21 @@ impl LocalLsp {
             virtual_root,
             deadline: config.deadline,
             request_id: 0,
-            pull_diagnostics: false,
+            capabilities: Capabilities::default(),
+            version: 0,
+            has_closed: false,
         };
         let end = client.end();
         let init = client.request("initialize", json!({
             "processId":null,"rootUri":null,"workspaceFolders":null,
             "capabilities":{"general":{"positionEncodings":["utf-16"]},
-                "workspace":{"applyEdit":false,"configuration":false,"workspaceFolders":false},
-                "textDocument":{"hover":{"contentFormat":["plaintext"]},"diagnostic":{},"publishDiagnostics":{"versionSupport":true}}}
+                "workspace":{"applyEdit":false,"configuration":false,"workspaceFolders":false,"symbol":{}},
+                "textDocument":{"hover":{"contentFormat":["plaintext"]},"definition":{"linkSupport":true},
+                    "references":{},"diagnostic":{},"publishDiagnostics":{"versionSupport":true}}}
         }), end).map_err(|error| {
             io::Error::new(error.kind(), format!("confined LSP did not initialize: {error}"))
         })?;
-        let caps = init["capabilities"]
-            .as_object()
-            .ok_or_else(|| invalid("missing server capabilities"))?;
-        if caps.get("positionEncoding").is_some_and(|s| s != "utf-16") {
-            return Err(invalid("unsupported position encoding"));
-        }
-        client.pull_diagnostics = caps.get("diagnosticProvider").is_some_and(Value::is_object);
+        client.capabilities = Capabilities::parse(&init["capabilities"])?;
         client.notify("initialized", json!({}), end)?;
         Ok(client)
     }
@@ -456,7 +494,7 @@ impl LocalLsp {
             } else if method == "textDocument/publishDiagnostics" {
                 let p = &msg["params"];
                 if let Some(doc) = p["uri"].as_str().and_then(|u| self.docs.get_mut(u))
-                    && p.get("version").is_none_or(|v| v.as_u64() == Some(1))
+                    && p.get("version").map_or(doc.allow_unversioned, |v| v.as_i64() == Some(i64::from(doc.version)))
                 {
                     doc.diagnostics = Some(diagnostics(&p["diagnostics"])?);
                 }
@@ -472,19 +510,30 @@ impl LocalLsp {
         Ok(Some(msg))
     }
 
-    /// Open an immutable workspace snapshot; use a fresh session after editing.
+    fn next_version(&mut self) -> io::Result<i32> {
+        self.version = self
+            .version
+            .checked_add(1)
+            .ok_or_else(|| invalid("document version exhausted"))?;
+        Ok(self.version)
+    }
+
+    /// Open a workspace snapshot; no disk-backed project is passed to the server.
     /// Generated file URIs are under an inaccessible virtual root, not on disk.
     pub fn open(&mut self, relative_path: &str) -> io::Result<()> {
+        require(self.capabilities.sync != Sync::None, "server does not synchronize open documents")?;
         if self.docs.len() == MAX_OPEN || self.docs.values().any(|d| d.path == relative_path) {
             return Err(invalid("document already open or session full"));
         }
         let language = self.kind.language(relative_path)?;
         let (text, _) = snapshot(&self.workspace, relative_path)?;
         let uri = virtual_uri(&self.virtual_root, relative_path);
+        let version = self.next_version()?;
+        let end = Position::document_end(&text);
         self.notify(
             "textDocument/didOpen",
             json!({"textDocument":{
-                "uri":uri,"languageId":language,"version":1,"text":text
+                "uri":uri,"languageId":language,"version":version,"text":text
             }}),
             self.end(),
         )?;
@@ -492,9 +541,56 @@ impl LocalLsp {
             uri,
             Document {
                 path: relative_path.into(),
+                end,
+                version,
+                // After a close this URI might be reused. Do not retain an
+                // unbounded history of closed paths to disambiguate late pushes.
+                allow_unversioned: !self.has_closed,
                 diagnostics: None,
             },
         );
+        Ok(())
+    }
+
+    /// Change only the server's view of an open document, e.g. to analyze an
+    /// in-memory replacement preview. Never save, run, or edit the workspace.
+    pub fn change(&mut self, path: &str, text: &str) -> io::Result<()> {
+        let uri = self.uri(path)?;
+        if text.len() > MAX_DOCUMENT {
+            return Err(invalid("document exceeds byte limit"));
+        }
+        let delta = match self.capabilities.sync {
+            Sync::Full => json!({"text": text}),
+            Sync::Incremental => json!({"range":{
+                "start":{"line":0,"character":0},"end":self.docs[&uri].end.param()?
+            },"text":text}),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "server does not accept document changes",
+                ));
+            }
+        };
+        let version = self.next_version()?;
+        self.notify(
+            "textDocument/didChange",
+            json!({"textDocument":{"uri":uri,"version":version},"contentChanges":[delta]}),
+            self.end(),
+        )?;
+        let doc = self.docs.get_mut(&uri).expect("opened document");
+        doc.version = version;
+        doc.end = Position::document_end(text);
+        doc.allow_unversioned = false;
+        doc.diagnostics = None;
+        Ok(())
+    }
+
+    /// Release the virtual document, cached diagnostics and open-document slot.
+    pub fn close(&mut self, path: &str) -> io::Result<()> {
+        let uri = self.uri(path)?;
+        self.notify("textDocument/didClose", json!({"textDocument":{"uri":uri}}), self.end())?;
+        self.docs.remove(&uri);
+        self.has_closed = true;
         Ok(())
     }
 
@@ -510,7 +606,18 @@ impl LocalLsp {
         Ok(json!({"textDocument":{"uri":self.uri(path)?}, "position":pos.param()?}))
     }
 
-    fn locations(&self, value: &Value) -> io::Result<Vec<Location>> {
+    fn location(&self, uri: &Value, range: &Value) -> io::Result<Location> {
+        let doc = uri
+            .as_str()
+            .and_then(|s| self.docs.get(s))
+            .ok_or_else(|| invalid("location outside open documents"))?;
+        Ok(Location {
+            relative_path: doc.path.clone(),
+            range: Range::parse(range)?,
+        })
+    }
+
+    fn locations(&self, value: &Value, links: bool) -> io::Result<Vec<Location>> {
         let values = match value {
             Value::Null => return Ok(vec![]),
             Value::Array(a) if a.len() <= MAX_RESULTS => a.as_slice(),
@@ -520,52 +627,106 @@ impl LocalLsp {
         values
             .iter()
             .map(|v| {
-                let doc = v["uri"]
-                    .as_str()
-                    .and_then(|s| self.docs.get(s))
-                    .ok_or_else(|| invalid("location outside open documents"))?;
-                Ok(Location {
-                    relative_path: doc.path.clone(),
-                    range: Range::parse(&v["range"])?,
-                })
+                if links && v.get("targetUri").is_some() {
+                    self.location(&v["targetUri"], &v["targetSelectionRange"])
+                } else {
+                    self.location(&v["uri"], &v["range"])
+                }
             })
             .collect()
     }
 
     pub fn goto_definition(&mut self, path: &str, pos: Position) -> io::Result<Vec<Location>> {
+        require(self.capabilities.definition, "no definition provider")?;
         let value = self.request("textDocument/definition", self.at(path, pos)?, self.end())?;
-        self.locations(&value)
+        self.locations(&value, true)
     }
 
     pub fn find_references(&mut self, path: &str, pos: Position) -> io::Result<Vec<Location>> {
+        require(self.capabilities.references, "no references provider")?;
         let mut params = self.at(path, pos)?;
         params["context"] = json!({"includeDeclaration":true});
         let value = self.request("textDocument/references", params, self.end())?;
-        self.locations(&value)
+        self.locations(&value, false)
+    }
+
+    /// Search the server's index; only locations in caller-opened documents
+    /// are admissible. No symbol-resolution requests or external URI reads.
+    pub fn workspace_symbols(&mut self, query: &str) -> io::Result<Vec<WorkspaceSymbol>> {
+        require(self.capabilities.symbols, "no workspace symbol provider")?;
+        if query.len() > 256 || query.trim().is_empty() {
+            return Err(invalid("invalid symbol query"));
+        }
+        let value = self.request("workspace/symbol", json!({"query":query}), self.end())?;
+        if value.is_null() {
+            return Ok(vec![]);
+        }
+        value
+            .as_array()
+            .filter(|a| a.len() <= MAX_RESULTS)
+            .ok_or_else(|| invalid("invalid workspace symbol result"))?
+            .iter()
+            .map(|s| {
+                let name = s["name"]
+                    .as_str()
+                    .filter(|s| s.len() <= 1024)
+                    .ok_or_else(|| invalid("invalid symbol name"))?;
+                let kind = s["kind"]
+                    .as_u64()
+                    .filter(|n| (1..=26).contains(n))
+                    .ok_or_else(|| invalid("invalid symbol kind"))?;
+                let loc = &s["location"];
+                Ok(WorkspaceSymbol {
+                    name: name.into(),
+                    kind: kind as u8,
+                    location: self.location(&loc["uri"], &loc["range"])?,
+                })
+            })
+            .collect()
     }
 
     /// Display text only. Never render server output as active HTML or follow links.
     pub fn hover_type(&mut self, path: &str, pos: Position) -> io::Result<Option<String>> {
+        require(self.capabilities.hover, "no hover provider")?;
         let value = self.request("textDocument/hover", self.at(path, pos)?, self.end())?;
         if value.is_null() {
             return Ok(None);
         }
         let content = &value["contents"];
-        content
-            .as_str()
-            .or_else(|| content["value"].as_str())
-            .filter(|s| s.len() <= 8192)
-            .map(|s| Some(s.into()))
-            .ok_or_else(|| invalid("unsupported hover content"))
+        let parts = match content {
+            Value::Array(a) if a.len() <= MAX_RESULTS => a.as_slice(),
+            _ => std::slice::from_ref(content),
+        };
+        let mut text = String::new();
+        for (i, part) in parts.iter().enumerate() {
+            let s = part
+                .as_str()
+                .or_else(|| part["value"].as_str())
+                .ok_or_else(|| invalid("unsupported hover content"))?;
+            if text.len() + s.len() + usize::from(i != 0) > 8192 {
+                return Err(invalid("hover content exceeds byte limit"));
+            }
+            if i != 0 {
+                text.push('\n');
+            }
+            text.push_str(s);
+        }
+        Ok(Some(text))
     }
 
     /// Prefer LSP 3.17 pull diagnostics when advertised. Otherwise consume push
-    /// diagnostics for the opened immutable snapshot, with the same deadline.
+    /// diagnostics, with the same deadline. A changed document, or any document
+    /// opened after a close, requires versioned pushes so stale diagnostics
+    /// cannot be mistaken for diagnostics for the new text.
     pub fn diagnostics(&mut self, path: &str) -> io::Result<Vec<Diagnostic>> {
         let uri = self.uri(path)?;
         let end = self.end();
-        if self.pull_diagnostics {
-            let value = self.request("textDocument/diagnostic", json!({"textDocument":{"uri":uri}}), end)?;
+        if let Diagnostics::Pull { identifier } = &self.capabilities.diagnostics {
+            let mut params = json!({"textDocument":{"uri":uri}});
+            if let Some(id) = identifier {
+                params["identifier"] = json!(id);
+            }
+            let value = self.request("textDocument/diagnostic", params, end)?;
             if value["kind"] != "full" {
                 return Err(invalid("expected full diagnostic report"));
             }
@@ -574,14 +735,16 @@ impl LocalLsp {
         if self.child.0.is_none() {
             return Err(io::ErrorKind::NotConnected.into());
         }
-        if let Some(cached) = &self.docs[&uri].diagnostics {
-            return Ok(cached.clone());
-        }
-        for _ in 0..MAX_MESSAGES {
-            self.receive(end, None).inspect_err(|_| self.child.reap())?;
-            if let Some(items) = &self.docs[&uri].diagnostics {
+        for consumed in 0..=MAX_MESSAGES {
+            if let Some(items) = &self.docs[&uri].diagnostics
+                && !self.wire.readable(end).inspect_err(|_| self.child.reap())?
+            {
                 return Ok(items.clone());
             }
+            if consumed == MAX_MESSAGES {
+                break;
+            }
+            self.receive(end, None).inspect_err(|_| self.child.reap())?;
         }
         self.child.reap();
         Err(invalid("diagnostic message budget exhausted"))

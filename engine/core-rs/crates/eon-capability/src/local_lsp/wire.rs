@@ -118,6 +118,33 @@ impl Wire {
         Ok(())
     }
 
+    /// Before serving a cached push, check for already queued updates (or EOF).
+    /// Once started, reading a partial frame still uses the operation deadline.
+    pub fn readable(&self, end: Instant) -> io::Result<bool> {
+        if !self.output.buffer().is_empty() {
+            return Ok(true);
+        }
+        let mut p = libc::pollfd {
+            fd: self.output.get_ref().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        loop {
+            // SAFETY: p describes one live borrowed descriptor and zero timeout.
+            let n = unsafe { libc::poll(&mut p, 1, 0) };
+            if n >= 0 {
+                return Ok(n != 0);
+            }
+            let err = io::Error::last_os_error();
+            if err.kind() != io::ErrorKind::Interrupted {
+                return Err(err);
+            }
+            if Instant::now() >= end {
+                return Err(timeout());
+            }
+        }
+    }
+
     pub fn recv(&mut self, end: Instant) -> io::Result<Value> {
         let mut header = Vec::new();
         loop {

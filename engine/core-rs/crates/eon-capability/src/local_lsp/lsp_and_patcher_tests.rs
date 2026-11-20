@@ -139,9 +139,78 @@ fn opaque_documents_reject_external_locations_and_cache_push_diagnostics() {
         outside.goto_definition("a.py", POS).unwrap_err().kind(),
         io::ErrorKind::InvalidData
     );
+    assert_eq!(outside.workspace_symbols("f").unwrap_err().kind(), io::ErrorKind::InvalidData);
     let pid = outside.child.0.as_ref().unwrap().id();
     drop(outside);
     reaped(pid);
+}
+
+#[test]
+fn full_and_incremental_changes_invalidate_pushes_and_close_discards_state() {
+    let f = Fixture::new();
+    let before = "a\r\nb\r🙂x";
+    fs::write(f.0.join("a.py"), before).unwrap();
+    for mode in ["full", "incremental"] {
+        let mut client = f.start(mode);
+        client.open("a.py").unwrap();
+        assert_eq!(client.diagnostics("a.py").unwrap().len(), 1);
+        assert!(client.change("a.py", &"x".repeat(MAX_DOCUMENT + 1)).is_err());
+        client.change("a.py", "updated").unwrap();
+        assert!(client.diagnostics("a.py").unwrap().is_empty());
+        client.close("a.py").unwrap();
+        assert!(client.diagnostics("a.py").is_err());
+        assert!(client.change("a.py", "").is_err());
+        assert!(client.close("a.py").is_err());
+        client.open("a.py").unwrap();
+        assert_eq!(client.diagnostics("a.py").unwrap().len(), 1);
+        client.shutdown().unwrap();
+    }
+    assert_eq!(fs::read_to_string(f.0.join("a.py")).unwrap(), before);
+}
+
+#[test]
+fn an_old_or_unversioned_push_cannot_satisfy_an_edited_or_reopened_snapshot() {
+    let f = Fixture::new();
+    fs::write(f.0.join("a.py"), "a\r\nb\r🙂x").unwrap();
+    for reopen in [false, true] {
+        let mut client = f.start("stale");
+        client.open("a.py").unwrap();
+        assert_eq!(client.diagnostics("a.py").unwrap().len(), 1);
+        if reopen {
+            client.close("a.py").unwrap();
+            client.open("a.py").unwrap();
+        } else {
+            client.change("a.py", "updated").unwrap();
+        }
+        client.deadline = Duration::from_millis(100);
+        assert_eq!(client.diagnostics("a.py").unwrap_err().kind(), io::ErrorKind::TimedOut);
+    }
+}
+
+#[test]
+fn capabilities_gate_requests_and_admit_scoped_definition_links_and_marked_strings() {
+    let f = Fixture::new();
+    let mut client = f.start("no-sync");
+    assert_eq!(client.open("a.py").unwrap_err().kind(), io::ErrorKind::Unsupported);
+    client.shutdown().unwrap();
+    let mut client = f.start("immutable");
+    client.open("a.py").unwrap();
+    for err in [
+        client.change("a.py", "").unwrap_err(),
+        client.hover_type("a.py", POS).unwrap_err(),
+        client.goto_definition("a.py", POS).unwrap_err(),
+        client.find_references("a.py", POS).unwrap_err(),
+        client.workspace_symbols("f").unwrap_err(),
+    ] {
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+    }
+    client.shutdown().unwrap();
+    let mut client = f.start("link");
+    client.open("a.py").unwrap();
+    assert_eq!(client.goto_definition("a.py", POS).unwrap()[0].relative_path, "a.py");
+    assert_eq!(client.workspace_symbols("f").unwrap()[0].location.relative_path, "a.py");
+    assert_eq!(client.hover_type("a.py", POS).unwrap().as_deref(), Some("first\nint"));
+    client.shutdown().unwrap();
 }
 
 #[test]
