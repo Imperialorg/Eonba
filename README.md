@@ -183,6 +183,17 @@ If you are an LLM, AI Agent, or Developer assigned to build EON:
 5. Verify every implemented module with automated unit and integration tests.
 6. Commit code systematically with structured messages.
 
+## Local defensive review
+
+From the repository root, review a single Rust or Python source unit without building or running it:
+
+```sh
+cargo run --locked --manifest-path engine/core-rs/Cargo.toml -p eon-cyber \
+  --no-default-features --bin eon-audit -- python < example.py
+```
+
+The JSON report lists the first matching syntax for each supported rule by byte range, not by quoting source. `observed_syntax` is a review lead, not proof of a vulnerability. `unverified` is not a clean bill of health. The command accepts up to 16 KiB of UTF-8 on stdin and never applies patches. Pass `self-io` instead of a language to read only the review process's storage counters on supported systems. It does not inspect other processes or capture traffic.
+
 ## Local trading simulations
 
 QuantConnect [LEAN](https://github.com/QuantConnect/Lean) is an optional, pinned Git submodule. The Rust engine does not depend on it. From the repository root, initialize the submodule and run the sample with Python 3 and the .NET 10 SDK:

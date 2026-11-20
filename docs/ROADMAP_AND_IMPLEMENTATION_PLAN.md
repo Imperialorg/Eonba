@@ -219,11 +219,11 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Requirements**: Tree-sitter AST parsing across Rust, Kotlin, C/C++, Python, TypeScript. PageRank architectural RepoMap generator. Embedded Debug Adapter Protocol (DAP) client bridge (`dev.dap`) interfacing with `codelldb`, `debugpy`, and `jdwp` to inspect live stack frames, conditional breakpoints, and heap allocations. Automated compiler diagnostic capture and localized syntax tree repair.
   - **Unit Tests**: `cargo test -p eon-cyber ast_tests`, `self_healing_tests`, `dap_tests`.
 
-- [ ] **Task 7.2: Aegis Cyber Defense & Live Vulnerability Hotpatcher**
+- [ ] **Task 7.2: Defensive source review, repair proposals and platform telemetry**
   - **Crate**: `eon-cyber`
   - **Files**: `src/defense/taint_auditor.rs`, `src/defense/auto_patch.rs`, `src/defense/telemetry.rs`
-  - **Requirements**: Detection of CWE-119, CWE-89, CWE-362, timing attacks. Automated constant-time and bounds-checking patch synthesis. Tiered telemetry implementation: Tier A (`aya-rs` eBPF for rooted Linux/Android), Tier B (native ETW consumer for Windows), Tier C (`VpnService` packet sink + `/proc` & `UsageStatsManager` for unrooted Android).
-  - **Unit Tests**: `cargo test -p eon-cyber taint_tests`, `patch_tests`.
+  - **Requirements**: Review authorized source for patterns associated with CWE-119, CWE-89, CWE-362 and observable timing differences. Produce reviewable constant-time and bounds-checking edits, without executing submitted code or patching a running process. Collect opt-in, metadata-only telemetry on supported Linux/Android eBPF, Windows ETW and stock Android backends. Distinguish observed evidence from unsupported rules and unavailable sensors.
+  - **Verification**: Exercise both matching and nonmatching source, compile and test the reviewed repair, check that reports do not disclose the source, and test each claimed telemetry backend on its supported host. Local `/proc/self/io` counters do not establish eBPF, ETW or VPN coverage.
 
 - [x] **Task 7.3: Offline dependency and advisory assessment**
   - **Crate**: `eon-cyber`

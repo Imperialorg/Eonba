@@ -10,6 +10,8 @@ use crate::remediation::patch_isolated_python_token_check;
 
 use super::{Assessment, Gap, MAX_SOURCE_BYTES};
 
+const MAX_TREE_NODES: usize = 8192;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rule {
     UncheckedIndex,
@@ -30,10 +32,18 @@ impl Rule {
 
     pub fn recommendation(self) -> &'static str {
         match self {
-            Self::UncheckedIndex => "Review the index invariant; prefer checked slice access with an explicit failure path.",
-            Self::InterpolatedQuery => "Confirm this is a database call; pass values as bound parameters, not query text.",
-            Self::SplitAtomicUpdate => "Confirm the receiver is shared and atomic; review a single atomic update or a lock.",
-            Self::EarlyTokenMismatch => "Review the isolated bytes comparison proposal using hmac.compare_digest.",
+            Self::UncheckedIndex => {
+                "Review the index invariant; prefer checked slice access with an explicit failure path."
+            }
+            Self::InterpolatedQuery => {
+                "Confirm this is a database call; pass values as bound parameters, not query text."
+            }
+            Self::SplitAtomicUpdate => {
+                "Confirm the receiver is shared and atomic; review a single atomic update or a lock."
+            }
+            Self::EarlyTokenMismatch => {
+                "Review the isolated bytes comparison proposal using hmac.compare_digest."
+            }
         }
     }
 }
@@ -51,27 +61,48 @@ pub struct SourceReport {
     pub checks: [SourceCheck; 4],
 }
 
-fn rust_method<'a>(call: Node<'a>, src: &str) -> Option<(Node<'a>, &str, Node<'a>)> {
+fn rust_method<'tree, 'src>(
+    call: Node<'tree>,
+    src: &'src str,
+) -> Option<(Node<'tree>, &'src str, Node<'tree>)> {
     if call.kind() != "call_expression" {
         return None;
     }
     let field = call.child_by_field_name("function")?;
+    if field.kind() != "field_expression" {
+        return None;
+    }
     let receiver = field.child_by_field_name("value")?;
     let name = field.child_by_field_name("field")?;
-    Some((receiver, &src[name.byte_range()], call.child_by_field_name("arguments")?))
+    Some((
+        receiver,
+        &src[name.byte_range()],
+        call.child_by_field_name("arguments")?,
+    ))
+}
+
+fn rust_arguments<const N: usize>(args: Node<'_>) -> Option<[Node<'_>; N]> {
+    let mut cursor = args.walk();
+    let mut children = args.named_children(&mut cursor).filter(|n| !n.is_extra());
+    let mut result = [args; N];
+    for arg in &mut result {
+        *arg = children.next()?;
+    }
+    children.next().is_none().then_some(result)
 }
 
 fn rust_rule(call: Node<'_>, src: &str) -> Option<Rule> {
     let (receiver, name, args) = rust_method(call, src)?;
-    if matches!(name, "get_unchecked" | "get_unchecked_mut") && args.named_child_count() == 1 {
+    if matches!(name, "get_unchecked" | "get_unchecked_mut") && rust_arguments::<1>(args).is_some()
+    {
         return Some(Rule::UncheckedIndex);
     }
     // Same plain receiver and a direct load in the value stored. Do not join
     // calls solely by method name or across aliases, functions or branches.
-    if name != "store" || args.named_child_count() != 2 || receiver.kind() != "identifier" {
+    if name != "store" || receiver.kind() != "identifier" {
         return None;
     }
-    let value = args.named_child(0)?;
+    let [value, _] = rust_arguments(args)?;
     if value.kind() != "binary_expression" {
         return None;
     }
@@ -79,7 +110,9 @@ fn rust_rule(call: Node<'_>, src: &str) -> Option<Rule> {
         .into_iter()
         .filter_map(|field| rust_method(value.child_by_field_name(field)?, src))
         .any(|(other, method, params)| {
-            method == "load" && params.named_child_count() == 1 && other.kind() == "identifier"
+            method == "load"
+                && rust_arguments::<1>(params).is_some()
+                && other.kind() == "identifier"
                 && src[other.byte_range()] == src[receiver.byte_range()]
         })
         .then_some(Rule::SplitAtomicUpdate)
@@ -90,8 +123,14 @@ fn python_query(call: Node<'_>, src: &str) -> Option<Rule> {
         return None;
     }
     let callee = call.child_by_field_name("function")?;
+    let args = call.child_by_field_name("arguments")?;
+    if callee.kind() != "attribute" || args.kind() != "argument_list" {
+        return None;
+    }
     let name = callee.child_by_field_name("attribute")?;
-    let arg = call.child_by_field_name("arguments")?.named_child(0)?;
+    let arg = args
+        .named_children(&mut args.walk())
+        .find(|n| !n.is_extra())?;
     if !matches!(&src[name.byte_range()], "execute" | "executemany") || arg.kind() != "string" {
         return None;
     }
@@ -102,10 +141,18 @@ fn python_query(call: Node<'_>, src: &str) -> Option<Rule> {
 
 pub fn review_source(language: Lang, source: &str) -> SourceReport {
     use Rule::*;
-    let checks = [UncheckedIndex, InterpolatedQuery, SplitAtomicUpdate, EarlyTokenMismatch];
+    let checks = [
+        UncheckedIndex,
+        InterpolatedQuery,
+        SplitAtomicUpdate,
+        EarlyTokenMismatch,
+    ];
     let unverified = |gap| SourceReport {
         language,
-        checks: checks.map(|rule| SourceCheck { rule, evidence: Assessment::Unverified(gap) }),
+        checks: checks.map(|rule| SourceCheck {
+            rule,
+            evidence: Assessment::Unverified(gap),
+        }),
     };
     if source.len() > MAX_SOURCE_BYTES {
         return unverified(Gap::LimitExceeded);
@@ -119,21 +166,19 @@ pub fn review_source(language: Lang, source: &str) -> SourceReport {
     }
     let mut report = unverified(Gap::Unsupported);
     for check in &mut report.checks {
-        if matches!((language, check.rule),
-            (Lang::Rust, UncheckedIndex | SplitAtomicUpdate) | (Lang::Python, InterpolatedQuery | EarlyTokenMismatch))
-        {
-            check.evidence = Assessment::Unverified(Gap::OutsideRule);
-        }
-    }
-    if language == Lang::Python {
-        match patch_isolated_python_token_check(source) {
-            Ok(Some(patch)) => report.checks[3].evidence = Assessment::Observed(patch.flow.branch_condition),
-            Err(_) => report.checks[3].evidence = Assessment::Unverified(Gap::InvalidInput),
-            Ok(None) => {}
-        }
+        check.evidence = match (language, check.rule) {
+            (Lang::Python, EarlyTokenMismatch) => match patch_isolated_python_token_check(source) {
+                Ok(Some(patch)) => Assessment::Observed(patch.flow.branch_condition),
+                Err(_) => Assessment::Unverified(Gap::InvalidInput),
+                Ok(None) => Assessment::Unverified(Gap::OutsideRule),
+            },
+            (Lang::Rust, UncheckedIndex | SplitAtomicUpdate)
+            | (Lang::Python, InterpolatedQuery) => Assessment::Unverified(Gap::OutsideRule),
+            _ => Assessment::Unverified(Gap::Unsupported),
+        };
     }
     let mut cursor = root.walk();
-    for _ in 0..8192 {
+    for _ in 0..MAX_TREE_NODES {
         let node = cursor.node();
         let rule = match language {
             Lang::Rust => rust_rule(node, source),
