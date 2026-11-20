@@ -314,6 +314,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/main.rs`, `src/ui.rs`, `src/terminal.rs`, `clients/canvas/src/main.rs`
   - **Requirements**: Interactive console interface with welcome panel, status dock, live slash commands (`/menu`, `/capabilities`, `/cyber`, `/mesh`, `/vision`), Tab completion, and live audio visualizer. Terminal graphics via `ratatui-image` (Kitty/Sixel). Graphical canvas for live AST diffs, reverse engineering CFGs, and video scrubbing (`wgpu` / Compose).
   - **Unit Tests**: `cargo test -p eon-cli terminal_tests`.
+  - **Verified subset**: Build `eon-cli` with `--features audio-input`, run `eon watch <journal-dir>`, open `/audio` and press `m`. The peak meter uses the default input only while enabled in that view. It keeps at most 48 level readings and no PCM. A dedicated Linux virtual input delivered a known half-scale tone; no physical microphone, terminal image protocol or live mesh feed was tested.
 
 - [ ] **Task 10.2: Sub-170ms Time-To-First-Audio (TTFA) Benchmark**
   - **Directory**: `tests/latency-benchmarks/`

@@ -5,7 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+# Builds without audio support still have the read-only journal console.
+audio-input = ["dep:cpal"]
+
 [dependencies]
+cpal = { version = "0.18", optional = true }
 crossterm = "0.28"
 eon-foundation = { path = "../eon-foundation" }
 eon-primitives = { path = "../eon-primitives" }

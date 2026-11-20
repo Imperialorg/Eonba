@@ -10,11 +10,12 @@ use eon_primitives::{EonError, EonResult};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style, Stylize};
-use ratatui::widgets::{Block, List, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, List, ListState, Paragraph, Sparkline, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::{JournalStatus, read_journal};
 
+mod meter;
 #[cfg(test)]
 mod terminal_tests;
 
@@ -27,6 +28,7 @@ enum Page {
     Cyber,
     Mesh,
     Vision,
+    Audio,
 }
 
 // Menu, dispatch and prefix completion share the same allowlist.
@@ -40,6 +42,7 @@ const COMMANDS: &[(Page, &str, &str)] = &[
     (Page::Cyber, "/cyber", "Journal integrity (read-only)"),
     (Page::Mesh, "/mesh", "Mesh telemetry availability"),
     (Page::Vision, "/vision", "Vision telemetry availability"),
+    (Page::Audio, "/audio", "Local microphone level (opt-in)"),
     (Page::Menu, "/menu", "Command menu"),
 ];
 
@@ -89,6 +92,7 @@ pub struct WatchState {
     selected: usize,
     prompt: Option<Prompt>,
     feedback: Option<String>,
+    meter: meter::Meter,
 }
 
 impl WatchState {
@@ -113,6 +117,9 @@ impl WatchState {
     }
 
     fn open(&mut self, page: Page) {
+        if page != Page::Audio {
+            self.meter.stop();
+        }
         self.page = page;
         self.prompt = None;
         self.feedback = None;
@@ -130,6 +137,7 @@ impl WatchState {
             return;
         }
         if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+            self.meter.stop();
             self.quit = true;
             return;
         }
@@ -175,7 +183,11 @@ impl WatchState {
             }
         } else {
             match key.code {
-                KeyCode::Char('q' | 'Q') => self.quit = true,
+                KeyCode::Char('q' | 'Q') => {
+                    self.meter.stop();
+                    self.quit = true;
+                }
+                KeyCode::Char('m') if self.page == Page::Audio => self.meter.toggle(),
                 KeyCode::Char('/') => {
                     self.prompt = Some(Prompt {
                         text: "/".into(),
@@ -255,7 +267,7 @@ impl WatchState {
                     .join("\n")
             }),
             Page::Capabilities => Some(format!(
-                "Read-only local journal: {}\n/status: frame metadata\n/cyber: replay checksums and sequence\nNo peer, video or audio feed is attached to this client.",
+                "Read-only local journal: {}\n/status: frame metadata\n/cyber: replay checksums and sequence\n/audio: local opt-in input meter\nNo peer or video feed is attached to this client.",
                 if self.error.is_some() {
                     "read failed"
                 } else if self.status.is_some() {
@@ -281,6 +293,22 @@ impl WatchState {
             }),
             Page::Mesh => Some("No mesh peer feed is attached. Peer count is unknown.".into()),
             Page::Vision => Some("No vision frame source is attached. Nothing to preview.".into()),
+            Page::Audio => {
+                let border = block();
+                let inner = border.inner(body);
+                frame.render_widget(border, body);
+                let [status, graph] =
+                    Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(inner);
+                frame.render_widget(
+                    Paragraph::new(self.meter.status()).wrap(Wrap { trim: false }),
+                    status,
+                );
+                frame.render_widget(
+                    Sparkline::default().data(self.meter.peaks()).max(100),
+                    graph,
+                );
+                None
+            }
         };
         if let Some(text) = text {
             frame.render_widget(
@@ -365,6 +393,7 @@ pub fn run_watch(dir: &Path, interval: Duration) -> EonResult<()> {
             return Ok(());
         }
         if refreshed.elapsed() >= interval {
+            state.meter.poll(Instant::now());
             state.refresh(dir);
             refreshed = Instant::now();
         }
