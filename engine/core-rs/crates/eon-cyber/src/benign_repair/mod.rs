@@ -7,6 +7,7 @@ use tree_sitter::Parser;
 
 use crate::cpg::{Lang, parse};
 
+mod kotlin;
 mod typescript;
 
 type Edit = (Range<usize>, String);
@@ -88,14 +89,27 @@ fn rust(source: &str, diag: &Value) -> Option<(String, String)> {
 }
 
 /// Propose at most one localized repair for the leading diagnostic. Rust
-/// consumes one rustc JSON diagnostic. TS consumes a code, UTF-8 byte offset
-/// and message from tsc. Both reject out-of-range edits and unparseable results.
+/// consumes one rustc JSON diagnostic. TS and Kotlin consume a compiler code,
+/// UTF-8 byte offset and message. Never return an unparseable revision.
 pub fn propose(dialect: &str, source: &str, diagnostic: &Value) -> Option<(String, String)> {
     if source.is_empty() || source.len() > 8192 {
         return None;
     }
     match dialect {
         "rust" => rust(source, diagnostic),
+        "kotlin" => {
+            let mut parser = Parser::new();
+            parser.set_language(&tree_sitter_kotlin_ng::LANGUAGE.into()).ok()?;
+            let tree = parser.parse(source, None)?;
+            let root = tree.root_node();
+            if root.has_error() {
+                return None;
+            }
+            let edit = kotlin::edit(root, source, diagnostic)?;
+            let result = apply(source, vec![edit])?;
+            let code = diagnostic["code"].as_str()?;
+            (!parser.parse(&result, None)?.root_node().has_error()).then(|| (code.to_owned(), result))
+        }
         "typescript" => {
             let mut parser = Parser::new();
             parser

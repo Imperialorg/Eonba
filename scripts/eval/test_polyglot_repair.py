@@ -1,13 +1,14 @@
 import contextlib
 import io
+import json
 import unittest
-from unittest.mock import mock_open, patch
+from unittest.mock import Mock, mock_open, patch
 
 import polyglot_repair as bench
-from repair import kotlin_rules, python_rules
+from repair import python_rules
 from repair.corpus import Case, FILES, inventory
 from repair.processes import BenchError, private_workspace
-from repair.toolchains import position
+from repair.toolchains import byte_position
 
 
 class InventoryTests(unittest.TestCase):
@@ -56,23 +57,33 @@ class SourceOnlyTests(unittest.TestCase):
                 self.assertFalse(python_rules.diagnose(src))
 
     def test_byte_vs_character_offsets(self):
-        self.assertEqual(position("é🌱x\n", 1, 4), 2)
-        self.assertEqual(position("é🌱x\nmany\n", 2, 2), 5)
-        with self.assertRaises(BenchError):
-            position("abc", 1, 7)
+        for lang in ("kotlin", "typescript"):
+            self.assertEqual(byte_position("é🌱x\n", 1, 4, lang), 6)
+            self.assertEqual(byte_position("é🌱x\r\nmany\n", 2, 2, lang), 10)
+            for col in (0, 3, 5, 6):
+                with self.subTest(lang=lang, col=col), self.assertRaises(BenchError):
+                    byte_position("é🌱x\r\n", 1, col, lang)
         src = 'def f(tag: str):\n    return "🌱" + str(tag is "oak")\n'
         (issue,) = python_rules.diagnose(src)
         self.assertEqual(issue.apply(src), src.replace('tag is ', 'tag == '))
 
-    def test_kotlin_spread_requires_vararg_declaration(self):
-        src = "fun f(batch: IntArray): Int = total(batch)"
-        diag = {"code": "ARGUMENT_TYPE_MISMATCH", "offset": src.rfind("batch"),
-                "message": "actual type is 'IntArray', but 'Int' was expected."}
-        self.assertIsNone(kotlin_rules.propose(src, diag))
-        prefix = "fun total(vararg x: Int) = x.sum()\n"
-        diag["offset"] += len(prefix)
-        fixed = kotlin_rules.propose(prefix + src, diag)
-        self.assertEqual(fixed, prefix + src.replace("total(batch)", "total(*batch)"))
+    def test_k2_diagnostic_to_native_request_is_source_only(self):
+        prefix = "fun f(x: String?): Int? = /* é🌱\u2028 */ x"
+        src = prefix + ".length\n"
+        col = len(prefix.encode("utf-16-le")) // 2 + 1
+        log = f"Subject.kt:1:{col}: error: [UNSAFE_CALL] compiler message\n"
+        tools = Mock(bins={"kotlinc": "compiler", "edit": "adapter"})
+        tools.run.side_effect = [(1, log), (0, "null")]
+        with private_workspace() as cwd:
+            errors = bench.diagnostics(tools, cwd, "kotlin", src)
+            self.assertIsNone(bench.candidate(tools, cwd, "kotlin", src, errors))
+            directory, cmd, payload = tools.run.call_args.args
+            self.assertEqual((directory, cmd), (cwd, ["adapter"]))
+            self.assertEqual(json.loads(payload), {
+                "language": "kotlin", "source": src, "diagnostic": {
+                    "code": "UNSAFE_CALL", "offset": len(prefix.encode()), "message": "compiler message",
+                },
+            })
 
 
 class ScoringTests(unittest.TestCase):

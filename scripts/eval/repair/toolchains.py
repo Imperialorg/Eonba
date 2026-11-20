@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import re
 
-from . import kotlin_rules, python_rules
+from . import python_rules
 from .processes import BenchError
 
 
@@ -13,16 +13,24 @@ TS_FLAGS = ["--strict", "--noImplicitOverride", "--target", "ES2022", "--module"
             "--pretty", "false", "--noEmitOnError"]
 
 
-def position(src, row, column):
-    """Compiler one-based UTF-16 line/column to a Python character offset."""
-    lines = src.splitlines(keepends=True)
-    if not (1 <= row <= len(lines) and 1 <= column):
+def byte_position(src, row, column, lang):
+    """Compiler one-based UTF-16 line/column to a tree-sitter UTF-8 byte offset."""
+    # Kotlin doesn't treat e.g. U+2028 inside a string as a new source line.
+    separators = r"\r\n|[\r\n]" if lang == "kotlin" else r"\r\n|[\r\n\u2028\u2029]"
+    starts = [0, *(m.end() for m in re.finditer(separators, src))]
+    if not (1 <= row <= len(starts) and 1 <= column):
         raise BenchError("invalid diagnostic location")
-    units = lines[row - 1].encode("utf-16-le")
+    start = starts[row - 1]
+    line = src[start:starts[row] if row < len(starts) else len(src)]
+    units = re.sub(f"(?:{separators})$", "", line).encode("utf-16-le")
     n = 2 * (column - 1)
     if n >= len(units):
         raise BenchError("diagnostic outside source")
-    return sum(map(len, lines[:row - 1])) + len(units[:n].decode("utf-16-le"))
+    try:
+        prefix = units[:n].decode("utf-16-le")
+    except UnicodeDecodeError as exc:
+        raise BenchError("diagnostic splits a surrogate pair") from exc
+    return len(src[:start].encode()) + len(prefix.encode())
 
 
 def diagnostics(tools, cwd, lang, src):
@@ -48,9 +56,9 @@ def diagnostics(tools, cwd, lang, src):
                    else r"^subject\.ts\((\d+),(\d+)\): error TS(\d+): (.*)$")
         errors = []
         for row, col, code, message in re.findall(pattern, log, re.M):
-            offset = position(src, int(row), int(col))
+            offset = byte_position(src, int(row), int(col), lang)
             if lang == "typescript":
-                offset, code = len(src[:offset].encode()), int(code)
+                code = int(code)
             errors.append(dict(code=code, offset=offset, message=message))
     if not errors:
         raise BenchError(f"{lang} failed without a recognized subject diagnostic")
@@ -62,9 +70,6 @@ def candidate(tools, cwd, lang, src, errors):
     if lang == "python":
         # Multiple competing lint diagnoses are not ranked by behavior tests.
         return (err.code, err.apply(src)) if len(errors) == 1 else None
-    if lang == "kotlin":
-        proposed = kotlin_rules.propose(src, err)
-        return (err["code"], proposed) if proposed is not None else None
     request = json.dumps(dict(language=lang, source=src, diagnostic=err)).encode()
     status, log = tools.run(cwd, [tools.bins["edit"]], request)
     if status != 0:

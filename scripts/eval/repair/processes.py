@@ -55,7 +55,7 @@ class Toolchain:
         for language in languages:
             for name in requirements[language]:
                 self.bins[name] = executable(name)
-        if "rust" in languages or "typescript" in languages:
+        if any(lang in languages for lang in ("rust", "typescript", "kotlin")):
             bridge = TARGET / "debug/eon-repair-edit"
             if not os.access(bridge, os.X_OK):
                 raise BenchError("build eon-repair-edit first (see verification Manual 06 §3.6)")
