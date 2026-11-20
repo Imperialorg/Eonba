@@ -256,7 +256,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/split_inference.rs`
   - **Requirements**: Dynamically streams speech tokens from mobile edge to workstation compute node, streaming verified results back to edge audio driver. Seamless offline fallback.
   - **Unit Tests**: `cargo test -p eon-mesh split_inference_tests`.
-  - **Verified subset**: A paired worker can transcribe a bounded recording after the caller opts in for that utterance. When the channel fails, the edge transcribes locally. This path sends PCM, not a live token stream, and does not play audio.
+  - **Verified subset**: An opted-in, pinned Zipformer worker returns interim text before the edge finishes sending the authorized PCM. If the connection breaks after a preview, the edge transcribes the original recording locally. The edge sends PCM, not tokens; previews cannot authorize actions and there is no playback path.
 
 - [x] **Task 8.3: CRDT State Synchronizer**
   - **Crate**: `eon-mesh`
@@ -291,6 +291,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/main/kotlin/com/eon/android/accessibility/EonAccessibilityService.kt`, `ScreenInspector.kt`
   - **Requirements**: Traverses active `AccessibilityNodeInfo` hierarchy, finds target buttons/inputs, executes clicks/scrolls, provides coordinate fallback.
   - **Unit Tests**: Android test harness with simulated UI hierarchies.
+  - **Verified subset**: On API 34+ a private EON demo offers two actions, increment its counter or scroll its sample list. Each requires a separate, expiring confirmation tied to that control. The system inspection shortcut remains read-only. Host tests passed; the device scenarios have only been compiled.
 
 - [ ] **Task 9.4: Persistent Overlay HUD & Visualizer**
   - **Directory**: `clients/android/overlay/`
