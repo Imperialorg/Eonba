@@ -21,10 +21,13 @@ class InspectionManifestTest {
     private fun Element.attr(name: String) = getAttributeNS(android, name)
 
     @Test
-    fun noCaptureOrOverlayPermissionAndOnlySystemGuardedServices() {
+    fun onlyOptionalMicrophoneAndOverlayProtectionWithSystemGuardedServices() {
         val manifest = root("AndroidManifest.xml")
-        assertEquals(listOf("android.permission.HIDE_OVERLAY_WINDOWS"),
+        assertFalse(manifest.elements("application").single().hasAttributeNS(android, "debuggable"))
+        assertEquals(listOf("android.permission.HIDE_OVERLAY_WINDOWS", "android.permission.RECORD_AUDIO"),
             manifest.elements("uses-permission").map { it.attr("name") })
+        val microphone = manifest.elements("uses-feature").single { it.attr("name") == "android.hardware.microphone" }
+        assertEquals("false", microphone.attr("required"))
         val services = manifest.elements("service").associateBy { it.attr("name") }
         assertEquals(setOf(".FocusedControlService", ".EonVoiceInteractionService", ".EonVoiceSessionService"), services.keys)
         val service = services.getValue(".FocusedControlService")

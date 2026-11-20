@@ -41,6 +41,15 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
     private var work: FutureTask<String>? = null
     private var toneStop: CancellationSignal? = null
     private var taskStop: CancellationSignal? = null
+    private var microphone: SessionMic? = null
+    private var micLevels = emptyList<Int>()
+    private val micGuard = object : Runnable {
+        override fun run() {
+            if (microphone == null) return
+            if (!micEligible()) clearMic(R.string.voice_mic_failed)
+            else main.postDelayed(this, 100)
+        }
+    }
     private var observingScreenOff = false
     private val screenOff = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -95,6 +104,8 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
         return VoiceHudView(context, ::toggleDetails, ::checkProfile, ::sampleTasks, ::analyzeTone, ::clearTone,
             ::openControls, ::closeHud).also {
             hud = it
+            it.setMicClick(::toggleMic)
+            it.onMicWindowLost = { clearMic() }
             it.render(surface.frame)
         }
     }
@@ -118,11 +129,66 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
     private fun toggleDetails() {
         if (!requireVisible()) return
         if (surface.frame?.expanded == true) {
+            clearMic()
             clearTone()
             cancelTaskSample()
         }
         surface.toggleDetails()
         render()
+    }
+
+    private fun micEligible() = surface.frame?.expanded == true && hud?.micVisible() == true &&
+        surface.canUse(eligible()) && MicPermission.allowed(context)
+
+    private fun toggleMic() {
+        if (microphone != null) {
+            clearMic(R.string.voice_mic_stopped)
+            return
+        }
+        if (!requireVisible() || surface.frame?.expanded != true || hud?.micVisible() != true) return
+        if (!MicPermission.allowed(context)) {
+            clearMic(R.string.voice_mic_denied)
+            return
+        }
+        val take = try { SessionMic.open() } catch (_: RuntimeException) {
+            clearMic(R.string.voice_mic_failed)
+            return
+        }
+        microphone = take
+        micLevels = emptyList()
+        hud?.renderMic(true, micLevels, context.getString(R.string.voice_mic_starting))
+        main.post(micGuard)
+        val app = context.applicationContext
+        Thread({
+            val ok = take.measure(app) { level ->
+                main.post {
+                    if (microphone !== take) return@post
+                    if (!micEligible()) clearMic(R.string.voice_mic_failed)
+                    else {
+                        micLevels = micLevels + level
+                        hud?.renderMic(true, micLevels, context.getString(R.string.voice_mic_progress, micLevels.size, level))
+                    }
+                }
+            }
+            main.post {
+                if (microphone === take) {
+                    if (ok && micLevels.size == ToneLevels.LIMIT && micEligible()) {
+                        microphone = null // worker already released AudioRecord
+                        main.removeCallbacks(micGuard)
+                        hud?.renderMic(false, micLevels, context.getString(R.string.voice_mic_complete, micLevels.max()))
+                    } else clearMic(R.string.voice_mic_failed)
+                }
+            }
+        }, "EON visible microphone meter").start()
+    }
+
+    private fun clearMic(message: Int? = null) {
+        val old = microphone
+        microphone = null
+        old?.close()
+        main.removeCallbacks(micGuard)
+        micLevels = emptyList()
+        hud?.renderMic(false, micLevels, message?.let(context::getString))
     }
 
     private fun sampleTasks() {
@@ -229,6 +295,7 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
     }
 
     private fun clearShowing() {
+        clearMic()
         surface.hide()
         cancelTaskSample()
         clearTone()

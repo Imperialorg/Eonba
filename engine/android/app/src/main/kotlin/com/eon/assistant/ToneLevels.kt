@@ -5,16 +5,17 @@ import java.nio.ByteOrder
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
-/** One integer RMS level per 100 ms of interleaved PCM16. No samples survive a call. */
-internal class ToneLevels(rate: Int, private val channels: Int, private val report: (Int) -> Unit) {
+/** Fixed-window integer RMS of interleaved PCM16. No samples survive a call. */
+internal class ToneLevels(rate: Int, private val channels: Int, binsPerSecond: Int, private val report: (Int) -> Unit) {
+    constructor(rate: Int, channels: Int, report: (Int) -> Unit) : this(rate, channels, 10, report)
     companion object {
         const val LIMIT = 12
     }
 
     init {
-        require(rate in 8_000..96_000 && channels in 1..2)
+        require(rate in 8_000..96_000 && channels in 1..2 && binsPerSecond in 1..10)
     }
-    private val framesPerBin = rate / 10
+    private val framesPerBin = rate / binsPerSecond
     private var squares = 0L
     private var frames = 0
     var count = 0

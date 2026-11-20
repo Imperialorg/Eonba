@@ -38,6 +38,17 @@ class ToneLevelsTest {
     }
 
     @Test
+    fun microphoneUsesTwelveHalfSecondWindowsAndDropsFurtherInput() {
+        val bins = mutableListOf<Int>()
+        val scan = ToneLevels(16_000, 1, 2, bins::add)
+        scan.append(samples(7999) { 0 })
+        assertEquals(emptyList(), bins)
+        scan.append(samples(1) { 0 })
+        scan.append(samples(8000 * 20) { if (it / 8000 % 2 == 0) -16384 else 8192 })
+        assertEquals(listOf(0, 50, 25, 50, 25, 50, 25, 50, 25, 50, 25, 50), bins)
+    }
+
+    @Test
     fun rejectsEmptyPartialFramesAndOutOfBoundsFormats() {
         for ((rate, channels) in listOf(7999 to 1, 96001 to 1, 8000 to 0, 8000 to 3)) {
             assertFailsWith<IllegalArgumentException> { ToneLevels(rate, channels) {} }

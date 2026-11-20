@@ -31,6 +31,7 @@
                     android:orientation="vertical"
                     android:paddingHorizontal="8dp">
                     <TextView
+                        android:id="@+id/hud_title"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:accessibilityHeading="true"
@@ -73,6 +74,25 @@
                     android:layout_height="wrap_content"
                     android:text="@string/voice_hud_privacy"
                     android:textColor="#263F43" />
+                <Button
+                    android:id="@+id/hud_mic"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:filterTouchesWhenObscured="true"
+                    android:text="@string/voice_mic_start" />
+                <TextView
+                    android:id="@+id/hud_mic_status"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textColor="#13292D"
+                    android:visibility="gone" />
+                <com.eon.assistant.ToneGraph
+                    android:id="@+id/hud_mic_graph"
+                    android:layout_width="match_parent"
+                    android:layout_height="32dp"
+                    android:background="#DFEBE9"
+                    android:importantForAccessibility="no"
+                    android:visibility="gone" />
                 <TextView
                     android:id="@+id/hud_result"
                     android:layout_width="match_parent"

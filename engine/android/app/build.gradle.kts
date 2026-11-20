@@ -51,7 +51,7 @@ val linkDebugResources by tasks.registering(Exec::class) {
         val out = resourcesApk.get().asFile
         out.parentFile.mkdirs()
         val java = generatedR.get().asFile.apply { mkdirs() }
-        commandLine(listOf(buildTools.get().resolve("aapt2"), "link", "-I", androidJar.get(),
+        commandLine(listOf(buildTools.get().resolve("aapt2"), "link", "--debug-mode", "-I", androidJar.get(),
             "--manifest", manifest, "--java", java, "-o", out) +
             if (resDir.isDirectory) listOf(compiledRes.get().asFile) else emptyList())
     }

@@ -6,6 +6,7 @@ import android.app.AlertDialog
 import android.app.role.RoleManager
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -30,6 +31,8 @@ class AssistantActivity : Activity() {
     private var consent: AlertDialog? = null
     private var resumed = false
     private var selectionCanceled = false
+    private var micPermissionPending = false
+    private var micPermissionStatus: TextView? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -98,6 +101,20 @@ class AssistantActivity : Activity() {
         column.addView(requestRole)
         if (Build.VERSION.SDK_INT >= 31) {
             column.addView(TextView(this).apply { setText(R.string.voice_hud_help) })
+            micPermissionStatus = TextView(this).also(column::addView)
+            column.addView(Button(this).apply {
+                text = getString(R.string.voice_mic_permission)
+                filterTouchesWhenObscured = true
+                setOnClickListener {
+                    if (!resumed || !hasWindowFocus() || micPermissionPending) return@setOnClickListener
+                    if (MicPermission.granted(this@AssistantActivity)) {
+                        updateMicPermissionStatus()
+                    } else {
+                        micPermissionPending = true
+                        requestPermissions(arrayOf(MicPermission.NAME), MIC_REQUEST)
+                    }
+                }
+            })
         }
         column.addView(Button(this).apply {
             text = "Manage default apps in Settings"
@@ -136,6 +153,26 @@ class AssistantActivity : Activity() {
             selectionCanceled = resultCode == RESULT_CANCELED
         }
     }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, results: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, results)
+        if (requestCode != MIC_REQUEST || !micPermissionPending) return
+        micPermissionPending = false
+        val approved = permissions.singleOrNull() == MicPermission.NAME &&
+            results.singleOrNull() == PackageManager.PERMISSION_GRANTED && MicPermission.granted(this)
+        MicPermission.reviewed = approved
+        updateMicPermissionStatus()
+    }
+
+    private fun updateMicPermissionStatus() {
+        micPermissionStatus?.setText(when {
+            MicPermission.allowed(this) -> R.string.voice_mic_prepared
+            MicPermission.granted(this) -> R.string.voice_mic_pregranted
+            else -> R.string.voice_mic_unprepared
+        })
+    }
+
+    private companion object { const val MIC_REQUEST = 2 }
 
     private fun openSettings(action: String) {
         try {
@@ -187,6 +224,7 @@ class AssistantActivity : Activity() {
     override fun onResume() {
         super.onResume()
         resumed = true
+        updateMicPermissionStatus()
         // Returning here cancels any outstanding shortcut, including after Settings or recreation.
         InspectionAccess.cancel()
         inspectionStatus.text = if (Build.VERSION.SDK_INT >= 34) {

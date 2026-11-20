@@ -145,7 +145,7 @@ The `android-debug` CI job runs the last command on a fresh API 35 x86_64 emulat
 
 JVM tests and `--build-only` do not exercise AndroidKeyStore. A passing emulator run does not attest physical hardware backing or verify the system shortcut UI.
 
-**Assistant HUD (API 31+, no microphone or media-library permission).** With EON already
+**Built-in tone HUD (API 31+, no microphone or media-library permission needed for the tone).** With EON already
 selected as assistant, invoke it while unlocked using the system assistant gesture. Expand
 the card and tap **Analyze built-in notification tone**. This measures the first notification
 sound on Android's **internal** media volume, not the user's selected ringtone, a recording,
@@ -154,6 +154,12 @@ can be shorter), on a fixed 0–100% full-scale axis. Progress counts measured w
 12; completion reports the highest RMS. An absent, unreadable or unsupported tone gives
 an unavailable result, not a sample waveform. Stop/clear, collapse, hide, lock or loss of the
 assistant binding retires the tone data. No levels or audio are saved.
+
+The separate **Start 6-second microphone meter** uses `AudioRecord`, not the built-in
+tone. Review the Android microphone permission in EON controls, then start a take in
+an expanded, unlocked assistant card. Selection as assistant does not start capture.
+The meter shows half-second RMS levels; Stop, hide or loss of the session ends the
+take. It does not record to a file, listen in the background or measure acoustic TTFA.
 
 Two **distinct** instrumentation gates are available after building the APK:
 

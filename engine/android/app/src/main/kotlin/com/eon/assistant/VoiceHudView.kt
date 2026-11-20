@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Region
+import android.graphics.Rect
 import android.util.AttributeSet
 import android.view.View
 import android.view.WindowInsets
@@ -48,6 +49,41 @@ internal class VoiceHudView(
     private val graph: ToneGraph = findViewById(R.id.hud_tone_graph)
     private val reading: TextView = findViewById(R.id.hud_tone_status)
     private val position = IntArray(2)
+    private val mic: Button = findViewById(R.id.hud_mic)
+    private val title: TextView = findViewById(R.id.hud_title)
+    private val micStatus: TextView = findViewById(R.id.hud_mic_status)
+    private val micGraph: ToneGraph = findViewById(R.id.hud_mic_graph)
+    private val visible = Rect()
+    var onMicWindowLost: (() -> Unit)? = null
+
+    fun setMicClick(click: () -> Unit) = mic.setOnClickListener { click() }
+
+    fun micVisible(): Boolean = isAttachedToWindow && hasWindowFocus() && windowVisibility == VISIBLE &&
+        mic.isShown && mic.getGlobalVisibleRect(visible) && visible.height() >= mic.height / 2
+
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        if (!hasWindowFocus) onMicWindowLost?.invoke()
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        if (visibility != VISIBLE) onMicWindowLost?.invoke()
+    }
+
+    override fun onDetachedFromWindow() {
+        onMicWindowLost?.invoke()
+        super.onDetachedFromWindow()
+    }
+
+    fun renderMic(active: Boolean, levels: List<Int>, message: String?) {
+        title.setText(if (active) R.string.voice_mic_title else R.string.voice_hud_title)
+        mic.setText(if (active) R.string.voice_mic_stop else R.string.voice_mic_start)
+        micStatus.text = message
+        micStatus.visibility = if (message == null) GONE else VISIBLE
+        micGraph.levels = levels
+        micGraph.visibility = if (levels.isEmpty()) GONE else VISIBLE
+    }
 
     init {
         toggle.setOnClickListener { toggleDetails.run() }
