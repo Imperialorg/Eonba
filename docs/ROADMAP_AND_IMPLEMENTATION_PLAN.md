@@ -229,7 +229,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/ast/tree_sitter_engine.rs`, `src/ast/synthesizer.rs`, `src/ast/self_healing_compiler.rs`, `src/ast/repomap.rs`, `src/ast/dap.rs`
   - **Requirements**: Tree-sitter AST parsing across Rust, Kotlin, C/C++, Python, TypeScript. PageRank architectural RepoMap generator. Embedded Debug Adapter Protocol (DAP) client bridge (`dev.dap`) interfacing with `codelldb`, `debugpy`, and `jdwp` to inspect live stack frames, conditional breakpoints, and heap allocations. Automated compiler diagnostic capture and localized syntax tree repair.
   - **Unit Tests**: `cargo test -p eon-cyber ast_tests`, `self_healing_tests`, `dap_tests`.
-  - **Verified subset**: A bounded repair loop uses compiler diagnostics or Python AST lint on a fixed benign corpus. Across four languages, 48 of 50 cases passed independent behavior checks after one edit, 49 within three revisions. Kotlin uses guarded token edits. This does not supply the remaining analysis grammars, RepoMap or live debugger integrations.
+  - **Verified subset**: Across four languages, 48 of 50 benign repair cases passed independent behavior checks after one edit, 49 within three revisions. Kotlin uses guarded token edits. The separate RepoMap parses all six languages and ranks lexical membership and unambiguous syntactic call matches. Its hand-checked fixture covers 19 declarations in eight files. This is not compiler name resolution or live debugger verification.
 
 - [ ] **Task 7.2: Defensive source review, repair proposals and platform telemetry**
   - **Crate**: `eon-cyber`
