@@ -58,15 +58,83 @@ fn callback_sized_fragments_of_recorded_speech_reach_the_endpoint_at_device_rate
     assert!(endpoints.iter().all(|e| e.silence_ms == 800));
 }
 
-#[cfg(feature = "native")]
 #[test]
-#[ignore = "requires an explicitly configured virtual monitor; never run against an ambient microphone"]
-fn virtual_cpal_monitor_runs_the_listening_endpoint() {
+fn vad_tests_30ms_device_windows_are_never_padded_or_scored_twice() {
+    use eon_voice::resample::{CaptureFrames, resample_mono};
+    use eon_voice::ring::pcm_ring;
+    use eon_voice::vad::{VadEndpoint, VadStep};
+
+    let speech = read_pcm16_mono_16k(&fixture("en.wav"));
+    // Include both supported bounds, common USB/Bluetooth rates and a
+    // non-integer ratio. Only the continuous resampler sees the device rate.
+    let oversized_partial = format!("{}stop", " ".repeat(8192));
+    for (hz, partial, expected_ms) in [
+        (8_000, "", 800),
+        (16_000, "stop", 320),
+        (44_100, "run tests and", 1152),
+        (48_000, "", 800),
+        (96_000, "stop", 320),
+        (192_000, oversized_partial.as_str(), 1152),
+    ] {
+        let mut source = resample_mono(&speech[19_200..35_200], 16_000, hz).unwrap();
+        source.resize(5 * hz as usize / 2, 0.0);
+        let (mut tx, rx) = pcm_ring(16_384);
+        let mut input = CaptureFrames::new(rx, hz).unwrap();
+        let mut vad = VadEndpoint::new(load_model());
+        let (mut frames, mut ends) = (0, 0);
+        for window in source.chunks(hz as usize * 30 / 1000) {
+            assert_eq!(tx.push_slice(window), window.len());
+            if let VadStep::Processed(event) = vad.poll_capture(&mut input, partial).unwrap() {
+                frames += 1;
+                if let Some(end) = event {
+                    assert_eq!(end.silence_ms, expected_ms);
+                    ends += 1;
+                }
+            }
+            assert_eq!(vad.poll_capture(&mut input, partial).unwrap(), VadStep::Waiting);
+        }
+        assert!(
+            (77..=78).contains(&frames),
+            "{hz} Hz returned {frames} frames for 2.5 seconds"
+        );
+        assert_eq!(ends, 1, "{hz} Hz failed to close the recorded turn");
+    }
+}
+
+#[test]
+fn vad_tests_invalid_stream_geometry_and_gaps_are_not_silence() {
+    use eon_voice::resample::CaptureFrames;
+    use eon_voice::ring::pcm_ring;
+    use eon_voice::vad::{VadEndpoint, VadStep};
+    for rate in [0, 7_999, 192_001] {
+        assert!(CaptureFrames::<VAD_FRAME_SAMPLES>::new(pcm_ring(8192).1, rate).is_err());
+    }
+    assert!(CaptureFrames::<VAD_FRAME_SAMPLES>::new(pcm_ring(479).1, 16_000).is_err());
+    let mut vad = VadEndpoint::new(load_model());
+    for corrupt in [false, true] {
+        let (mut tx, rx) = pcm_ring(VAD_FRAME_SAMPLES);
+        let mut input = CaptureFrames::new(rx, 16_000).unwrap();
+        assert_eq!(tx.push_slice(&[0.0; 480]), 480);
+        assert_eq!(vad.poll_capture(&mut input, "").unwrap(), VadStep::Waiting);
+        if corrupt {
+            assert_eq!(tx.push_slice(&[f32::NAN; 32]), 32);
+        } else {
+            assert_eq!(tx.push_slice(&[0.0; 33]), 32, "must have lost one sample");
+        }
+        assert!(vad.poll_capture(&mut input, "").is_err());
+        assert!(vad.poll_capture(&mut input, "").is_err());
+    }
+}
+
+#[cfg(all(feature = "native", target_os = "linux"))]
+#[test]
+#[ignore = "use tests/vad_private_monitor.py --private-monitor; never opens an ambient microphone"]
+fn vad_tests_private_monitor() {
     use eon_voice::barge_in::BargeIn;
     use eon_voice::device::{capture_default_frames, play_default_output};
     use eon_voice::resample::resample_mono;
     use eon_voice::ring::pcm_ring;
-    use eon_voice::vad::{VadEndpoint, VadStep};
+    use eon_voice::vad::CaptureVad;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
@@ -75,35 +143,149 @@ fn virtual_cpal_monitor_runs_the_listening_endpoint() {
         Ok("1"),
         "opt in only after configuring local virtual loopback"
     );
-    let path = std::env::var_os("EON_ZIPFORMER_TEST_WAV_0")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| fixture("0.wav"));
-    let speech = read_pcm16_mono_16k(&path);
-    let mut endpoint = VadEndpoint::new(load_model());
+    // Fail before CPAL can ask ALSA for its default. This private configuration
+    // has exactly one local Pulse server, no fallback devices or host includes.
+    let server = std::env::var("PULSE_SERVER").expect("missing private server");
+    let socket = server
+        .strip_prefix("unix:/")
+        .expect("expected an absolute local socket");
+    assert!(!socket.contains(['"', '\n', '\r']));
+    let conf =
+        std::fs::read_to_string(std::env::var_os("ALSA_CONFIG_PATH").expect("missing private ALSA config")).unwrap();
+    assert_eq!(conf, format!("pcm.!default {{ type pulse server \"{server}\" }}\n"));
+    for (kind, env, name) in [
+        ("sources", "PULSE_SOURCE", "eon_vad.monitor"),
+        ("sinks", "PULSE_SINK", "eon_vad"),
+    ] {
+        assert_eq!(std::env::var(env).as_deref(), Ok(name));
+        let list = std::process::Command::new("pactl")
+            .args(["--server", &server, "list", "short", kind])
+            .output()
+            .unwrap();
+        assert!(list.status.success(), "private server unavailable");
+        let entries = String::from_utf8(list.stdout).unwrap();
+        let names: Vec<_> = entries
+            .lines()
+            .map(|line| {
+                let mut fields = line.split('\t').skip(1);
+                (fields.next(), fields.next())
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [(Some(name), Some("module-null-sink.c"))],
+            "unexpected {kind} on dedicated server"
+        );
+    }
+
+    // Repeat the same second of the digest-pinned recording with 1.5 s of
+    // explicit digital silence after each copy. No microphone is a fixture.
+    let speech = read_pcm16_mono_16k(&fixture("en.wav"));
+    let vad = load_model();
     let (mut tx, rx) = pcm_ring(1 << 21);
     let output = play_default_output(rx, BargeIn::new()).unwrap();
-    let source = resample_mono(&speech, 16_000, output.sample_rate).unwrap();
-    let (mut reader, input) = capture_default_frames().unwrap();
-    assert_eq!(tx.push_slice(&source), source.len());
+    let mut turn = resample_mono(&speech[19_200..35_200], 16_000, output.sample_rate).unwrap();
+    turn.resize(turn.len() + output.sample_rate as usize * 3 / 2, 0.0);
+    let source = turn.repeat(2);
+    let input = capture_default_frames().unwrap();
+    let input_rate = input.1.sample_rate;
+    let counters = input.1.counters.clone();
+    let mut stream = CaptureVad::new(vad, input);
     let start = Instant::now();
-    let mut frames = 0;
+    let mut inference = Vec::new();
+    let mut last_speech = 0;
+    let mut last_signal = None;
+    let mut observed = Vec::new();
+    let mut strong = 0;
+    let mut pauses = Vec::new();
+    let mut ends = Vec::new();
     loop {
-        assert!(start.elapsed() < Duration::from_secs(12), "no endpoint after {frames} frames");
-        match endpoint.poll_capture(&mut reader, "").unwrap() {
-            VadStep::Waiting => std::thread::sleep(Duration::from_micros(250)),
-            VadStep::Processed(event) => {
-                frames += 1;
-                if let Some(event) = event {
-                    assert_eq!(event.silence_ms, 800);
-                    break;
-                }
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "timed out after {} scored frames; pauses={pauses:?}, ends={ends:?}",
+            inference.len()
+        );
+        let Some(score) = stream.poll("").unwrap() else {
+            std::thread::sleep(Duration::from_micros(250));
+            continue;
+        };
+        inference.push(score.inference_time);
+        let i = inference.len();
+        let now = Instant::now();
+        if score.rms > 0.0032 {
+            last_signal = Some((i, now));
+        }
+        if i <= 10 {
+            assert!(last_signal.is_none() && score.probability < 0.35);
+            assert!(score.acoustic_pause.is_none() && score.turn_end.is_none());
+            if i == 10 {
+                assert_eq!(tx.push_slice(&source), source.len());
             }
         }
+        if score.probability >= 0.35 {
+            last_speech = i;
+        }
+        strong += usize::from(score.probability >= 0.60);
+        if let Some(pause) = score.acoustic_pause {
+            assert_eq!(pause.silence_ms, 256);
+            assert_eq!(i - last_speech, 8);
+            assert!(strong >= 8, "no sustained speech before pause {i}");
+            let (block, time) = last_signal.expect("no captured signal");
+            let since_signal_ms = (i - block) * 32;
+            assert!(
+                (160..=512).contains(&since_signal_ms),
+                "pause relative to replay signal: {since_signal_ms} ms"
+            );
+            observed.push((since_signal_ms, now.duration_since(time)));
+            strong = 0;
+            pauses.push(i);
+        }
+        if let Some(end) = score.turn_end {
+            assert_eq!(end.silence_ms, 800);
+            assert_eq!(i - last_speech, 25);
+            ends.push(i);
+        }
+        if ends.len() == 2 && i - ends[1] >= 16 && output.counters.frames.load(Ordering::Acquire) == source.len() as u64
+        {
+            break;
+        }
     }
-    assert_eq!(input.counters.capture_drops.load(Ordering::Acquire), 0);
-    assert_eq!(input.counters.driver_errors.load(Ordering::Acquire), 0);
+    assert_eq!(pauses.len(), 2);
+    // The clips were played exactly 2.5 seconds apart; the VAD runs on a
+    // 32 ms sample grid, not the driver's callback or the worker's wall clock.
+    assert!(
+        (75..=81).contains(&(pauses[1] - pauses[0])),
+        "unexpected pause spacing {pauses:?}"
+    );
+    assert_eq!(counters.capture_drops.load(Ordering::Acquire), 0);
+    assert_eq!(counters.driver_errors.load(Ordering::Acquire), 0);
     assert_eq!(output.counters.driver_errors.load(Ordering::Acquire), 0);
-    eprintln!("CPAL virtual monitor {} Hz -> Silero endpoint: {frames} frames", input.sample_rate);
+    // Once a driver reports a discontinuity, even an empty poll cannot go
+    // back to Waiting or reuse the recurrent state. Inject only after replay.
+    counters.driver_errors.fetch_add(1, Ordering::Release);
+    assert!(stream.poll("").is_err());
+    assert!(stream.poll("").is_err());
+    drop(stream);
+    drop(output);
+    let callbacks = counters.callbacks.load(Ordering::Acquire);
+    let samples = counters.frames.load(Ordering::Acquire);
+    inference.sort_unstable();
+    let n = inference.len();
+    let misses = inference.iter().filter(|&&d| d >= Duration::from_millis(1)).count();
+    eprintln!(
+        "private CPAL {input_rate}Hz: {callbacks} input callbacks, {samples} samples; \
+        pauses={pauses:?}, turn_ends={ends:?} (32ms frames); captured RMS >0.0032 to pause \
+        (sample-clock ms, worker elapsed)={observed:?}; Silero {n} live frames \
+        p50={:?} p95={:?} p99={:?} max={:?}, {misses} >=1ms",
+        inference[n / 2],
+        inference[n * 95 / 100],
+        inference[n * 99 / 100],
+        inference[n - 1]
+    );
+    assert_eq!(
+        misses, 0,
+        "the <1ms per-frame Linux gate is a maximum, not a percentile"
+    );
 }
 
 #[test]
