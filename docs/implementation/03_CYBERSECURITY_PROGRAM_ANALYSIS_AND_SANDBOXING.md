@@ -200,6 +200,17 @@ Implementing eBPF in Rust requires obeying hard Linux kernel verifier laws:
 
 ### 4.2 Tier B (Windows ETW) and Tier C (Unrooted Android `smoltcp` + JA4)
 
+The implemented Windows source-review marker is opt-in per invocation:
+`eon-audit rust --etw < input.rs` (or `python`). It submits event 1, version 1,
+keyword 1, informational level, to provider `{87a9f157-e3c2-4589-93a0-299a3d325e72}`.
+The event has no payload: no path, source, findings or command line. ETW supplies
+the process/thread IDs and timestamp. Normal reviews do not register the provider.
+`submitted` is not proof of collection; the Windows acceptance test stops a trace
+and reads the ETL to distinguish a real event from a successful no-op. Missing
+listeners and unsupported systems yield an explicit telemetry gap without changing
+the source report. The CLI does not start a system trace or subscribe to any OS
+provider. The wider provider designs below are not verified implementations.
+
 - **Tier B (`windows_etw.rs`)**: Subscribe to `Microsoft-Windows-Kernel-Process` (`{22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716}`), `Microsoft-Windows-Kernel-Network`, and DNS-Client ETW providers on a background OS thread, normalizing events into the exact same `TelemetryEvent` enum emitted by Tier A.
 - **Tier C (`userspace_net.rs`)**: On unrooted Android (via `VpnService` `/dev/tun` FD) or unprivileged desktop sandboxes:
   - Drive `smoltcp 0.14.0` (`Interface` + `SocketSet`, zero heap allocation per packet) to reassemble TCP/UDP metadata and inspect DNS queries and TLS `ClientHello` records.

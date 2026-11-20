@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use std::io::{self, Read, Write};
 use std::process::ExitCode;
 
-const USAGE: &str = "Usage: eon-audit rust|python < source-file\n       eon-audit self-io";
+const USAGE: &str = "Usage: eon-audit rust|python [--etw] < source-file\n       eon-audit self-io";
 
 fn source_report(language: Lang, input: impl Read) -> Result<Value, &'static str> {
     let mut bytes = Vec::new();
@@ -47,15 +47,24 @@ fn self_io() -> Value {
 fn run() -> Result<(), &'static str> {
     let mut args = std::env::args_os().skip(1);
     let mode = args.next();
-    if args.next().is_some() {
+    let option = args.next();
+    if args.next().is_some() || option.as_ref().is_some_and(|o| o != "--etw") {
         return Err(USAGE);
     }
-    let report = match mode.as_deref().and_then(|s| s.to_str()) {
+    let mut report = match mode.as_deref().and_then(|s| s.to_str()) {
         Some("rust") => source_report(Lang::Rust, io::stdin().lock())?,
         Some("python") => source_report(Lang::Python, io::stdin().lock())?,
-        Some("self-io") => self_io(),
+        Some("self-io") if option.is_none() => self_io(),
         _ => return Err(USAGE),
     };
+    if option.is_some() {
+        report["etw"] = match telemetry::submit_review_completion() {
+            Assessment::Observed(()) => json!({ "status": "submitted" }),
+            Assessment::Unverified(gap) => {
+                json!({ "status": "unverified", "reason": format!("{gap:?}") })
+            }
+        };
+    }
     let mut stdout = io::stdout().lock();
     serde_json::to_writer(&mut stdout, &report).map_err(|_| "cannot write report")?;
     writeln!(stdout).map_err(|_| "cannot write report")

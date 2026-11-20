@@ -4,7 +4,9 @@
 use super::{Assessment, Gap};
 use std::time::{Duration, Instant};
 
+mod review_etw;
 mod self_fsync;
+pub use review_etw::submit_review_completion;
 pub use self_fsync::SelfFsyncSensor;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

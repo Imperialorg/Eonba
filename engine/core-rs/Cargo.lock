@@ -2650,6 +2650,7 @@ dependencies = [
  "z3",
 ]
 
+ "windows-sys 0.61.2",
 [[package]]
 name = "eon-daemon"
 version = "0.1.0"

@@ -236,7 +236,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/defense/taint_auditor.rs`, `src/defense/auto_patch.rs`, `src/defense/telemetry.rs`
   - **Requirements**: Review authorized source for patterns associated with CWE-119, CWE-89, CWE-362 and observable timing differences. Produce reviewable constant-time and bounds-checking edits, without executing submitted code or patching a running process. Collect opt-in, metadata-only telemetry on supported Linux/Android eBPF, Windows ETW and stock Android backends. Distinguish observed evidence from unsupported rules and unavailable sensors.
   - **Verification**: Exercise both matching and nonmatching source, compile and test the reviewed repair, check that reports do not disclose the source, and test each claimed telemetry backend on its supported host. Local `/proc/self/io` counters do not establish eBPF, ETW or VPN coverage.
-  - **Stock Android evidence**: An opted-in local action measured 334 ms of process-wide CPU time on an API 35 emulator. The app does not open a network connection, accept a target PID or persist a baseline. No Android eBPF, VPN or Windows ETW result.
+  - **Platform evidence**: An opted-in local action measured 334 ms of process-wide CPU time on an API 35 emulator. The app does not open a network connection, accept a target PID or persist a baseline. The Windows audit CLI cross-linked with a payload-free ETW marker. The Windows job checks delivery after opt-in and absence by default. No native Windows ETW, Android eBPF or VPN result.
 
 - [x] **Task 7.3: Offline dependency and advisory assessment**
   - **Crate**: `eon-cyber`

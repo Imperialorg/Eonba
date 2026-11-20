@@ -163,6 +163,12 @@ jobs:
           for case_name in windows_dpapi_owner_grants_and_child_stdin windows_dpapi_broker_lifetime_and_invalid_ciphertext; do
             grep -Fx "test credentials::platform::identity_and_credential_tests::$case_name ... ok" dpapi-result.txt
           done
+      - name: Read back an opted-in source review from Windows ETW
+        shell: pwsh
+        run: |
+          cargo build --locked -p eon-cyber --no-default-features --bin eon-audit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./crates/eon-cyber/tests/review_etw.ps1 -AuditExe ./target/debug/eon-audit.exe
 
   wasm-containment:
     runs-on: ubuntu-latest

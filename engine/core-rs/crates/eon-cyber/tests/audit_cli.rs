@@ -3,8 +3,12 @@ use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
 fn audit(mode: &str, input: &[u8]) -> Output {
+    invoke(&[mode], input)
+}
+
+fn invoke(args: &[&str], input: &[u8]) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_eon-audit"))
-        .arg(mode)
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -26,6 +30,7 @@ fn reports_byte_ranges_but_never_reflects_stdin() {
             .contains("private_marker")
     );
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report.get("etw").is_none());
     let sql = report["checks"]
         .as_array()
         .unwrap()
@@ -38,6 +43,38 @@ fn reports_byte_ranges_but_never_reflects_stdin() {
             ..sql["end_byte"].as_u64().unwrap() as usize],
         "db.execute(f'private_marker {val}')"
     );
+}
+
+#[test]
+fn etw_is_opt_in_for_reviews_only_and_does_not_change_findings() {
+    let source = b"def f():\n    return 'private_marker'\n";
+    let plain = audit("python", source);
+    let opted_in = invoke(&["python", "--etw"], source);
+    assert!(plain.status.success() && opted_in.status.success());
+    let plain: Value = serde_json::from_slice(&plain.stdout).unwrap();
+    let mut with_marker: Value = serde_json::from_slice(&opted_in.stdout).unwrap();
+    let marker = with_marker.as_object_mut().unwrap().remove("etw").unwrap();
+    assert_eq!(plain, with_marker);
+    assert!(!String::from_utf8_lossy(&opted_in.stdout).contains("private_marker"));
+    #[cfg(not(windows))]
+    assert_eq!(
+        marker,
+        serde_json::json!({"status": "unverified", "reason": "Unsupported"})
+    );
+    #[cfg(windows)]
+    assert!(matches!(
+        marker["status"].as_str(),
+        Some("submitted" | "unverified")
+    ));
+    for args in [
+        &["self-io", "--etw"][..],
+        &["rust", "--etw", "target"][..],
+        &["python", "--unknown"][..],
+    ] {
+        let refused = invoke(args, b"");
+        assert_eq!(refused.status.code(), Some(2));
+        assert!(refused.stdout.is_empty());
+    }
 }
 
 #[test]

@@ -13,6 +13,9 @@ self-fsync-ebpf = ["dep:eon-ebpf"]
 [target.'cfg(target_os = "linux")'.dependencies]
 eon-ebpf = { path = "../eon-ebpf", optional = true, default-features = false, features = ["self-fsync"] }
 
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Diagnostics_Etw"] }
+
 [dependencies]
 eon-primitives = { path = "../eon-primitives" }
 petgraph = "0.8"
