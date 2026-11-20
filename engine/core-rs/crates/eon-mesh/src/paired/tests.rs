@@ -77,14 +77,21 @@ async fn paired_pages_resume_large_mixed_writer_histories_and_replay_over_quic()
         let interrupt = async {
             let mut first = true;
             let mut pushed = None;
-            while pushed.is_none() {
+            loop {
+                let mut interrupted = false;
                 desk.try_serve_one(|bytes| {
                     if first {
-                        let Request::ChangesSince(v) = unpack(&bytes)? else {
+                        let Request::ChangesSince { from: v, target: None } = unpack(&bytes)? else {
                             panic!("expected pull")
                         };
                         assert_eq!(frontier(v)?, partial_pull);
                         first = false;
+                    }
+                    if pushed.is_some() {
+                        // The inflated first ACK must not skip the next Apply.
+                        assert!(matches!(unpack(&bytes)?, Request::Apply(_)));
+                        interrupted = true;
+                        return pack(&Reply::Applied(&b0.encode())); // stale/no-progress ACK
                     }
                     let reply = answer(&b, &bytes)?;
                     if matches!(unpack(&reply)?, Reply::Applied(_)) {
@@ -96,6 +103,9 @@ async fn paired_pages_resume_large_mixed_writer_histories_and_replay_over_quic()
                 })
                 .await
                 .unwrap();
+                if interrupted {
+                    break;
+                }
             }
             pushed.unwrap()
         };
@@ -222,8 +232,12 @@ async fn paired_pages_reject_missing_duplicate_or_out_of_frontier_pull() {
             },
         )
         .unwrap();
-    let empty = VersionVector::default().encode();
-    let update = private.paired_export_since(&empty).unwrap();
+    let Page::Update { bytes: update, .. } = private
+        .paired_page(&VersionVector::default(), &private.paired_version(), MAX_FRAME_BYTES)
+        .unwrap()
+    else {
+        panic!("expected page")
+    };
     let tip = private.paired_version().encode();
     let public = Replica::new(3).unwrap();
     public.set("k", "out of domain").unwrap();
@@ -270,4 +284,175 @@ fn paired_pages_require_exact_frontier_framing() {
     assert!(frontier(&[0, 0]).is_err()); // trailing bytes
     assert!(frontier(&[2, 1, 2, 1, 4]).is_err()); // duplicate writer
     assert!(frontier(&[1, 1, 1]).is_err()); // negative (zig-zag) counter
+}
+
+fn write(replica: &Replica, key: &str, len: usize) {
+    replica
+        .put_entity(
+            key,
+            &Entity {
+                kind: "doc".into(),
+                label: "x".repeat(len),
+            },
+        )
+        .unwrap();
+}
+
+fn page(source: &Replica, from: &VersionVector) -> Vec<u8> {
+    match source
+        .paired_page(from, &source.paired_version(), MAX_FRAME_BYTES)
+        .unwrap()
+    {
+        Page::Update { bytes, .. } => bytes,
+        _ => panic!("expected update"),
+    }
+}
+
+#[test]
+fn paired_pages_missing_direct_or_transitive_dependency_rejected_before_mutation() {
+    let a = Replica::new(1).unwrap();
+    let b = Replica::new(2).unwrap();
+    let c = Replica::new(3).unwrap();
+    let receiver = Replica::new(4).unwrap();
+    write(&a, "a", 1);
+    copy_missing(&a, &b);
+    write(&b, "b", 1);
+    copy_missing(&b, &c);
+    write(&c, "c", 1);
+    copy_missing(&a, &receiver);
+    for (source, key) in [(&b, "b"), (&c, "c")] {
+        let before = receiver.paired_version();
+        let update = page(source, &before);
+        let mut incomplete = source.paired_version();
+        incomplete.remove(&1); // already local, but missing from the advertised target
+        assert!(
+            receiver
+                .paired_apply_page(&update, Some((&before, &incomplete)))
+                .is_err()
+        );
+        assert_eq!(receiver.paired_version(), before);
+        assert!(!receiver.knowledge_graph().unwrap().entities.contains_key(key));
+        receiver
+            .paired_apply_page(&update, Some((&before, &source.paired_version())))
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn paired_pages_allow_overlapping_import_while_pull_request_in_flight() {
+    let (a, b) = (Replica::new(1).unwrap(), Replica::new(2).unwrap());
+    write(&b, "one", 1);
+    let prefix = page(&b, &VersionVector::default());
+    write(&b, "two", 2);
+    let (edge, desk) = nodes().await;
+    timeout(Duration::from_secs(8), async {
+        let mut first = true;
+        tokio::select! {
+            result = sync(&edge, desk.addr(), &a) => result.unwrap(),
+            () = async { loop {
+                desk.try_serve_one(|bytes| {
+                    let reply = answer(&b, &bytes)?;
+                    if first {
+                        // The saved `from` is empty. Another exchange imports a
+                        // prefix *after* this request and before its reply.
+                        a.paired_apply_page(&prefix, None)?;
+                        first = false;
+                    }
+                    Ok(reply)
+                }).await.unwrap();
+            } } => unreachable!(),
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(a.paired_version(), b.paired_version());
+    assert_eq!(a.knowledge_graph().unwrap(), b.knowledge_graph().unwrap());
+    edge.close().await;
+    desk.close().await;
+}
+
+#[tokio::test]
+async fn paired_pages_pin_pull_and_accept_concurrent_remote_edits_without_skipping_push() {
+    let (a, b) = (Replica::new(1).unwrap(), Replica::new(2).unwrap());
+    for i in 0..4 {
+        write(&a, &format!("a{i}"), MAX_FRAME_BYTES / 3);
+        write(&b, &format!("b{i}"), MAX_FRAME_BYTES / 3);
+    }
+    let pinned = b.paired_version();
+    let mut expected = a.paired_version();
+    expected.merge(&pinned);
+    let (edge, desk) = nodes().await;
+    let mut pulls = 0;
+    let mut pushes = 0;
+    timeout(Duration::from_secs(12), async {
+        tokio::select! {
+            result = sync(&edge, desk.addr(), &a) => result.unwrap(),
+            () = async { loop {
+                desk.try_serve_one(|bytes| {
+                    match unpack(&bytes)? {
+                        Request::ChangesSince { target, .. } => {
+                            assert_eq!(target.map(frontier).transpose()?, (pulls != 0).then(|| pinned.clone()));
+                            let reply = answer(&b, &bytes)?;
+                            pulls += 1;
+                            write(&b, &format!("during-pull{pulls}"), 1);
+                            Ok(reply)
+                        }
+                        Request::Apply(_) => {
+                            pushes += 1;
+                            write(&b, &format!("during-push{pushes}"), 1);
+                            answer(&b, &bytes)
+                        }
+                        _ => panic!("unexpected request"),
+                    }
+                }).await.unwrap();
+            } } => unreachable!(),
+        }
+    })
+    .await
+    .unwrap();
+    assert!(pulls > 1 && pushes > 1);
+    assert_eq!(a.paired_version(), expected);
+    assert!(b.paired_version() > expected);
+    timeout(Duration::from_secs(8), async {
+        tokio::select! {
+            result = sync(&edge, desk.addr(), &a) => result.unwrap(),
+            () = async { loop { serve_one(&desk, &b).await.unwrap(); } } => unreachable!(),
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(a.paired_version(), b.paired_version());
+    assert_eq!(a.knowledge_graph().unwrap(), b.knowledge_graph().unwrap());
+    edge.close().await;
+    desk.close().await;
+}
+
+#[tokio::test]
+async fn paired_pages_report_frontier_limit_separately_from_record_limit() {
+    let (a, b) = (Replica::new(1).unwrap(), Replica::new(2).unwrap());
+    let legacy = loro::LoroDoc::new();
+    let map = legacy.get_map("knowledge.entities.v2");
+    let value = postcard::to_allocvec(&Entity {
+        kind: "doc".into(),
+        label: "x".into(),
+    })
+    .unwrap();
+    for writer in 1..=257 {
+        legacy.set_peer_id(writer).unwrap();
+        map.insert(&writer.to_string(), value.clone()).unwrap();
+        legacy.commit();
+    }
+    b.paired_apply(&legacy.export(loro::ExportMode::all_updates()).unwrap())
+        .unwrap();
+    let (edge, desk) = nodes().await;
+    let (result, server) = timeout(Duration::from_secs(8), async {
+        tokio::join!(sync(&edge, desk.addr(), &a), serve_one(&desk, &b))
+    })
+    .await
+    .unwrap();
+    server.unwrap();
+    assert!(result.unwrap_err().to_string().contains("frontier writer limit"));
+    assert!(a.paired_version().is_empty());
+    edge.close().await;
+    desk.close().await;
 }

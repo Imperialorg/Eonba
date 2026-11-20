@@ -19,7 +19,7 @@ use iroh::{EndpointAddr, EndpointId, RelayMode, SecretKey};
 
 /// Application protocol identifier. Peers that do not offer it are refused during the handshake.
 pub const ALPN: &[u8] = b"eon/mesh/1";
-pub(crate) const PAIRED_ALPN: &[u8] = b"eon/mesh/paired/3";
+pub(crate) const PAIRED_ALPN: &[u8] = b"eon/mesh/paired/4";
 
 /// Largest request or reply accepted on one stream. Larger frames are refused rather than buffered.
 pub const MAX_FRAME_BYTES: usize = 1 << 20;

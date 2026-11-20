@@ -127,16 +127,25 @@ EON maintains a unified memory and task state across all devices using **Conflic
 3. **Task & Execution Journal (PNCounter & ORSet CRDT)**:
    - Distributed task tracking. If a background download finishes on the server while the user is using the phone, the task completion event propagates immediately.
 
-The Rust paired service negotiates `eon/mesh/paired/3`. Upgrade both peers together:
-v2 does not understand paged acknowledgements, and there is no fallback to the
-unpaired public document. A peer first pulls the missing protected operations, then
-pushes what the responder lacks. Each page must fit a 1 MiB transport frame
-including metadata. New protected writes are limited to 512 KiB for the UTF-8
-key and encoded value together; rejection leaves the history unchanged.
-Acknowledgements describe **applied** history, not the last
-page sent. After a disconnect, restart the exchange from the two actual version
-vectors; no saved network cursor is needed. A single legacy record too large for
-a page is reported rather than skipped.
+The Rust paired service negotiates `eon/mesh/paired/4`. Upgrade both peers together:
+v3 uses incompatible Loro blob pages, and there is no fallback to v2 or to the
+unpaired public document. The first pull pins the responder's target version for
+that exchange; the push then targets the initiator's post-pull version. Later
+edits remain for the next exchange. Each page carries at most 256 contiguous,
+uncompressed protected map operations from one Loro change, with its writer,
+first counter, timestamp, Lamport clock and dependencies. Snapshots and compressed
+Loro blobs are not page formats. The entire framed RPC must fit 1 MiB.
+
+V4 supports a combined frontier of at most 256 writers (and at most 256
+dependencies per change). Exceeding that limit is a frontier error, not an
+oversized-record error. New protected writes are limited to 512 KiB for the UTF-8
+key and encoded value together; rejection leaves the history unchanged. A single
+legacy record too large for a page is reported rather than skipped.
+
+Push acknowledgements return the receiver's **applied** version; only the span
+just sent is credited, even if the ACK also covers other operations. Already
+imported operations are safe to replay. After disconnect or the 1024-RPC limit,
+restart from the two actual version vectors; no saved network cursor is needed.
 
 ### 6.2 Projection into SQLite
 CRDTs serve as the append-only replication log. On each local node, a background projection worker materializes the CRDT state into relational **SQLite (FTS5 + `sqlite-vec`)** tables, enabling sub-5ms hybrid BM25 and vector similarity queries.

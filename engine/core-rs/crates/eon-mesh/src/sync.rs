@@ -7,12 +7,12 @@
 #[cfg(test)]
 mod privacy_tests;
 mod pages;
-pub(crate) use pages::Page;
+pub(crate) use pages::{Page, check_writer_count};
 mod projections;
 pub use projections::{ContextEntry, ContextRecord, Entity, KnowledgeGraph, Relation, Speaker, WorkingContext};
 
 use loro::{
-    ContainerID, ContainerType, EncodedBlobMode, ExportMode, ImportBlobMetadata, JsonMapOp, JsonOpContent,
+    ContainerID, ContainerType, EncodedBlobMode, ExportMode, JsonMapOp, JsonOpContent,
     LoroDoc, LoroValue, VersionVector,
 };
 
@@ -114,15 +114,6 @@ fn rejected() -> EonError {
 // reconstruct the validated operations in the live document; never import opaque
 // snapshot state, dictionaries or unchecked bytes there.
 fn import_checked(doc: &LoroDoc, bytes: &[u8], allowed: impl Fn(&str, &JsonMapOp) -> bool) -> EonResult<()> {
-    import_checked_range(doc, bytes, allowed, |_, _, _| true)
-}
-
-fn import_checked_range(
-    doc: &LoroDoc,
-    bytes: &[u8],
-    mut allowed: impl FnMut(&str, &JsonMapOp) -> bool,
-    valid_range: impl FnOnce(&ImportBlobMetadata, &VersionVector, &VersionVector) -> bool,
-) -> EonResult<()> {
     let meta = LoroDoc::decode_import_blob_meta(bytes, true).map_err(|_| rejected())?;
     if !matches!(meta.mode, EncodedBlobMode::Updates | EncodedBlobMode::Snapshot) {
         return Err(rejected());
@@ -133,9 +124,6 @@ fn import_checked_range(
         return Err(rejected());
     }
     let after = scratch.oplog_vv();
-    if !valid_range(&meta, &before, &after) {
-        return Err(rejected());
-    }
     let ops = scratch.export_json_updates(&before, &after).map_err(|_| rejected())?;
     for change in &ops.changes {
         if change.msg.is_some() {
