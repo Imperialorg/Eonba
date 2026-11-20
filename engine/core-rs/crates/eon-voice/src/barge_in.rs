@@ -4,8 +4,10 @@
 //! request and writes silence. Queued and late TTS are discarded in bounded batches. The detector never touches the ring itself,
 //! so it never blocks the audio thread.
 
-use std::sync::Arc;
+use std::future::poll_fn;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Poll, Waker};
 
 use crate::ring::PcmConsumer;
 
@@ -20,7 +22,49 @@ const DISCARD_BUDGET: usize = 1024;
 /// Start a fresh ring and signal for the next reply.
 #[derive(Debug, Clone, Default)]
 pub struct BargeIn {
-    state: Arc<AtomicU8>,
+    inner: Arc<Signal>,
+}
+
+#[derive(Debug, Default)]
+struct Signal {
+    state: AtomicU8,
+    // Not on the render callback path. Serializes an individual transport
+    // submission poll with revocation; never held across an async wait.
+    observer: Mutex<Option<Observer>>,
+}
+
+#[derive(Debug, Default)]
+struct Observer {
+    waker: Option<Waker>,
+}
+
+/// One wakeable readback per reply. Dropping its future also releases the
+/// registered waker, even if the worker or transport has made no progress.
+pub struct Interruption<'a>(&'a BargeIn);
+
+impl Interruption<'_> {
+    pub async fn wait(&mut self) {
+        poll_fn(|cx| {
+            let mut slot = self.0.observer();
+            if self.0.is_muted() {
+                return Poll::Ready(());
+            }
+            let observer = slot.as_mut().expect("live interruption registration");
+            if let Some(old) = &mut observer.waker {
+                old.clone_from(cx.waker());
+            } else {
+                observer.waker = Some(cx.waker().clone());
+            }
+            Poll::Pending
+        })
+        .await
+    }
+}
+
+impl Drop for Interruption<'_> {
+    fn drop(&mut self) {
+        *self.0.observer() = None;
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -38,38 +82,77 @@ impl BargeIn {
 
     /// Cancels unconditionally. Only the first request needs acknowledgment.
     pub fn trigger(&self) {
-        self.state.fetch_max(REQUESTED, Ordering::AcqRel);
+        self.revoke(|state| state.fetch_max(REQUESTED, Ordering::AcqRel) < REQUESTED);
     }
 
     #[cfg(feature = "native")]
     pub(crate) fn interrupt_playing(&self) -> bool {
-        self.state
-            .compare_exchange(PLAYING, REQUESTED, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+        self.revoke(|state| {
+            state
+                .compare_exchange(PLAYING, REQUESTED, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        })
+    }
+
+    fn observer(&self) -> MutexGuard<'_, Option<Observer>> {
+        self.inner.observer.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn revoke(&self, transition: impl FnOnce(&AtomicU8) -> bool) -> bool {
+        let waker = {
+            let mut slot = self.observer();
+            if !transition(&self.inner.state) {
+                return false;
+            }
+            slot.as_mut().and_then(|o| o.waker.take())
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        true
+    }
+
+    pub fn watch_interruption(&self) -> Option<Interruption<'_>> {
+        let mut slot = self.observer();
+        if self.is_muted() || slot.is_some() {
+            return None;
+        }
+        *slot = Some(Observer::default());
+        Some(Interruption(self))
+    }
+
+    /// Linearize **one nonblocking transport submission** with both ways to
+    /// revoke a reply. Never wait, loop over fragments, or re-enter the signal
+    /// inside `submit`. An accepted fragment cannot be retracted.
+    pub fn submit_if_live<T>(&self, submit: impl FnOnce() -> T) -> Option<T> {
+        let _guard = self.observer();
+        (!self.is_muted()).then(submit)
     }
 
     /// Acknowledges the request without unmuting the reply.
     pub fn take(&self) -> bool {
-        self.state
+        self.inner
+            .state
             .compare_exchange(REQUESTED, MUTED, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 
     pub fn is_pending(&self) -> bool {
-        self.state.load(Ordering::Acquire) == REQUESTED
+        self.inner.state.load(Ordering::Acquire) == REQUESTED
     }
 
     pub fn is_muted(&self) -> bool {
-        self.state.load(Ordering::Acquire) >= REQUESTED
+        self.inner.state.load(Ordering::Acquire) >= REQUESTED
     }
 
     pub fn is_playing(&self) -> bool {
-        self.state.load(Ordering::Acquire) == PLAYING
+        self.inner.state.load(Ordering::Acquire) == PLAYING
     }
 
     #[cfg(feature = "native")]
     pub(crate) fn playback_stopped(&self) {
         let _ = self
+            .inner
             .state
             .compare_exchange(PLAYING, IDLE, Ordering::AcqRel, Ordering::Acquire);
     }
@@ -80,6 +163,7 @@ impl BargeIn {
         let (from, to) = if samples > 0 { (IDLE, PLAYING) } else { (PLAYING, IDLE) };
         // Never overwrite a simultaneous detection. Check again after copying samples.
         let _ = self
+            .inner
             .state
             .compare_exchange(from, to, Ordering::AcqRel, Ordering::Acquire);
         if self.is_muted() {

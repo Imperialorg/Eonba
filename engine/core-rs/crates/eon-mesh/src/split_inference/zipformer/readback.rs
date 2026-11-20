@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use eon_primitives::{EonError, EonResult};
 use eon_voice::asr::ZipformerAsr;
+use eon_voice::barge_in::BargeIn;
 use eon_voice::commitment::ReplyRenderer;
 use eon_voice::tts::{KokoroFrontend, PreparedClause};
 use iroh::{EndpointAddr, EndpointId, SecretKey};
@@ -34,14 +35,18 @@ fn invalid() -> EonError {
     EonError::ValidationError("invalid token readback frame".into())
 }
 
-fn prepare(text: &str) -> EonResult<Option<PreparedClause>> {
+fn interrupted() -> EonError {
+    EonError::ValidationError("readback was interrupted or already active".into())
+}
+
+fn prepare(text: &str, cancelled: impl Fn() -> bool) -> EonResult<Option<PreparedClause>> {
     valid_text(text)?;
     if text.is_empty() {
         return Ok(None);
     }
     // Attribute dictation explicitly. Even an imperative is only being quoted.
     KokoroFrontend::load()?
-        .prepare(&format!("I heard {}.", text.to_ascii_lowercase()))
+        .prepare_cancellable(&format!("I heard {}.", text.to_ascii_lowercase()), cancelled)
         .map(Some)
 }
 
@@ -112,7 +117,13 @@ struct Step {
 }
 
 impl Step {
-    fn new(ids: &[i64], text: String, final_step: bool, samples: usize) -> EonResult<Self> {
+    fn new(
+        ids: &[i64],
+        text: String,
+        final_step: bool,
+        samples: usize,
+        cancelled: impl Fn() -> bool,
+    ) -> EonResult<Self> {
         if ids.len() > MAX_DELTA || ids.contains(&0) {
             return Err(invalid());
         }
@@ -121,7 +132,7 @@ impl Step {
             .iter()
             .map(|&id| u16::try_from(id).map_err(|_| invalid()))
             .collect::<EonResult<_>>()?;
-        let prepared = if final_step { prepare(&text)? } else { None };
+        let prepared = if final_step { prepare(&text, cancelled)? } else { None };
         Ok(Self {
             ids,
             text,
@@ -141,7 +152,7 @@ impl TokenRecognizer {
         Ok(Self(Arc::new(Mutex::new(ZipformerAsr::load_ort(dir)?))))
     }
 
-    fn start(&self, pcm: &[i16]) -> EonResult<mpsc::Receiver<EonResult<Step>>> {
+    fn start(&self, pcm: &[i16], signal: BargeIn) -> EonResult<mpsc::Receiver<EonResult<Step>>> {
         if pcm.is_empty() || pcm.len() > MAX_SAMPLES {
             return Err(EonError::ValidationError("expected up to 8 seconds of PCM16".into()));
         }
@@ -154,8 +165,9 @@ impl TokenRecognizer {
                 let mut sent = 0;
                 let mut samples = 0;
                 let mut snapshot = String::new();
+                let cancelled = || signal.is_muted() || tx.is_closed();
                 for chunk in pcm.chunks(INPUT_CHUNK) {
-                    if tx.is_closed() {
+                    if cancelled() {
                         return Ok(());
                     }
                     samples += chunk.len();
@@ -165,14 +177,14 @@ impl TokenRecognizer {
                     }
                     let ids = stream.text_token_ids().ok_or_else(model::unavailable)?;
                     if ids.len() != sent {
-                        let step = Step::new(&ids[sent..], snapshot.clone(), false, samples)?;
+                        let step = Step::new(&ids[sent..], snapshot.clone(), false, samples, cancelled)?;
                         tx.blocking_send(Ok(step)).map_err(|_| model::unavailable())?;
                         sent = ids.len();
                     }
                 }
                 let (text, ids) = stream.finish_with_text_tokens()?;
                 drop(model);
-                let final_step = Step::new(&ids[sent..], text, true, samples)?;
+                let final_step = Step::new(&ids[sent..], text, true, samples, cancelled)?;
                 tx.blocking_send(Ok(final_step)).map_err(|_| model::unavailable())
             };
             if let Err(e) = run() {
@@ -210,7 +222,25 @@ impl Readback<'_> {
         self,
         local: &TokenRecognizer,
         renderer: &mut ReplyRenderer,
+        display: impl FnMut(Caption<'_>),
+    ) -> EonResult<super::Transcript> {
+        let signal = renderer.playback_signal();
+        let mut interruption = signal.watch_interruption().ok_or_else(interrupted)?;
+        // The same waker covers dial/open, every stream read/write, and the
+        // model channel. Dropping run() closes its link and worker receiver.
+        tokio::select! {
+            biased;
+            () = interruption.wait() => Err(interrupted()),
+            result = self.run(local, renderer, display, &signal) => result,
+        }
+    }
+
+    async fn run(
+        self,
+        local: &TokenRecognizer,
+        renderer: &mut ReplyRenderer,
         mut display: impl FnMut(Caption<'_>),
+        signal: &BargeIn,
     ) -> EonResult<super::Transcript> {
         let (pcm, dest) = match self {
             Self::LocalOnly(pcm) => (pcm, None),
@@ -221,28 +251,24 @@ impl Readback<'_> {
                 (pcm, Some((edge, worker)))
             }
         };
-        let signal = renderer.playback_signal();
-        let check_live = || {
-            if signal.is_muted() {
-                Err(EonError::ValidationError("readback was interrupted".into()))
-            } else {
-                Ok(())
-            }
-        };
+        let check_live = || (!signal.is_muted()).then_some(()).ok_or_else(interrupted);
         check_live()?;
-        let mut steps = local.start(pcm)?;
+        let mut steps = local.start(pcm, signal.clone())?;
         let (mut link, mut source) = match dest {
-            Some((edge, worker)) => match wire::Link::connect(edge, worker).await {
+            Some((edge, worker)) => match wire::Link::connect(edge, worker, signal).await {
                 Ok(link) => (Some(link), Source::PairedWorker),
                 Err(source) => (None, source),
             },
             None => (None, Source::LocalOnly),
         };
-        while let Some(step) = steps.recv().await {
+        while let Some(step) = timeout(RPC_BUDGET, steps.recv())
+            .await
+            .map_err(|_| model::unavailable())?
+        {
             let mut step = step?;
             check_live()?;
             if let Some(remote) = &mut link {
-                match remote.exchange(&step).await {
+                match remote.exchange(&step, signal).await {
                     Ok(ids) => {
                         if let Some(clause) = &mut step.prepared
                             && !clause.accept_verified_ids(ids)
@@ -251,6 +277,7 @@ impl Readback<'_> {
                             link = None;
                         }
                     }
+
                     Err(reason) => {
                         link = None;
                         source = reason;

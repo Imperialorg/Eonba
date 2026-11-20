@@ -5,7 +5,12 @@
 //! only). The digest binds order, boundaries and finality, but is NOT proof
 //! of correct text or pronunciation: the edge checks both independently.
 
+use std::future::poll_fn;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
 use eon_primitives::{EonResult, id::generate_ulid_u128};
+use eon_voice::barge_in::BargeIn;
 use iroh::EndpointAddr;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use tokio::time::{Instant, timeout, timeout_at};
@@ -52,7 +57,7 @@ pub(super) async fn serve(send: &mut SendStream, recv: &mut RecvStream, vocab: &
                 return Err(invalid());
             }
             let text = text.to_owned();
-            tokio::task::spawn_blocking(move || prepare(&text))
+            tokio::task::spawn_blocking(move || prepare(&text, || false))
                 .await
                 .map_err(channel_error)??
         } else {
@@ -77,6 +82,36 @@ fn lost<T>(_: T) -> Source {
     Source::LocalOnChannelError
 }
 
+// QUIC's single poll_write either accepts a prefix or registers interest
+// without accepting anything. Never hold the submission gate while waiting
+// for credit, or let a write_all future resume an unchecked remainder.
+async fn submit_fragments(
+    signal: &BargeIn,
+    mut bytes: &[u8],
+    mut write: impl FnMut(&mut Context<'_>, &[u8]) -> Poll<Result<usize, Source>>,
+) -> Result<(), Source> {
+    while !bytes.is_empty() {
+        let n = poll_fn(|cx| {
+            signal
+                .submit_if_live(|| write(cx, bytes))
+                .unwrap_or(Poll::Ready(Err(Source::LocalOnChannelError)))
+        })
+        .await?;
+        if n == 0 {
+            return Err(Source::LocalOnChannelError);
+        }
+        bytes = &bytes[n..];
+    }
+    Ok(())
+}
+
+async fn send_live(signal: &BargeIn, send: &mut SendStream, bytes: &[u8]) -> Result<(), Source> {
+    submit_fragments(signal, bytes, |cx, bytes| {
+        Pin::new(&mut *send).poll_write(cx, bytes).map_err(lost)
+    })
+    .await
+}
+
 pub(super) struct Link {
     conn: Connection,
     send: SendStream,
@@ -92,12 +127,12 @@ impl Drop for Link {
 }
 
 impl Link {
-    pub(super) async fn connect(edge: &TokenPeer, worker: EndpointAddr) -> Result<Self, Source> {
+    pub(super) async fn connect(edge: &TokenPeer, worker: EndpointAddr, signal: &BargeIn) -> Result<Self, Source> {
         timeout(REMOTE_BUDGET, async {
             let conn = edge.0.endpoint.connect(worker, ALPN).await.map_err(lost)?;
             let (mut send, recv) = conn.open_bi().await.map_err(lost)?;
             let nonce = generate_ulid_u128().to_be_bytes();
-            send.write_all(&nonce).await.map_err(lost)?;
+            send_live(signal, &mut send, &nonce).await?;
             let mut hash = blake3::Hasher::new();
             hash.update(&nonce);
             Ok(Self {
@@ -112,16 +147,19 @@ impl Link {
         .map_err(|_| Source::LocalOnTimeout)?
     }
 
-    pub(super) async fn exchange(&mut self, step: &Step) -> Result<Vec<u8>, Source> {
+    pub(super) async fn exchange(&mut self, step: &Step, signal: &BargeIn) -> Result<Vec<u8>, Source> {
         timeout_at(self.deadline.min(Instant::now() + REMOTE_BUDGET), async {
             let mut frame = vec![if step.final_step { FINAL } else { MORE }, step.ids.len() as u8];
             for id in &step.ids {
                 frame.extend_from_slice(&id.to_be_bytes());
             }
             self.hash.update(&frame);
-            self.send.write_all(&frame).await.map_err(lost)?;
+            send_live(signal, &mut self.send, &frame).await?;
             if step.final_step {
-                self.send.finish().map_err(lost)?;
+                signal
+                    .submit_if_live(|| self.send.finish())
+                    .ok_or(Source::LocalOnChannelError)?
+                    .map_err(lost)?;
             }
             let mut header = [0; 36];
             self.recv.read_exact(&mut header).await.map_err(lost)?;
@@ -148,5 +186,39 @@ impl Link {
         })
         .await
         .map_err(|_| Source::LocalOnTimeout)?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::task::Waker;
+
+    #[test]
+    fn split_inference_tests_revoked_pending_write_never_submits_its_remainder() {
+        let signal = BargeIn::new();
+        let has_credit = Cell::new(false);
+        let accepted = RefCell::new(Vec::new());
+        let mut frame = std::pin::pin!(submit_fragments(&signal, b"abcdef", |_, bytes| {
+            if accepted.borrow().is_empty() {
+                accepted.borrow_mut().extend_from_slice(&bytes[..2]);
+                return Poll::Ready(Ok(2));
+            }
+            if !has_credit.get() {
+                return Poll::Pending;
+            }
+            accepted.borrow_mut().extend_from_slice(bytes);
+            Poll::Ready(Ok(bytes.len()))
+        }));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(frame.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(&*accepted.borrow(), b"ab"); // already accepted; cannot recall
+        signal.trigger();
+        has_credit.set(true);
+        // Even if select! already picked transport readiness, the write must
+        // be fenced again at actual submission, not just before its first poll.
+        assert!(matches!(frame.as_mut().poll(&mut cx), Poll::Ready(Err(_))));
+        assert_eq!(&*accepted.borrow(), b"ab");
     }
 }

@@ -254,6 +254,74 @@ enum Fault {
     Tail,
 }
 
+#[tokio::test]
+async fn split_inference_tests_invalidation_wakes_a_blocked_peer_read_without_a_reply_or_timer() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    #[derive(Default)]
+    struct Woken(AtomicBool);
+    impl Wake for Woken {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let pcm = recording();
+    let model = TokenRecognizer::load(&models().join("asr")).unwrap();
+    let (a, b) = (SecretKey::generate(), SecretKey::generate());
+    let edge = bind(a, &b).await;
+    let worker = Endpoint::builder(Minimal)
+        .secret_key(b)
+        .alpns(vec![b"eon/readback/zipformer-en-2023-06-26/kokoro-v1/1".to_vec()])
+        .relay_mode(RelayMode::Disabled)
+        .clear_ip_transports()
+        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+    let (mut output, ring) = renderer();
+    let revoke = output.revocation();
+    let mut readback =
+        Box::pin(allow(&pcm, &edge, &worker.addr()).queue(&model, &mut output, |_| panic!("no verified reply")));
+    let (conn, _send, _recv) = timeout(Duration::from_secs(8), async {
+        tokio::select! {
+            result = &mut readback => panic!("readback ended before withheld reply: {}", result.is_ok()),
+            streams = async {
+                let conn = worker.accept().await.unwrap().await.unwrap();
+                let (send, mut recv) = conn.accept_bi().await.unwrap();
+                let mut header = [0; 18]; // nonce + first token frame header
+                recv.read_exact(&mut header).await.unwrap();
+                assert!(header[16] == 1 && (1..=64).contains(&header[17]));
+                recv.read_exact(&mut vec![0; usize::from(header[17]) * 2]).await.unwrap();
+                (conn, send, recv)
+            } => streams
+        }
+    })
+    .await
+    .unwrap();
+
+    // Replace the task waker while the authenticated peer withholds its first
+    // reply. No yield, socket close, timer advance or preview callback can
+    // rescue the pending read between these two manual polls.
+    let notified = Arc::new(Woken::default());
+    let waker = Waker::from(notified.clone());
+    let mut cx = Context::from_waker(&waker);
+    assert!(readback.as_mut().poll(&mut cx).is_pending());
+    revoke.invalidate(EPOCH);
+    assert!(notified.0.load(Ordering::Acquire));
+    assert!(matches!(
+        readback.as_mut().poll(&mut cx),
+        Poll::Ready(Err(EonError::ValidationError(_)))
+    ));
+    drop(readback);
+    timeout(Duration::from_secs(2), conn.closed()).await.unwrap();
+    assert_eq!(ring.available(), 0);
+    worker.close().await;
+    edge.close().await;
+}
+
 // Independent wire implementation. Parses ONLY the declared ID frames, checks
 // the reference sentence as it grows, and rejects trailing bytes before final.
 // Generates correctly bound but deliberately untrustworthy responses.
