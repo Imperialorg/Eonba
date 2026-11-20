@@ -106,55 +106,11 @@ EON maintains a strict distinction between **in-process foreign function interfa
 | **In-Process FFI Bridge** | `eon_core.udl` | Mozilla UniFFI | In-process zero-overhead bindings between native Rust core and Android Kotlin/Compose or Swift iOS frontends. |
 | **Over-the-Wire Mesh RPC & IPC** | `proto/eon.proto` | Protocol Buffers (prost) | Cross-machine P2P QUIC messaging (`eon-mesh`), desktop daemon IPC (`clients/daemon`), and binary stream QoS framing. |
 
-### 4.1 Interface Contract (`eon_core.udl`)
-```rust
-namespace eon_core {
-    string generate_ulid(string prefix);
-    i64 get_monotonic_time_nanos();
-};
+### 4.1 In-process interface
 
-dictionary TaskResultDto {
-    string task_id;
-    string status;
-    string outcome_json;
-    string? error_code;
-};
+The [UniFFI definition](../engine/core-rs/crates/eon-uniffi/src/eon_core.udl) is the source of truth for both Kotlin and Swift. The `eon_uniffi` namespace exposes kernel IDs, process-relative monotonic time, model-profile selection, endpoint silence thresholds and dependency-graph validation. DAG validation returns IDs in dependency order; it cannot start a workflow.
 
-interface EonKernelBridge {
-    constructor(string storage_path, string identity_id);
-    
-    [Throws=EonBridgeError]
-    void submit_objective(string objective_id, string description);
-    
-    [Throws=EonBridgeError]
-    TaskResultDto execute_task_sync(string task_id, string capability, string operation, string parameters_json);
-    
-    void interrupt_current_epoch(string reason);
-};
-
-interface EonVoiceBridge {
-    constructor();
-    void start_listening();
-    void stop_listening();
-    
-    // Test injection hook only. In production, eon-voice reads directly from native C/NDK AAudio stream
-    void inject_audio_pcm_for_testing(sequence<i16> samples);
-    
-    void register_barge_in_callback(BargeInCallback callback);
-};
-
-callback interface BargeInCallback {
-    void on_barge_in_detected(i64 timestamp_ms);
-};
-
-[Error]
-enum EonBridgeError {
-    "InitializationFailed",
-    "InvalidPayload",
-    "TaskExecutionFailed",
-    "SecurityViolation",
-};
-```
+`inject_audio_pcm_for_testing` requires one caller-supplied PCM16 frame of 512 samples at 16 kHz. It applies the gain controller and returns measurements, not a transcription. `execute_task_sync` accepts only the two local `diagnostics` operations listed in the interface. Neither call opens a microphone, grants a lease or dispatches a host command.
 
 ### 4.2 Cross-Compilation for Android with `cargo-ndk`
 The Gradle wrapper builds and verifies the debug APK. On Linux, with the Android SDK in `ANDROID_HOME` and a JDK on `PATH`, run from the repository root:
@@ -216,10 +172,11 @@ The two reference recordings are test inputs, not dependencies of the app. From 
 python3 scripts/download_models.py --ids voice-test-sensevoice-en voice-test-zipformer-0 silero-vad-v5 \
   zipformer-en-2023-06-26-encoder-int8 zipformer-en-2023-06-26-decoder \
   zipformer-en-2023-06-26-joiner-int8 zipformer-en-2023-06-26-tokens
-cargo test --locked --manifest-path engine/core-rs/Cargo.toml -p eon-voice --test asr_e2e --test vad_e2e
+cargo test --locked --manifest-path engine/core-rs/Cargo.toml -p eon-voice \
+  --no-default-features --features onnx-speech --test asr_e2e --test vad_e2e
 ```
 
-The fetcher checks the release archives and the extracted WAV files. These two suites need the native build dependencies, but neither an audio device nor Kokoro or WeSpeaker. They test inference on recorded input, not microphone-to-speaker latency.
+The fetcher checks the release archives and the extracted WAV files. `onnx-speech` builds Zipformer and Silero without CPAL, WebRTC AEC, ALSA, Kokoro or WeSpeaker. The default `native` feature still includes the full audio stack. The `recorded-speech` CI job shows how to supply a digest-verified ONNX Runtime CPU library on x86-64 Linux. These tests measure inference on recorded input, not microphone-to-speaker latency.
 
 ### 7.1 Cross-Platform Acceleration Matrix
 

@@ -7,7 +7,9 @@ license.workspace = true
 
 [features]
 default = ["native"]
-native = ["dep:cpal", "dep:kaldi-native-fbank", "dep:ort", "dep:serde_json", "dep:webrtc-audio-processing", "dep:webrtc-audio-processing-config"]
+# Headless model workers do not need microphone, playback or echo-canceller libraries.
+onnx-speech = ["dep:kaldi-native-fbank", "dep:ort"]
+native = ["onnx-speech", "dep:cpal", "dep:serde_json", "dep:webrtc-audio-processing", "dep:webrtc-audio-processing-config"]
 
 [dependencies]
 cpal = { version = "0.18", optional = true }
@@ -26,7 +28,7 @@ required-features = ["native"]
 
 [[test]]
 name = "asr_e2e"
-required-features = ["native"]
+required-features = ["onnx-speech"]
 
 [[test]]
 name = "device_loop"
@@ -42,4 +44,4 @@ required-features = ["native"]
 
 [[test]]
 name = "vad_e2e"
-required-features = ["native"]
+required-features = ["onnx-speech"]
