@@ -66,6 +66,7 @@ jobs:
     timeout-minutes: 30
     env:
       CARGO_PROFILE_TEST_DEBUG: "0"
+      WGPU_BACKEND: vulkan
       VK_DRIVER_FILES: /opt/google/chrome/vk_swiftshader_icd.json
     defaults:
       run:

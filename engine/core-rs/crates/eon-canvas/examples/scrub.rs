@@ -13,6 +13,7 @@ use image::{DynamicImage, ImageDecoder, Limits};
 const MAX_FRAMES: usize = 150;
 const WINDOW_MS: u64 = 30_000;
 const MAX_INPUT_BYTES: usize = 30 * 1024 * 1024;
+const MAX_DECODE_BYTES: u64 = 64 * 1024 * 1024;
 const PREVIEW_EDGE: u32 = 256;
 
 fn invalid(message: &str) -> EonError {
@@ -49,10 +50,18 @@ impl Timeline {
         }
         let mut decoder =
             JpegDecoder::new(Cursor::new(&bytes)).map_err(|_| invalid("invalid JPEG"))?;
+        // max_alloc alone does not cover the JPEG backend's progressive coefficient
+        // buffers. Budget padded 32x32 MCUs before decoding: four channels of i16
+        // coefficients, expanded samples, RGB(A) output and scratch space.
+        let (w, h) = decoder.dimensions();
+        let padded_pixels = u64::from(w.next_multiple_of(32)) * u64::from(h.next_multiple_of(32));
+        if padded_pixels * 24 > MAX_DECODE_BYTES {
+            return Err(invalid("JPEG exceeds preview pixel budget"));
+        }
         let mut limits = Limits::default();
         limits.max_image_width = Some(4096);
         limits.max_image_height = Some(4096);
-        limits.max_alloc = Some(64 * 1024 * 1024);
+        limits.max_alloc = Some(MAX_DECODE_BYTES);
         decoder
             .set_limits(limits)
             .map_err(|_| invalid("JPEG exceeds preview limits"))?;
@@ -185,6 +194,22 @@ mod tests {
             assert_eq!(image.size, [width, 1]);
             assert_eq!(image.pixels[0], pixel);
         }
+    }
+
+    #[test]
+    fn progressive_color_frame_is_rejected_by_geometry_before_decoding_scans() {
+        let mut bytes = Vec::new();
+        JpegEncoder::new(&mut bytes)
+            .encode(&[0; 3], 1, 1, ExtendedColorType::Rgb8)
+            .unwrap();
+        let sof = bytes.windows(2).position(|m| m == [255, 192]).unwrap();
+        bytes[sof + 1] = 194; // SOF2: progressive color, change the frame size
+        bytes[sof + 5..sof + 9].copy_from_slice(&[16, 0, 16, 0]);
+        let sos = bytes.windows(2).position(|m| m == [255, 218]).unwrap();
+        let len = u16::from_be_bytes([bytes[sos + 2], bytes[sos + 3]]) as usize;
+        bytes[sos + len] = 0; // first scan contains DC coefficients only
+        let err = Timeline::default().push(0, bytes.as_slice()).unwrap_err();
+        assert!(matches!(err, EonError::ValidationError(reason) if reason.contains("pixel budget")));
     }
 
     #[test]
