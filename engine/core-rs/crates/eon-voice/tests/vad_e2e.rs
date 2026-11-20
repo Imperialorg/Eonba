@@ -96,6 +96,35 @@ fn wrong_frame_size_is_refused_before_inference() {
 }
 
 #[test]
+fn invalid_pcm_is_rejected_during_holdoff_and_preserves_inference_state() {
+    use eon_voice::vad::VadEndpoint;
+    let samples = read_pcm16_mono_16k(&fixture("en.wav"));
+    let frames = samples.as_chunks::<VAD_FRAME_SAMPLES>().0;
+    let mut vad = load_model();
+    let mut control = load_model();
+    let mut endpoint = VadEndpoint::new(load_model());
+    endpoint.reply_finished();
+    for frame in &frames[..10] {
+        assert_eq!(
+            vad.speech_probability(frame).unwrap(),
+            control.speech_probability(frame).unwrap()
+        );
+    }
+    for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.01, -1.01] {
+        let mut frame = frames[10];
+        frame[VAD_FRAME_SAMPLES - 1] = invalid;
+        assert!(vad.speech_probability(&frame).is_err());
+        assert!(endpoint.push(&frame, "").is_err());
+    }
+    for frame in &frames[10..20] {
+        assert_eq!(
+            vad.speech_probability(frame).unwrap(),
+            control.speech_probability(frame).unwrap()
+        );
+    }
+}
+
+#[test]
 fn reset_makes_inference_repeatable() {
     let mut vad = load_model();
     let frame: Vec<f32> = (0..VAD_FRAME_SAMPLES)

@@ -47,6 +47,7 @@ impl VadEndpoint {
 
     pub fn push(&mut self, frame: &[f32; VAD_FRAME_SAMPLES], partial: &str) -> EonResult<Option<Endpoint>> {
         if self.holdoff_samples != 0 {
+            validate_pcm(frame)?;
             self.holdoff_samples = self.holdoff_samples.saturating_sub(frame.len());
             return Ok(None);
         }
@@ -69,6 +70,13 @@ fn onnx_err(context: &str, e: impl std::fmt::Display) -> EonError {
         operation: format!("silero.{context}"),
         reason: e.to_string(),
     }
+}
+
+fn validate_pcm(frame: &[f32]) -> EonResult<()> {
+    if !frame.iter().all(|sample| (-1.0..=1.0).contains(sample)) {
+        return Err(EonError::ValidationError("expected finite, normalized mono PCM".into()));
+    }
+    Ok(())
 }
 
 impl SileroVad {
@@ -101,6 +109,7 @@ impl SileroVad {
                 frame.len()
             )));
         }
+        validate_pcm(frame)?;
         // The v5 wrapper prepends the previous frame's 64-sample STFT context at 16 kHz.
         let input = Tensor::from_array((
             [1usize, CONTEXT + VAD_FRAME_SAMPLES],
@@ -113,23 +122,24 @@ impl SileroVad {
             .session
             .run(ort::inputs!["input" => input, "state" => state, "sr" => sr])
             .map_err(|e| onnx_err("run", e))?;
-        let (_, probability) = outputs["output"]
+        let (_, probability) = outputs
+            .get("output")
+            .ok_or_else(|| onnx_err("output", "missing probability"))?
             .try_extract_tensor::<f32>()
             .map_err(|e| onnx_err("output", e))?;
-        let (_, next_state) = outputs["stateN"]
+        let [p] = probability else {
+            return Err(onnx_err("output", "expected one speech probability"));
+        };
+        let (_, next_state) = outputs
+            .get("stateN")
+            .ok_or_else(|| onnx_err("stateN", "missing recurrent state"))?
             .try_extract_tensor::<f32>()
             .map_err(|e| onnx_err("stateN", e))?;
-        if next_state.len() != STATE_LEN {
-            return Err(EonError::InternalError(format!(
-                "unexpected Silero state size {}",
-                next_state.len()
-            )));
+        if !(0.0..=1.0).contains(p) || next_state.len() != STATE_LEN || !next_state.iter().all(|v| v.is_finite()) {
+            return Err(onnx_err("output", "invalid probability or recurrent state"));
         }
         self.state.copy_from_slice(next_state);
         self.context.copy_from_slice(&frame[VAD_FRAME_SAMPLES - CONTEXT..]);
-        probability
-            .first()
-            .copied()
-            .ok_or_else(|| EonError::InternalError("empty Silero output".into()))
+        Ok(*p)
     }
 }
