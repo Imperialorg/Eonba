@@ -24,6 +24,14 @@ use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, TargetArch};
 ))]
 mod rust_analyzer;
 
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_env = "gnu",
+    target_pointer_width = "64"
+))]
+mod pyright;
+
 #[cfg(not(all(
     target_os = "linux",
     target_arch = "x86_64",
@@ -123,7 +131,40 @@ fn build_ruleset(
         } else {
             AccessFs::ReadFile.into()
         };
-        let access = if matches!(io, WorkerIo::RustAnalyzer(_)) {
+        let access = if let WorkerIo::Pyright { names, stubs, .. } = io
+            && (path == names || path == stubs || Some(path.as_path()) == stubs.parent())
+        {
+            if !metadata.is_dir() {
+                return Err(sandbox_err("pyright", "expected directory"));
+            }
+            if path != stubs {
+                AccessFs::ReadDir.into()
+            } else {
+                AccessFs::ReadDir | AccessFs::ReadFile
+            }
+        } else if matches!(io, WorkerIo::RustAnalyzer(_) | WorkerIo::Pyright { .. }) {
+            if let WorkerIo::Pyright { digest, .. } = io
+                && path == program
+            {
+                #[cfg(all(
+                    target_os = "linux",
+                    target_arch = "x86_64",
+                    target_env = "gnu",
+                    target_pointer_width = "64"
+                ))]
+                pyright::verify(&fd, &metadata, digest)
+                    .map_err(|e| sandbox_err("Pyright SEA", e))?;
+                #[cfg(not(all(
+                    target_os = "linux",
+                    target_arch = "x86_64",
+                    target_env = "gnu",
+                    target_pointer_width = "64"
+                )))]
+                {
+                    let _ = digest;
+                    return Err(sandbox_err("Pyright SEA", "unsupported ABI"));
+                }
+            }
             if rust_analyzer::executable_grant(path, program, &fd, &metadata)
                 .map_err(|e| sandbox_err("rust-analyzer grant", e))?
             {
@@ -229,8 +270,24 @@ fn worker_filters(io: WorkerIo<'_>) -> EonResult<Vec<BpfProgram>> {
     let arch =
         TargetArch::try_from(std::env::consts::ARCH).map_err(|e| sandbox_err("architecture", e))?;
     let mut filters = Vec::new();
-    if matches!(io, WorkerIo::RustAnalyzer(_)) {
+    if matches!(io, WorkerIo::RustAnalyzer(_) | WorkerIo::Pyright { .. }) {
         filters.push(rust_analyzer::thread_filter(&mut rules, arch)?);
+    }
+    if matches!(io, WorkerIo::Pyright { .. }) {
+        #[cfg(all(
+            target_os = "linux",
+            target_arch = "x86_64",
+            target_env = "gnu",
+            target_pointer_width = "64"
+        ))]
+        pyright::event_loop(&mut rules)?;
+        #[cfg(not(all(
+            target_os = "linux",
+            target_arch = "x86_64",
+            target_env = "gnu",
+            target_pointer_width = "64"
+        )))]
+        return Err(sandbox_err("pyright", "unsupported ABI"));
     }
     let filter = SeccompFilter::new(
         rules,
@@ -266,6 +323,12 @@ pub(crate) enum WorkerIo<'a> {
     ClosedInput,
     StdioProtocol,
     RustAnalyzer(&'a Path),
+    Pyright {
+        group: &'a Path,
+        names: &'a Path,
+        stubs: &'a Path,
+        digest: &'a [u8; 32],
+    },
 }
 
 /// Runs `program` with `args` under `policy` and returns its output. Fails if confinement cannot be enforced.
@@ -289,13 +352,24 @@ pub(crate) fn confine_command(
     command.env_clear().current_dir("/").stdout(Stdio::piped());
     match io {
         WorkerIo::ClosedInput => command.stdin(Stdio::null()).stderr(Stdio::piped()),
-        WorkerIo::StdioProtocol | WorkerIo::RustAnalyzer(_) => {
+        WorkerIo::StdioProtocol | WorkerIo::RustAnalyzer(_) | WorkerIo::Pyright { .. } => {
             command.stdin(Stdio::piped()).stderr(Stdio::null())
         }
     };
-    if let WorkerIo::RustAnalyzer(group) = io {
+    if let WorkerIo::RustAnalyzer(group) | WorkerIo::Pyright { group, .. } = io {
         rust_analyzer::prepare(command, group)
-            .map_err(|e| sandbox_err("rust-analyzer limits", e))?;
+            .map_err(|e| sandbox_err("threaded LSP limits", e))?;
+    }
+    if matches!(io, WorkerIo::Pyright { .. }) {
+        // This worker performs no TLS. Do not read the host OpenSSL config.
+        let parent = Path::new(command.get_program())
+            .parent()
+            .ok_or_else(|| sandbox_err("pyright", "missing installation directory"))?
+            .to_owned();
+        command
+            .current_dir(parent)
+            .env("OPENSSL_CONF", "")
+            .env("TMPDIR", "/eon-no-scratch");
     }
     let mut ruleset = Some(build_ruleset(policy, command.get_program().as_ref(), io)?);
     let filters = worker_filters(io)?;

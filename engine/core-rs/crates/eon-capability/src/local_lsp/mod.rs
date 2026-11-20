@@ -1,7 +1,9 @@
 //! Read-only, synchronous stdio LSP sessions for explicitly opened source snapshots.
 //! Server provisioning is a trusted host operation, not a tool parameter. Installations and
 //! runtime paths must be operator-owned and immutable to project authors. No workspace
-//! root on disk, real file URI, host environment, config discovery, shell, or command RPC is provided.
+//! root on disk, real workspace URI, host environment, config discovery, shell, or command RPC is provided.
+//! Pyright can enumerate a private directory of empty module-name markers;
+//! it receives file contents exclusively through the stdio overlay.
 //! Servers requiring a disk-backed project or unsupported capabilities may decline queries.
 //! The native policy is for trusted workers, not arbitrary binaries. Deadlines bound
 //! protocol I/O, not kernel/filesystem latency or the worker's CPU and memory use.
@@ -11,6 +13,7 @@
 //! metadata, sysroot, build scripts, proc macros or project configuration.
 mod capabilities;
 mod preview;
+mod pyright;
 mod wire;
 
 use std::collections::BTreeMap;
@@ -112,6 +115,7 @@ pub struct OperatorServer {
     runtime: Vec<PathBuf>,
     deadline: Duration,
     rust_task_group: Option<PathBuf>,
+    pyright_group: Option<pyright::Provision>,
 }
 
 impl OperatorServer {
@@ -157,6 +161,7 @@ impl OperatorServer {
             runtime,
             deadline,
             rust_task_group: None,
+            pyright_group: None,
         })
     }
 
@@ -169,6 +174,21 @@ impl OperatorServer {
             return Err(invalid("expected absolute rust-analyzer task group"));
         }
         self.rust_task_group = Some(group.to_owned());
+        Ok(self)
+    }
+
+    /// Opt in only for the operator-provisioned fixed-entrypoint Pyright SEA
+    /// (see `provision/pyright-sea.cjs`), never a Node CLI or script launcher.
+    /// `typeshed-fallback/stdlib` must be the corresponding upstream data,
+    /// immutable to project authors. Provision the SEA's SHA-256 independently
+    /// of launch, a capped cgroup as for rust-analyzer, and an owned state
+    /// directory disjoint from the workspace for empty module-name markers.
+    pub fn with_pyright_task_group(mut self, group: &Path, state_dir: &Path, image_sha256: [u8; 32]) -> io::Result<Self> {
+        crate::sandbox::check_rust_analyzer_abi()?;
+        if self.kind != ServerKind::Pyright || !group.is_absolute() || !state_dir.is_absolute() {
+            return Err(invalid("expected absolute Pyright task group and state directory"));
+        }
+        self.pyright_group = Some(pyright::Provision { group: group.to_owned(), state: state_dir.to_owned(), image_sha256 });
         Ok(self)
     }
 }
@@ -322,6 +342,7 @@ pub struct LocalLsp {
     version: i32,
     has_closed: bool,
     rust_ready: bool,
+    python_names: Option<pyright::ModuleNames>,
 }
 
 /// One preconfigured session per language. Looking up an unprovisioned kind never
@@ -361,8 +382,8 @@ fn virtual_uri(root: &str, relative_path: &str) -> String {
     // Called only for a path validated by Workspace. Preserve the relative
     // layout for servers resolving imports, while escaping URI syntax and UTF-8.
     use std::fmt::Write;
-    let mut uri = format!("file://{root}/");
-    for b in relative_path.bytes() {
+    let mut uri = String::from("file://");
+    for b in root.bytes().chain(std::iter::once(b'/')).chain(relative_path.bytes()) {
         if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'.' | b'_' | b'~') {
             uri.push(char::from(b));
         } else {
@@ -377,6 +398,9 @@ impl LocalLsp {
     /// client sends `initialized`. Failure never retries with a weaker policy.
     /// This handshake is not evidence that project indexing or any query works.
     pub fn start(config: &OperatorServer, workspace_root: &Path) -> io::Result<Self> {
+        if config.kind == ServerKind::Pyright && config.pyright_group.is_none() {
+            return Err(invalid("Pyright requires its pinned image and bounded task group"));
+        }
         Self::spawn(config, workspace_root, config.kind.args())
     }
 
@@ -388,11 +412,24 @@ impl LocalLsp {
         // Do not turn a symlinked root into a different valid Workspace handle.
         let workspace = Workspace::open(root).map_err(io::Error::other)?;
         let root = root.canonicalize()?;
-        let virtual_root = format!(
+        let python_names = config.pyright_group.as_ref().map(|p| {
+            pyright::ModuleNames::new(&p.state, &root)
+        }).transpose()?;
+        let virtual_root = if let Some(names) = &python_names {
+            names.root.to_str().ok_or_else(|| invalid("non-UTF8 state path"))?.to_owned()
+        } else { format!(
             "/eon-lsp-{:016x}",
             getrandom::u64().map_err(|_| io::Error::other("no session nonce"))?
-        );
+        ) };
+        let stubs = config.executable.with_file_name("typeshed-fallback").join("stdlib");
         let mut read_only = config.runtime.clone();
+        if config.pyright_group.is_some() {
+            if stubs.canonicalize()? != stubs || !stubs.is_dir() {
+                return Err(invalid("expected trusted Pyright typeshed installation"));
+            }
+            read_only.push(stubs.parent().expect("stdlib parent").to_owned());
+            read_only.push(stubs.clone());
+        }
         read_only.push(config.executable.clone());
         if read_only.iter().any(|p| {
             p.starts_with(&root)
@@ -408,6 +445,9 @@ impl LocalLsp {
             let group = config.rust_task_group.as_deref()
                 .ok_or_else(|| invalid("rust-analyzer requires a bounded task group"))?;
             WorkerIo::RustAnalyzer(group)
+        } else if let Some(p) = &config.pyright_group {
+            read_only.push(PathBuf::from(&virtual_root));
+            WorkerIo::Pyright { group: &p.group, names: Path::new(&virtual_root), stubs: &stubs, digest: &p.image_sha256 }
         } else {
             WorkerIo::StdioProtocol
         };
@@ -443,6 +483,7 @@ impl LocalLsp {
             version: 0,
             has_closed: false,
             rust_ready: false,
+            python_names,
         };
         let end = client.end();
         let mut params = json!({
@@ -452,6 +493,9 @@ impl LocalLsp {
                 "textDocument":{"hover":{"contentFormat":["plaintext"]},"definition":{"linkSupport":true},
                     "references":{},"diagnostic":{},"publishDiagnostics":{"versionSupport":true}}}
         });
+        if config.pyright_group.is_some() {
+            params["workspaceFolders"] = json!([{"name":"snapshots","uri":virtual_uri(&client.virtual_root, "")}]);
+        }
         if client.kind == ServerKind::RustAnalyzer {
             params["rootUri"] = json!(format!("file://{}", client.virtual_root));
             params["capabilities"]["experimental"] = json!({"serverStatusNotification":true});
@@ -467,6 +511,12 @@ impl LocalLsp {
             io::Error::new(error.kind(), format!("confined LSP did not initialize: {error}"))
         })?;
         client.capabilities = Capabilities::parse(&init["capabilities"])?;
+        // The pinned SEA installs this request handler unconditionally. Select
+        // it in the fixed operator profile: early version-matched pushes can
+        // still be pre-analysis empties. Never accept dynamic registration.
+        if config.pyright_group.is_some() {
+            client.capabilities.diagnostics = Diagnostics::Pull { identifier: None };
+        }
         client.notify("initialized", json!({}), end)?;
         if client.kind == ServerKind::RustAnalyzer {
             // Opening during initial crate-model setup can leave overlays in a
@@ -587,6 +637,10 @@ impl LocalLsp {
         let uri = virtual_uri(&self.virtual_root, relative_path);
         let version = self.next_version()?;
         let end = Position::document_end(&text);
+        if let Some(names) = self.python_names.as_mut() {
+            names.insert(relative_path)?;
+            self.module_marker_changed(&uri, 1)?;
+        }
         self.notify(
             "textDocument/didOpen",
             json!({"textDocument":{
@@ -647,8 +701,18 @@ impl LocalLsp {
         let uri = self.uri(path)?;
         self.notify("textDocument/didClose", json!({"textDocument":{"uri":uri}}), self.end())?;
         self.docs.remove(&uri);
+        if let Some(names) = self.python_names.as_mut() {
+            names.remove(path)?;
+            self.module_marker_changed(&uri, 3)?;
+        }
         self.has_closed = true;
         Ok(())
+    }
+
+    fn module_marker_changed(&mut self, uri: &str, change: u8) -> io::Result<()> {
+        // A notification about our own marker mutation, not a filesystem
+        // watcher or a server-controlled path. Invalidate cached import misses.
+        self.notify("workspace/didChangeWatchedFiles", json!({"changes":[{"uri":uri,"type":change}]}), self.end())
     }
 
     fn uri(&self, path: &str) -> io::Result<String> {

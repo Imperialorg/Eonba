@@ -139,7 +139,8 @@
   - **Requirements**: Embedded JSON-RPC LSP client multiplexer for `rust-analyzer`, `clangd`, `kotlin-language-server`, `pyright`, and `vtsls` providing sub-50ms diagnostic queries (`goto_definition`, `find_references`, `hover_type`, `diagnostics`). Symbol-scoped AST search/replace block patcher replacing fragile line-number diffs.
   - **Unit Tests**: `cargo test -p eon-capability lsp_and_patcher_tests`.
   - **Verified subset**: Confined clangd and rust-analyzer answered cross-file definitions, references, hover and fresh diagnostics on two-file projects. A task-capped rust-analyzer 1.99.1 worker took 122.8 ms from launch to its first diagnostic, 0.117 ms warm diagnostic p95 and 0.783 ms edit-to-diagnostic p95. It sees only supplied snapshots of a dependency-free library, not the workspace or Cargo build scripts.
-  - **Remaining servers**: Pyright, Kotlin Language Server and vtsls have not passed this gate. Cold queries do not meet the 50 ms target.
+  - **Python evidence**: A confined, digest-pinned Pyright 1.1.414 worker answered cross-file queries on flat Python modules supplied over stdio. Definition, references and hover each had a warm p95 below 0.5 ms; edit to fresh diagnostic took 10.128 ms p95. Startup to first diagnostic took 2.606 s.
+  - **Remaining servers**: Kotlin Language Server and vtsls have not passed. Stock vtsls launches a separate `tsserver`; the Pyright worker does not permit that child process. Cold queries do not meet the 50 ms target.
 
 ---
 
