@@ -233,6 +233,15 @@
       "notes": "Opt-in only (not in any profile). Upstream README: icon_detect is AGPL. Pulling it into a distributed build triggers AGPL source obligations."
     },
     {
+      "id": "omniparser-v2-icon-detect-onnx",
+      "dest": "perception/models/vision/omniparser/icon_detect/model.onnx",
+      "url": "https://huggingface.co/onnx-community/OmniParser-v2.0_icon_detect/resolve/f0fbccdf5f56c2a689f669b95cb4f67bcf4e12b1/onnx/model.onnx",
+      "sha256": "c0d3d261e3368a5e51fe0d632c5d62e4bd4da489ac4b95fbbee450eb640e36fe",
+      "size_bytes": 80305670,
+      "license": "AGPL-3.0",
+      "notes": "Opt-in only, outside all hardware profiles. ONNX Community's static FP32 YOLO11m export of the Microsoft v2 icon_detect checkpoint, not a Microsoft-published ONNX file. Embedded weights, 1x3x640x640 input, 1x5x8400 output; no Python or .pt loading. See docs/TECH_STACK_AND_TOOLCHAINS.md#omniparser-v2-icon-proposals for validation and licensing."
+    },
+    {
       "id": "nemotron-asr-160ms-encoder-int8",
       "dest": "perception/models/asr/nemotron-asr-160ms/encoder.int8.onnx",
       "url": "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-160ms-int8-2026-06-11/resolve/main/encoder.int8.onnx",

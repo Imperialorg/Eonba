@@ -25,7 +25,7 @@ use crate::{EonError, EonResult};
 #[derive(Debug)]
 pub struct SharedJpeg(File);
 
-#[cfg(feature = "paddle-ocr")]
+#[cfg(any(feature = "paddle-ocr", feature = "omniparser-icons"))]
 impl SharedJpeg {
     pub(crate) fn read_limited(&self, limit: usize) -> EonResult<Vec<u8>> {
         let failed = |e: std::io::Error| EonError::OperationFailed {
@@ -35,7 +35,7 @@ impl SharedJpeg {
         let size = self.0.metadata().map_err(failed)?.len();
         if size > limit as u64 {
             return Err(EonError::ResourceExhausted {
-                resource: "OCR JPEG bytes".into(),
+                resource: "selected JPEG bytes".into(),
                 requested: size,
                 available: limit as u64,
             });

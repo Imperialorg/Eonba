@@ -1,12 +1,25 @@
-//! UI geometry, bounded temporal sampling and opt-in still-image OCR of caller-supplied frames.
+//! UI geometry, bounded temporal sampling and opt-in local inference on caller-supplied stills.
 
 pub mod keyframes;
 #[cfg(feature = "paddle-ocr")]
 pub mod ocr;
+#[cfg(feature = "omniparser-icons")]
+pub mod omniparser;
 #[cfg(target_os = "linux")]
 pub mod shared;
+#[cfg(any(feature = "paddle-ocr", feature = "omniparser-icons"))]
+mod still;
 
 pub use eon_primitives::*;
+
+/// Half-open bounds in the stored JPEG's raster (no EXIF orientation transform).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PixelBounds {
+    pub left: u32,
+    pub top: u32,
+    pub right: u32,
+    pub bottom: u32,
+}
 
 /// Representation of a detected visual UI element with normalized bounding box.
 #[derive(Debug, Clone, PartialEq)]

@@ -4,38 +4,21 @@
 
 mod detection;
 
-use std::io::Cursor;
-use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
-use image::{
-    DynamicImage, GenericImageView, ImageDecoder, ImageFormat, ImageReader, Limits, Rgb, RgbImage,
-    imageops,
-};
+use image::{GenericImageView, Rgb, RgbImage, imageops};
 use ort::session::{RunOptions, Session};
 use ort::value::Tensor;
 use sha2::{Digest, Sha256};
 
+pub use crate::PixelBounds;
+use crate::still::{self, check_time, deadline, limited};
 use crate::{EonError, EonResult};
-
-const MAX_JPEG: usize = 8 * 1024 * 1024;
-const MAX_SIDE: u32 = 4096;
-const MAX_PIXELS: u64 = 4 * 1024 * 1024;
-const MAX_TIME: Duration = Duration::from_secs(10);
 const MAX_CANDIDATES: usize = 64;
 
 // RECORD hashes in the PyPI-authenticated rapidocr-onnxruntime 1.4.4 wheel.
 const DET_SHA256: &str = "d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9";
 const REC_SHA256: &str = "48fc40f24f6d2a207a2b1091d3437eb3cc3eb6b676dc3ef9c37384005483683b";
-
-/// Half-open bounds in the stored JPEG's raster (no EXIF orientation transform).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PixelBounds {
-    pub left: u32,
-    pub top: u32,
-    pub right: u32,
-    pub bottom: u32,
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OcrLine {
@@ -59,66 +42,6 @@ fn failed(reason: impl std::fmt::Display) -> EonError {
         operation: "PaddleOCR".into(),
         reason: reason.to_string(),
     }
-}
-
-fn limited(resource: &str, requested: u64, available: u64) -> EonError {
-    EonError::ResourceExhausted {
-        resource: resource.into(),
-        requested,
-        available,
-    }
-}
-
-fn deadline(budget: Duration) -> EonResult<Instant> {
-    if budget.is_zero() || budget > MAX_TIME {
-        return Err(EonError::ValidationError(
-            "OCR budget must be in (0, 10s]".into(),
-        ));
-    }
-    Ok(Instant::now() + budget)
-}
-
-fn check_time(end: Instant) -> EonResult<()> {
-    if Instant::now() >= end {
-        Err(failed("frame deadline exceeded"))
-    } else {
-        Ok(())
-    }
-}
-
-fn decode(bytes: &[u8], expected: Option<(u32, u32)>) -> EonResult<RgbImage> {
-    if bytes.len() > MAX_JPEG {
-        return Err(limited(
-            "OCR JPEG bytes",
-            bytes.len() as u64,
-            MAX_JPEG as u64,
-        ));
-    }
-    if !bytes.starts_with(&[0xff, 0xd8]) || !bytes.ends_with(&[0xff, 0xd9]) {
-        return Err(EonError::ValidationError(
-            "expected one complete JPEG".into(),
-        ));
-    }
-    let mut limits = Limits::default();
-    limits.max_image_width = Some(MAX_SIDE);
-    limits.max_image_height = Some(MAX_SIDE);
-    limits.max_alloc = Some(64 * 1024 * 1024);
-    let mut reader = ImageReader::with_format(Cursor::new(bytes), ImageFormat::Jpeg);
-    reader.limits(limits);
-    let decoder = reader.into_decoder().map_err(failed)?;
-    let (w, h) = decoder.dimensions();
-    let pixels = u64::from(w) * u64::from(h);
-    if pixels > MAX_PIXELS {
-        return Err(limited("OCR pixels", pixels, MAX_PIXELS));
-    }
-    if w == 0 || h == 0 || expected.is_some_and(|dims| dims != (w, h)) {
-        return Err(EonError::ValidationError(
-            "invalid or mismatched frame dimensions".into(),
-        ));
-    }
-    Ok(DynamicImage::from_decoder(decoder)
-        .map_err(failed)?
-        .into_rgb8())
 }
 
 /// Paddle v4 consumes BGR NCHW, normalized to [-1, 1]; the recognizer
@@ -215,7 +138,7 @@ impl PaddleOcr {
         budget: Duration,
     ) -> EonResult<OcrPage> {
         let end = deadline(budget)?;
-        let jpeg = frame.jpeg_bytes.read_limited(MAX_JPEG)?;
+        let jpeg = frame.jpeg_bytes.read_limited(still::MAX_JPEG)?;
         self.recognize(&jpeg, Some((frame.width, frame.height)), end)
     }
 
@@ -225,27 +148,8 @@ impl PaddleOcr {
         expected: Option<(u32, u32)>,
         end: Instant,
     ) -> EonResult<OcrPage> {
-        check_time(end)?;
-        let image = decode(bytes, expected)?;
-        check_time(end)?;
-        let options = RunOptions::new().map_err(failed)?;
-        std::thread::scope(|scope| {
-            let (done, rx) = channel::<()>();
-            let opts = &options;
-            std::thread::Builder::new()
-                .name("eon-ocr-deadline".into())
-                .spawn_scoped(scope, move || {
-                    if rx.recv_timeout(end.saturating_duration_since(Instant::now()))
-                        == Err(RecvTimeoutError::Timeout)
-                    {
-                        let _ = opts.terminate();
-                    }
-                })
-                .map_err(failed)?;
-            let result = self.infer(&image, &options, end);
-            drop(done); // wake and join even on inference errors
-            check_time(end)?;
-            result
+        still::run(bytes, expected, end, |image, opts| {
+            self.infer(image, opts, end)
         })
     }
 
@@ -320,32 +224,6 @@ fn ctc(scores: &[f32], alphabet: &[String]) -> Option<(String, f32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reject_oversized_pixels_from_the_jpeg_header_before_decompression() {
-        let mut bytes = include_bytes!("../tests/fixtures/settings.jpg").to_vec();
-        let sof = bytes.windows(2).position(|m| m == [0xff, 0xc0]).unwrap();
-        // SOF0 length, precision, then two big-endian u16 raster dimensions.
-        bytes[sof + 5..sof + 9].copy_from_slice(&[0x0c, 0x00, 0x0c, 0x00]);
-        assert!(matches!(
-            decode(&bytes, None),
-            Err(EonError::ResourceExhausted { .. })
-        ));
-        bytes[sof + 5..sof + 9].copy_from_slice(&[0x00, 0x08, 0xff, 0xff]);
-        assert!(decode(&bytes, None).is_err());
-    }
-
-    #[test]
-    fn non_image_input_and_excess_bytes_are_not_processed() {
-        assert!(decode(b"file:///etc/hosts", None).is_err());
-        assert!(decode(&[0xff, 0xd8, 0xff, 0xd9], None).is_err());
-        assert!(matches!(
-            decode(&vec![0; MAX_JPEG + 1], None),
-            Err(EonError::ResourceExhausted { .. })
-        ));
-        assert!(deadline(Duration::ZERO).is_err());
-        assert!(deadline(MAX_TIME + Duration::from_millis(1)).is_err());
-    }
 
     #[test]
     fn ctc_collapses_repeats_but_not_across_blank_and_drops_low_confidence() {
