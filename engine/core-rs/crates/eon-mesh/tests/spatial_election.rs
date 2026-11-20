@@ -64,6 +64,45 @@ async fn elect(
 }
 
 #[tokio::test]
+async fn control_rtt_uses_an_existing_paired_link_and_does_not_elect_a_speaker() {
+    let (_left, _right, a, b) = pair().await;
+    for _ in 0..3 {
+        let (rtt, ()) =
+            tokio::try_join!(a.measure_control_rtt(), b.answer_control_probe()).unwrap();
+        assert!(rtt > Duration::ZERO && rtt < BOUND);
+    }
+    assert!(!a.play_if_leader(1, || panic!("a probe cannot elect a leader")));
+    assert!(!b.play_if_leader(1, || panic!("a probe cannot elect a leader")));
+    // B remains connected but idle: none of these operations should hang.
+    let (request, answer, close) = timeout(BOUND, async {
+        tokio::join!(
+            a.measure_control_rtt(),
+            a.answer_control_probe(),
+            a.wait_for_control_peer_close()
+        )
+    })
+    .await
+    .expect("all control deadlines must fire");
+    for (err, expected) in [
+        (request.unwrap_err(), "control probe request timed out"),
+        (answer.unwrap_err(), "control probe responder timed out"),
+        (close.unwrap_err(), "control peer close timed out"),
+    ] {
+        assert!(
+            matches!(err, EonError::OperationFailed { operation, reason }
+            if operation == "mesh.paired_probe" && reason == expected)
+        );
+    }
+    drop(b);
+    assert!(
+        timeout(BOUND, a.measure_control_rtt())
+            .await
+            .unwrap()
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn spatial_election_tests_simultaneous_claims_tie_stick_then_handoff_with_one_playback_sink()
 {
     let (left, right, mut a, mut b) = pair().await;

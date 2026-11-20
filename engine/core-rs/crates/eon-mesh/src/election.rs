@@ -15,6 +15,8 @@ use tokio::time::{Instant, sleep_until, timeout_at};
 
 use crate::transport::{Link, PeerNode};
 
+mod probe;
+
 pub const WINDOW_NS: u64 = 15_000_000;
 /// Challenger must beat the incumbent by this many score points to take over.
 pub const HYSTERESIS_MARGIN: u32 = 10;
@@ -152,8 +154,8 @@ fn wire_error(e: postcard::Error) -> EonError {
     EonError::ValidationError(format!("spatial claim: {e}"))
 }
 
-/// One dedicated Class 0 datagram link per pair. Reserve its accept/connect for election;
-/// it is not an audio or RPC demultiplexer. Use one session per side for the conversation.
+/// One pinned link per pair: election datagrams and optional fixed control-probe
+/// streams. It does not dispatch audio, commands or general-purpose RPCs.
 pub struct PairedElection {
     link: Link,
     local_id: String,

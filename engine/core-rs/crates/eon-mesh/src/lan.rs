@@ -111,7 +111,7 @@ fn service(secret: &SecretKey, socket: SocketAddrV4, seq: u64) -> EonResult<Serv
 /// Establish a dedicated pinned QUIC election link without a remote socket address.
 /// Both sides call this with pre-provisioned keys. The higher key advertises a signed
 /// address; the lower browses. Discovery stops on success, error or cancellation.
-/// Only claim metadata traverses the election link.
+/// The link carries claim metadata and optional fixed control probes, not audio.
 ///
 /// `local_ip` selects a host interface (default: first active private/link-local IPv4,
 /// excluding loopback). `seq` is the publisher's announcement sequence. `wait` bounds

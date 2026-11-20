@@ -253,6 +253,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/transport/quic.rs`, `src/transport/discovery.rs`, `src/transport/security.rs`, `src/transport/spatial.rs`
   - **Requirements**: Zero-config mDNS peer discovery, mutual TLS 1.3 encryption, sub-10ms RPC latency across local LAN. 15ms Spatial Arbitration Protocol ("Single Mind, Multiple Bodies") broadcasting `SensoryClaim` over Class 0 QUIC datagrams, calculating deterministic multi-factor arbitration scores (SNR, screen unlock, HID recency, speaker ID confidence), and electing a single I/O leader while enforcing follower speaker suppression.
   - **Unit Tests**: `cargo test -p eon-mesh quic_tests`, `spatial_election_tests`.
+  - **Measured subset**: After election over an explicitly paired loopback link, 100 control RPCs had p50 0.286 ms, p95 0.350 ms and max 0.376 ms. The two-node LAN test is separate: the runner denied outbound mDNS multicast on its isolated veth. No LAN latency was measured.
 
 - [ ] **Task 8.2: Split-Inference Coordinator**
   - **Crate**: `eon-mesh`
