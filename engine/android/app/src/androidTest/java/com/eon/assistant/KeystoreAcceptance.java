@@ -3,25 +3,31 @@ package com.eon.assistant;
 import android.app.Activity;
 import android.app.Instrumentation;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyInfo;
 import android.security.keystore.KeyProperties;
+import android.util.Base64;
 
+import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
 import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.Collections;
 
+import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.GCMParameterSpec;
 
 /** Separate, same-signer instrumentation APK; runs against target code, never packaged in EON. */
 public final class KeystoreAcceptance extends Instrumentation {
     private static final String ALIAS = AndroidCredentialBroker.ALIAS;
     private static final String PROVIDER = "AndroidKeyStore";
     private static final String PREFS = "eon-keystore-instrumentation";
+    private static final byte[] RESTART_PROBE = "public key continuity fixture".getBytes(StandardCharsets.US_ASCII);
     private static AndroidCredentialBroker liveUntilProcessDeath;
     private String phase;
     private String step = "startup";
@@ -64,7 +70,7 @@ public final class KeystoreAcceptance extends Instrumentation {
         return store;
     }
 
-    private static void checkSingleKey() throws Exception {
+    private static SecretKey checkSingleKey() throws Exception {
         KeyStore store = store();
         check(Collections.list(store.aliases()).equals(Collections.singletonList(ALIAS)));
         SecretKey key = (SecretKey) store.getKey(ALIAS, null);
@@ -74,6 +80,7 @@ public final class KeystoreAcceptance extends Instrumentation {
         check(info.getPurposes() == (KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT));
         check(Arrays.equals(info.getBlockModes(), new String[] {"GCM"}));
         check(Arrays.equals(info.getEncryptionPaddings(), new String[] {"NoPadding"}));
+        return key;
     }
 
     private void firstProcess() throws Exception {
@@ -155,17 +162,29 @@ public final class KeystoreAcceptance extends Instrumentation {
         liveUntilProcessDeath = new AndroidCredentialBroker(authority);
         String old = liveUntilProcessDeath.put(owner.manage, fixture());
         check(old != null);
-        // Test-only: carry just the *name*, no secret, ciphertext, grant or key, across force-stop.
+        // Seal public test data, not a broker entry. Alias and KeyInfo alone cannot detect
+        // replacement by a different key with the same name and parameters across force-stop.
+        Cipher probe = Cipher.getInstance("AES/GCM/NoPadding");
+        probe.init(Cipher.ENCRYPT_MODE, checkSingleKey());
+        byte[] ciphertext = probe.doFinal(RESTART_PROBE);
         check(getTargetContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .edit().putString("old-handle", old).commit());
-        checkSingleKey();
+                .edit().putString("old-handle", old)
+                .putString("probe-iv", Base64.encodeToString(probe.getIV(), Base64.NO_WRAP))
+                .putString("probe-ciphertext", Base64.encodeToString(ciphertext, Base64.NO_WRAP)).commit());
     }
 
     private void secondProcess() throws Exception {
         step = "restarted";
         check(liveUntilProcessDeath == null);
-        checkSingleKey();
-        String old = getTargetContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("old-handle", null);
+        step = "key-continuity";
+        SharedPreferences prefs = getTargetContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        Cipher probe = Cipher.getInstance("AES/GCM/NoPadding");
+        probe.init(Cipher.DECRYPT_MODE, checkSingleKey(),
+                new GCMParameterSpec(128, Base64.decode(prefs.getString("probe-iv", ""), Base64.NO_WRAP)));
+        check(Arrays.equals(RESTART_PROBE, probe.doFinal(
+                Base64.decode(prefs.getString("probe-ciphertext", ""), Base64.NO_WRAP))));
+        step = "handle-isolation";
+        String old = prefs.getString("old-handle", null);
         check(old != null);
         AndroidCredentialBroker.Authority authority = new AndroidCredentialBroker.Authority();
         AndroidCredentialBroker.Owner owner = authority.newOwner();
@@ -176,6 +195,6 @@ public final class KeystoreAcceptance extends Instrumentation {
             check(fresh != null && !old.equals(fresh) && broker.consumeInspectionProof(owner.use, fresh, expected));
         }
         checkSingleKey();
-        check(getTargetContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().commit());
+        check(prefs.edit().clear().commit());
     }
 }
