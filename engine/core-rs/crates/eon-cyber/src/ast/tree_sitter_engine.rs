@@ -3,7 +3,7 @@ use super::repomap::{
 };
 use eon_primitives::EonResult;
 use std::ops::ControlFlow;
-use tree_sitter::{Node, ParseOptions, Parser};
+use tree_sitter::{Node, ParseOptions, Parser, TreeCursor};
 
 const MAX_PARSE_CHECKS: usize = 4096;
 const MAX_TREE_NODES: usize = 64_000;
@@ -61,6 +61,13 @@ fn at_file_scope(n: Node<'_>) -> bool {
                 | "lexical_declaration"
                 | "variable_declaration"
                 | "template_declaration"
+                | "preproc_if"
+                | "preproc_ifdef"
+                | "preproc_elif"
+                | "preproc_elifdef"
+                | "preproc_else"
+                | "linkage_specification"
+                | "declaration_list"
         ) {
             return false;
         }
@@ -69,9 +76,21 @@ fn at_file_scope(n: Node<'_>) -> bool {
     false
 }
 
-fn declaration(lang: Language, n: Node<'_>) -> Option<(SymbolKind, Node<'_>, bool)> {
+fn declaration<'t>(
+    lang: Language,
+    cursor: &TreeCursor<'t>,
+) -> Option<(SymbolKind, Node<'t>, bool)> {
     use Language::*;
     use SymbolKind::*;
+    let n = cursor.node();
+    // Each declarator of a typedef introduces a separate alias; its type,
+    // fields and parameter names are not aliases.
+    if matches!(lang, C | Cpp)
+        && cursor.field_name() == Some("declarator")
+        && n.parent().is_some_and(|p| p.kind() == "type_definition")
+    {
+        return c_name(n).map(|(name, _)| (TypeAlias, name, false));
+    }
     let kind = match (lang, n.kind()) {
         (Rust, "function_item")
         | (Kotlin | TypeScript, "function_declaration")
@@ -130,7 +149,16 @@ fn declaration(lang: Language, n: Node<'_>) -> Option<(SymbolKind, Node<'_>, boo
     let name = n
         .child_by_field_name("name")
         .filter(|n| is_identifier(*n))?;
-    Some((kind, name, kind == Function && at_file_scope(n)))
+    let free = kind == Function
+        && at_file_scope(n)
+        && (lang != Kotlin || {
+            // Keep the symbol location of an `expect fun`, but it is not an
+            // implementation that can receive an edge instead of the `actual`.
+            let mut children = n.walk();
+            n.named_children(&mut children)
+                .any(|c| c.kind() == "function_body")
+        });
+    Some((kind, name, free))
 }
 
 fn call_target(lang: Language, n: Node<'_>) -> Option<Option<Node<'_>>> {
@@ -163,7 +191,9 @@ fn anonymous_scope(lang: Language, n: Node<'_>) -> bool {
         | (Language::Cpp, "lambda_expression")
         | (Language::Rust, "closure_expression")
         | (Language::Kotlin, "lambda_literal" | "anonymous_function")
-        | (Language::TypeScript, "generator_function") => true,
+        // Named methods were handled by `declaration`; even when a computed
+        // name is not indexed, the method is a boundary for body calls.
+        | (Language::TypeScript, "generator_function" | "method_definition") => true,
         (Language::TypeScript, "arrow_function" | "function_expression") => {
             !n.parent().is_some_and(|p| {
                 p.kind() == "variable_declarator"
@@ -212,7 +242,7 @@ pub(super) fn collect<'a>(file: SourceFile<'a>, inventory: &mut Inventory<'a>) -
     loop {
         let n = cursor.node();
         let mut owner = owners.last().copied().flatten();
-        if let Some((kind, name, free)) = declaration(file.language, n) {
+        if let Some((kind, name, free)) = declaration(file.language, &cursor) {
             if inventory.symbols.len() == MAX_SYMBOLS {
                 return Err(error("symbol limit exceeded"));
             }

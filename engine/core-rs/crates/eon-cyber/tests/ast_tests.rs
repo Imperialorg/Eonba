@@ -254,3 +254,91 @@ fn ast_tests_invalid_or_over_budget_inputs_never_yield_partial_rankings() {
     let many = "fn shade() {}\n".repeat(4097);
     assert!(build(&[file("many.rs", Rust, &many)]).is_err());
 }
+
+#[test]
+fn ast_tests_c_conditionals_and_cpp_linkage_do_not_hide_free_definitions() {
+    let m = build(&[
+        file("tones.c", Language::C, "#ifndef TONES\n#define TONES\n#if WARM\nint red(void) { return 1; }\n#elif COOL\nint blue(void) { return 2; }\n#else\nint grey(void) { return 3; }\n#endif\n#endif\n"),
+        file("card.c", Language::C, "int red(void), blue(void), grey(void);\nint sample(void) {\n#if WARM\nreturn red();\n#elif COOL\nreturn blue();\n#else\nreturn grey();\n#endif\n}\n"),
+        file("sheet.cpp", Language::Cpp, "extern \"C\" {\n#ifdef PAPER\nint size() { return 1; }\n#endif\n}\nnamespace detail { int depth() { return 2; } }"),
+        file("card.cpp", Language::Cpp, "extern \"C\" int size();\nint depth();\nvoid draw() {\n#ifdef PAPER\nsize();\n#endif\ndepth(); }"),
+    ]).unwrap();
+    let edges: BTreeSet<_> = m
+        .call_edges
+        .iter()
+        .map(|&(i, j)| (m.symbols[i].name, m.symbols[j].name))
+        .collect();
+    assert_eq!(
+        edges,
+        BTreeSet::from([
+            ("sample", "red"),
+            ("sample", "blue"),
+            ("sample", "grey"),
+            ("draw", "size")
+        ])
+    );
+    assert_eq!(m.calls.unmatched, 1); // namespace member is not a free target
+}
+
+#[test]
+fn ast_tests_kotlin_expect_does_not_compete_with_actual_definition() {
+    let m = build(&[
+        file(
+            "common.kt",
+            Language::Kotlin,
+            "expect fun tint(): Int\nexpect fun paper(): Int\nfun draw() = tint() + paper()\n",
+        ),
+        file(
+            "palette.kt",
+            Language::Kotlin,
+            "actual fun tint(): Int = 1\n",
+        ),
+    ])
+    .unwrap();
+    let targets: Vec<_> = m
+        .call_edges
+        .iter()
+        .map(|&(_, i)| (m.symbols[i].path, m.symbols[i].name))
+        .collect();
+    assert_eq!(targets, [("palette.kt", "tint")]);
+    assert_eq!(
+        m.calls,
+        CallCounts {
+            matched: 1,
+            unmatched: 1,
+            ..Default::default()
+        }
+    );
+}
+
+#[test]
+fn ast_tests_unindexed_ts_computed_method_body_is_not_a_factory_call() {
+    let m = build(&[file("card.ts", Language::TypeScript,
+        "function shared() {} function hidden() {} function factory(key: string) { shared(); return { [key]() { hidden(); }, label() { shared(); } }; }")]).unwrap();
+    let edges: BTreeSet<_> = m
+        .call_edges
+        .iter()
+        .map(|&(i, j)| (m.symbols[i].name, m.symbols[j].name))
+        .collect();
+    assert_eq!(
+        edges,
+        BTreeSet::from([("factory", "shared"), ("label", "shared")])
+    );
+    assert_eq!(m.calls.matched, 2);
+}
+
+#[test]
+fn ast_tests_c_and_cpp_typedefs_capture_each_declarator_not_field_or_parameter_names() {
+    let src = "typedef struct { int red; } Tone, *TonePtr;\ntypedef Tone Palette[4];\ntypedef int (*Tint)(int shade);\n";
+    for (path, lang) in [("inks.c", Language::C), ("inks.cpp", Language::Cpp)] {
+        let m = build(&[file(path, lang, src)]).unwrap();
+        let aliases: Vec<_> = m
+            .symbols
+            .iter()
+            .map(|s| (s.name, s.kind, s.name_byte))
+            .collect();
+        let expected = ["Tone", "TonePtr", "Palette", "Tint"]
+            .map(|name| (name, SymbolKind::TypeAlias, src.find(name).unwrap()));
+        assert_eq!(aliases, expected, "{path}");
+    }
+}
