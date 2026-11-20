@@ -112,15 +112,93 @@ fn opaque_handle_and_argv_checks_never_echo_rejected_input() {
 }
 
 #[cfg(any(unix, windows))]
-fn child_stdin(writer: std::io::PipeWriter) -> ChildStdin {
-    #[cfg(unix)]
-    use std::os::fd::OwnedFd as OwnedPipe;
-    #[cfg(windows)]
-    use std::os::windows::io::OwnedHandle as OwnedPipe;
-    OwnedPipe::from(writer).into()
+mod stdin_probe {
+    use super::*;
+    use std::io::Read;
+    use std::process::{Child, Command, ExitStatus, Stdio};
+    use std::time::{Duration, Instant};
+
+    const EXPECTED_DIGEST: &str = "EON_TEST_STDIN_FIXTURE_DIGEST";
+    // libtest exits zero if --exact matches nothing. Require proof the reader saw EOF.
+    pub(super) const MATCH: i32 = 42;
+
+    #[test]
+    #[ignore = "stdin reader subprocess for the credential tests"]
+    fn read_fixture() {
+        let Ok(expected) = std::env::var(EXPECTED_DIGEST) else {
+            return;
+        };
+        let matched = {
+            let mut actual = zeroize::Zeroizing::new(Vec::new());
+            std::io::stdin()
+                .lock()
+                .take(MAX_SECRET_LEN as u64 + 1)
+                .read_to_end(&mut actual)
+                .unwrap();
+            actual.len() <= MAX_SECRET_LEN && blake3::hash(&actual).to_hex().as_str() == expected
+        };
+        std::process::exit(if matched { MATCH } else { 1 });
+    }
+
+    pub(super) struct Probe(Child);
+
+    impl Probe {
+        pub(super) fn spawn(expected: &[u8]) -> (Self, ChildStdin) {
+            // A Windows ChildStdin needs an asynchronous handle; io::pipe() is synchronous.
+            let child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "credentials::identity_and_credential_tests::stdin_probe::read_fixture",
+                ])
+                .env(EXPECTED_DIGEST, blake3::hash(expected).to_hex().as_str())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut probe = Self(child);
+            let stdin = probe.0.stdin.take().unwrap();
+            (probe, stdin)
+        }
+
+        pub(super) fn wait(mut self, timeout: Duration) -> Option<ExitStatus> {
+            let start = Instant::now();
+            loop {
+                if let Some(status) = self.0.try_wait().unwrap() {
+                    return Some(status);
+                }
+                if start.elapsed() >= timeout {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    pub(super) fn closed_stdin() -> ChildStdin {
+        let (probe, mut stdin) = Probe::spawn(b"");
+        // Keep stdin open so the reader cannot see EOF. The deadline must kill and reap it.
+        assert!(probe.wait(Duration::ZERO).is_none());
+        // A concurrent fork can still hold the read end until exec. Confirm closure before
+        // testing the broker, probing with at most 100 bytes (well below pipe capacity).
+        for _ in 0..100 {
+            if stdin.write_all(&[0]).is_err() {
+                return stdin;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("credential stdin pipe did not close");
+    }
 }
 
-// Check the public pipe operation (including EOF), comparing only synthetic fixtures in memory.
 #[cfg(any(unix, windows))]
 pub(super) fn check_binding(
     broker: &CredentialBroker,
@@ -128,13 +206,17 @@ pub(super) fn check_binding(
     handle: &CredentialHandle,
     expected: &[u8],
 ) -> EonResult<()> {
-    use std::io::Read;
-    let (mut reader, writer) = std::io::pipe().unwrap();
-    let result = broker.bind_to_stdin(caller, handle, child_stdin(writer));
-    let mut actual = zeroize::Zeroizing::new(Vec::new());
-    reader.read_to_end(&mut actual).unwrap();
-    assert!(actual.as_slice() == expected);
-    result
+    let (probe, stdin) = stdin_probe::Probe::spawn(expected);
+    std::thread::scope(|scope| {
+        // Start the deadline before binding: the writer can block if the child stops reading.
+        scope.spawn(move || {
+            let status = probe
+                .wait(std::time::Duration::from_secs(10))
+                .expect("credential stdin reader timed out");
+            assert_eq!(status.code(), Some(stdin_probe::MATCH), "stdin mismatch");
+        });
+        broker.bind_to_stdin(caller, handle, stdin)
+    })
 }
 
 #[cfg(any(unix, windows))]
@@ -186,7 +268,11 @@ fn no_resolution_before_authorized_use() {
         .user(P::MANAGE_CREDENTIALS | P::USE_CREDENTIALS | P::EXECUTE_PROCESS | P::SPAWN_SUBAGENT);
     let handle = "secret://alias".parse().unwrap();
     broker
-        .put(&owner, &handle, EphemeralSecret::new(vec![7]))
+        .put(
+            &owner,
+            &handle,
+            EphemeralSecret::new(vec![7; MAX_SECRET_LEN]),
+        )
         .unwrap();
     for size in [0, MAX_SECRET_LEN + 1] {
         assert!(
@@ -205,7 +291,7 @@ fn no_resolution_before_authorized_use() {
         assert!(check_binding(&broker, &denied, &handle, b"").is_err());
     }
     assert_eq!(loads.load(Ordering::Relaxed), 0);
-    check_binding(&broker, &owner, &handle, &[7]).unwrap();
+    check_binding(&broker, &owner, &handle, &[7; MAX_SECRET_LEN]).unwrap();
     assert_eq!(loads.load(Ordering::Relaxed), 1);
 }
 
@@ -220,12 +306,13 @@ fn closed_pipe_error_contains_no_alias_or_material() {
     broker
         .put(&owner, &handle, EphemeralSecret::new(fixture.to_vec()))
         .unwrap();
-    let (reader, writer) = std::io::pipe().unwrap();
-    drop(reader);
     let err = broker
-        .bind_to_stdin(&owner, &handle, child_stdin(writer))
+        .bind_to_stdin(&owner, &handle, stdin_probe::closed_stdin())
         .unwrap_err();
-    assert_eq!(err, failed("cannot bind to child stdin"));
+    assert!(
+        err == failed("cannot bind to child stdin"),
+        "unexpected bind error"
+    );
     check_binding(&broker, &owner, &handle, fixture).unwrap();
 }
 
