@@ -74,6 +74,7 @@ fn validate_relay(relay: &RelayUrl) -> EonResult<()> {
 pub struct WanEndpoint {
     endpoint: Endpoint,
     conn: Connection,
+    relay: RelayUrl,
     budget: Budget,
 }
 
@@ -113,20 +114,11 @@ impl WanEndpoint {
                 .bind()
                 .await
                 .map_err(transport_error)?;
-            // iroh 1.4 chooses a listening "home relay" from probe results.
-            // Rather than enable those probes, both operators initiate a TLS
-            // handshake on demand. This registers both endpoints with the
-            // relay. Use the same connection at both ends, by key order.
-            let peer = EndpointAddr::new(pinned).with_relay_url(relay.clone());
-            let dial = async { ep.connect(peer, ALPN).await.map_err(transport_error) };
-            let (outgoing, incoming) = tokio::try_join!(dial, accept(&ep, pinned, &relay))?;
-            if outgoing.remote_id() != pinned || incoming.remote_id() != pinned {
-                return Err(EonError::SecurityViolation("unpaired WAN identity".into()));
-            }
-            let conn = if ep.id() < pinned { outgoing } else { incoming };
+            let conn = rendezvous(&ep, pinned, &relay).await?;
             Ok(Self {
                 endpoint: ep,
                 conn,
+                relay,
                 budget: Budget::new(bytes_per_sec),
             })
         })
@@ -134,9 +126,44 @@ impl WanEndpoint {
         .map_err(|_| transport_error("timed out opening the provisioned relay path"))?
     }
 
+    /// Identity authenticated by the current QUIC handshake.
+    pub fn peer_id(&self) -> EndpointId {
+        self.conn.remote_id()
+    }
+
+    /// Abandon a stalled session and rendezvous once more on the *same* relay.
+    /// The pinned peer must explicitly `open` or `reconnect` during `wait`.
+    /// This is a new QUIC connection, not migration of streams: outstanding
+    /// frames are never replayed, and a missing receipt means delivery is unknown.
+    /// The bandwidth budget (including existing bulk reservations) is retained.
+    ///
+    /// Timeout, error or cancellation ends the session; there is no background retry.
+    pub async fn reconnect(mut self, wait: Duration) -> EonResult<Self> {
+        let pinned = self.peer_id();
+        self.conn.close(0u8.into(), b"reconnecting");
+        self.conn = timeout(wait, rendezvous(&self.endpoint, pinned, &self.relay))
+            .await
+            .map_err(|_| {
+                transport_error("timed out reconnecting to the provisioned relay peer")
+            })??;
+        Ok(self)
+    }
+
     pub async fn close(self) {
         self.endpoint.close().await;
     }
+}
+
+async fn rendezvous(ep: &Endpoint, pinned: EndpointId, relay: &RelayUrl) -> EonResult<Connection> {
+    // iroh 1.4 chooses a listening "home relay" from probe results. Both
+    // peers instead register by dialing. Choose the same connection by key order.
+    let peer = EndpointAddr::new(pinned).with_relay_url(relay.clone());
+    let dial = async { ep.connect(peer, ALPN).await.map_err(transport_error) };
+    let (outgoing, incoming) = tokio::try_join!(dial, accept(ep, pinned, relay))?;
+    if outgoing.remote_id() != pinned || incoming.remote_id() != pinned {
+        return Err(EonError::SecurityViolation("unpaired WAN identity".into()));
+    }
+    Ok(if ep.id() < pinned { outgoing } else { incoming })
 }
 
 async fn accept(ep: &Endpoint, pinned: EndpointId, relay: &RelayUrl) -> EonResult<Connection> {

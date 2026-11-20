@@ -1,6 +1,11 @@
 //! Real relay transit on loopback; not a carrier roaming or STUN test.
 
-use std::{net::Ipv4Addr, num::NonZeroU32, sync::Arc, time::Duration};
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    num::NonZeroU32,
+    sync::Arc,
+    time::Duration,
+};
 
 use eon_mesh::{
     EonResult,
@@ -28,7 +33,11 @@ impl AccessControl for Allowed {
 }
 
 async fn relay(keys: &[&SecretKey]) -> (Server, RelayUrl) {
-    let mut relay = RelayConfig::new((Ipv4Addr::LOCALHOST, 0));
+    relay_at((Ipv4Addr::LOCALHOST, 0).into(), keys).await
+}
+
+async fn relay_at(addr: SocketAddr, keys: &[&SecretKey]) -> (Server, RelayUrl) {
+    let mut relay = RelayConfig::new(addr);
     relay.access = Arc::new(Allowed(keys.iter().map(|k| k.public()).collect()));
     let mut config = ServerConfig::default();
     config.relay = Some(relay); // no QUIC discovery server, metrics listener or ACME
@@ -50,13 +59,11 @@ async fn endpoint(secret: SecretKey, pin: EndpointId, relay: &RelayUrl) -> EonRe
     .await
 }
 
-#[tokio::test]
-async fn iroh_and_qos_tests_pinned_relay_carries_all_four_lanes_on_one_connection() -> EonResult<()>
-{
-    let (a, b) = (SecretKey::generate(), SecretKey::generate());
-    let (aid, bid) = (a.public(), b.public());
-    let (relay, url) = relay(&[&a, &b]).await;
-    let (left, right) = tokio::try_join!(endpoint(a, bid, &url), endpoint(b, aid, &url))?;
+async fn exchange_four_lanes(
+    left: &WanEndpoint,
+    right: &WanEndpoint,
+    relay: &Server,
+) -> EonResult<()> {
     timeout(WAIT, async {
         let stats = &relay.metrics().server;
         // Start after the relay and QUIC handshakes; observe data forwarding,
@@ -166,7 +173,17 @@ async fn iroh_and_qos_tests_pinned_relay_carries_all_four_lanes_on_one_connectio
         Ok(())
     })
     .await
-    .expect("bounded relay roundtrip")?;
+    .expect("bounded relay roundtrip")
+}
+
+#[tokio::test]
+async fn iroh_and_qos_tests_pinned_relay_carries_all_four_lanes_on_one_connection() -> EonResult<()>
+{
+    let (a, b) = (SecretKey::generate(), SecretKey::generate());
+    let (aid, bid) = (a.public(), b.public());
+    let (relay, url) = relay(&[&a, &b]).await;
+    let (left, right) = tokio::try_join!(endpoint(a, bid, &url), endpoint(b, aid, &url))?;
+    exchange_four_lanes(&left, &right, &relay).await?;
     tokio::join!(left.close(), right.close());
     relay.shutdown().await.unwrap();
     Ok(())
@@ -192,6 +209,111 @@ async fn iroh_and_qos_tests_relay_membership_does_not_authorize_an_application_p
     }
     let (edge, desk) = tokio::try_join!(endpoint(edge, desk_id, &url), accepting)?;
     tokio::join!(desk.close(), edge.close());
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test]
+async fn iroh_and_qos_tests_reconnect_after_relay_restart_preserves_peer_and_qos() -> EonResult<()>
+{
+    let (a, b) = (SecretKey::generate(), SecretKey::generate());
+    let (aid, bid) = (a.public(), b.public());
+    let (server, url) = relay(&[&a, &b]).await;
+    let addr = server.http_addr().unwrap();
+    let (left, right) = tokio::try_join!(
+        WanEndpoint::open(a.clone(), bid, url.clone(), NonZeroU32::MIN, WAIT),
+        endpoint(b.clone(), aid, &url)
+    )?;
+    assert_eq!((left.peer_id(), right.peer_id()), (bid, aid));
+
+    // At 1 B/s, admitting this chunk reserves more bulk time than the entire test.
+    let chunk = ReliableFrame::Bulk {
+        index: 0,
+        bytes: vec![13; 4096],
+    };
+    let transfer = async |tx: &WanEndpoint, rx: &WanEndpoint, frame: &ReliableFrame| {
+        tokio::try_join!(tx.send(frame), rx.recv())
+    };
+    let before = server.metrics().server.bytes_sent.get();
+    let ((), received) = timeout(WAIT, transfer(&left, &right, &chunk))
+        .await
+        .unwrap()?;
+    assert_eq!(received, chunk);
+    assert!(server.metrics().server.bytes_sent.get() - before >= 4096);
+
+    server.shutdown().await.unwrap();
+    let lost = ReliableFrame::Control(EpochInvalidationEvent {
+        invalidated_epoch: 99,
+        ..Default::default()
+    });
+    let short = Duration::from_millis(250);
+    assert!(!matches!(
+        timeout(short, transfer(&left, &right, &lost)).await,
+        Ok(Ok(_))
+    ));
+
+    let recover = async { tokio::try_join!(left.reconnect(WAIT), right.reconnect(WAIT)) };
+    tokio::pin!(recover);
+    assert!(timeout(short, &mut recover).await.is_err());
+    let (server, restarted_url) = relay_at(addr, &[&a, &b]).await;
+    assert_eq!(restarted_url, url);
+    let (left, right) = recover.await?;
+    assert_eq!((left.peer_id(), right.peer_id()), (bid, aid));
+    // The undelivered epoch must not be replayed on the replacement connection.
+    let fresh = ReliableFrame::Control(EpochInvalidationEvent {
+        invalidated_epoch: 100,
+        ..Default::default()
+    });
+    let ((), received) = timeout(WAIT, transfer(&left, &right, &fresh))
+        .await
+        .unwrap()?;
+    assert_eq!(received, fresh);
+    // The restarted relay has fresh counters. Verify payload transit, not just
+    // two new registrations.
+    exchange_four_lanes(&right, &left, &server).await?;
+    tokio::select! {
+        sent = left.send(&chunk) => panic!("reserved bulk send did not wait: {sent:?}"),
+        recv = right.recv() => panic!("unexpected traffic during bulk reservation: {recv:?}"),
+        _ = tokio::time::sleep(short) => {}
+    }
+    tokio::join!(left.close(), right.close());
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test]
+async fn iroh_and_qos_tests_reconnect_requires_fresh_consent_from_the_original_peer()
+-> EonResult<()> {
+    let (a, b, outsider) = (
+        SecretKey::generate(),
+        SecretKey::generate(),
+        SecretKey::generate(),
+    );
+    let (aid, bid) = (a.public(), b.public());
+    let (server, url) = relay(&[&a, &b, &outsider]).await;
+    let (left, right) = tokio::try_join!(endpoint(a, bid, &url), endpoint(b.clone(), aid, &url))?;
+    right.close().await;
+
+    let recover = left.reconnect(WAIT);
+    tokio::pin!(recover);
+    tokio::select! {
+        _ = &mut recover => panic!("reconnected without the pinned peer"),
+        other = endpoint(outsider, aid, &url) => assert!(other.is_err()),
+    }
+    // The original peer can explicitly rejoin even if it lost its QUIC state.
+    let (left, right) = tokio::try_join!(recover, endpoint(b, aid, &url))?;
+    assert_eq!((left.peer_id(), right.peer_id()), (bid, aid));
+    // This time the other peer is still online, but has not agreed to rejoin.
+    assert!(
+        timeout(
+            Duration::from_secs(2),
+            left.reconnect(Duration::from_millis(250))
+        )
+        .await
+        .expect("reconnect must respect its deadline")
+        .is_err()
+    );
+    right.close().await;
     server.shutdown().await.unwrap();
     Ok(())
 }

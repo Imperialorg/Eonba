@@ -111,6 +111,26 @@ If the desktop workstation is powered off or network connection is severed:
 2. The phone seamlessly degrades to local on-device quantized models (`gemma-2-2b-it` or `Qwen2.5-Coder-3B` + `Kokoro-82M`) without throwing user-facing exceptions.
 3. Pending background tasks are queued locally until mesh connectivity is re-established.
 
+### 5.1 Implemented: token-only spoken dictation readback
+
+The `eon-mesh` feature `token-readback` implements a narrower service than the sequence above. The edge recognizes one supplied recording (16 kHz mono PCM16, at most eight seconds). As the pinned Zipformer joiner selects nonblank **text token IDs**, it sends new IDs over a dedicated QUIC stream. The workstation detokenizes each prefix and returns a caption. After end-of-utterance it also returns Kokoro pronunciation IDs for “I heard …”. Neither side sends PCM, model weights, an action plan or a lease. Text token IDs reveal the spoken words; they are not anonymized or acoustic tokens.
+
+- **Opt-in:** The host uses `split_inference::zipformer::readback::Readback::LocalOnly` unless the operator authorizes that recording with `AllowTokenPeer { pcm, edge, worker }`. A `TokenPeer` binds an explicit address and an out-of-band public-key pin. The worker must separately call `serve_one` with its pinned `Vocabulary`. There is no discovery, relay, implicit service start or downgrade to the older PCM ALPN.
+- **Verification and fallback:** Every reply binds to a fresh utterance nonce and the ordered request prefix. The edge compares caption bytes with its own decoder and the final pronunciation with independently generated Kokoro IDs. On disconnect, timeout (500 ms per exchange), malformed reply, or content mismatch, it continues with the running edge recognizer and local pronunciation. Different phonemizer versions can legitimately select this fallback. Local ASR or TTS installation failures are errors, not successes.
+- **Playback:** `Readback::queue` requires the caller's reply-scoped `ReplyRenderer`. Partial captions can update a display only. Successful finalization queues one attributed readback; silence queues nothing. The caller pumps Kokoro on its synthesis worker, and only a matching trusted kernel lease permits samples onto the bounded render ring. Interrupt via the same renderer’s revocation handle. The service never opens a microphone or speaker.
+
+To reproduce the private loopback gate with the repository's native voice prerequisites (ORT, espeak-ng, etc.), from the repository root:
+
+```bash
+python3 scripts/download_models.py --ids voice-test-zipformer-0 \
+  zipformer-en-2023-06-26-{encoder-int8,decoder,joiner-int8,tokens} \
+  kokoro-v1.0-release-int8 kokoro-v1.0-voice-af_heart
+cd engine/core-rs
+cargo test --locked -p eon-mesh --features token-readback --test split_token_readback -- --test-threads=1
+```
+
+The test uses the release recording/transcript and a second wire implementation that can partition or corrupt a reply. It checks the PCM consumed by the edge render callback using independent ASR. This is native loopback with an in-memory output, not a physical mobile/driver measurement, low-latency guarantee, or general remote assistant. Acoustic inference and waveform synthesis still run at the edge; rechecking the worker’s computation is intentional.
+
 ---
 
 ## 6. CRDT-Synchronized Cognitive State & Dual-Storage Projection
