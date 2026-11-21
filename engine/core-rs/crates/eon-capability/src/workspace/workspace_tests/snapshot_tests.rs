@@ -46,6 +46,30 @@ fn durable_root_snapshot_precedes_edits_without_publishing_a_tree_listing() {
 }
 
 #[test]
+fn ordinary_mixed_case_git_file_rejects_the_whole_snapshot() {
+    let f = Fixture::new();
+    let root = f.root();
+    let nested = root.join("nested");
+    dir(&nested);
+    file(&root.join("legitimate"), b"allowed");
+    file(&nested.join(".Git"), b"ordinary file");
+    // On a case-sensitive filesystem both entries can exist independently.
+    if !nested.join(".git").try_exists().unwrap() {
+        dir(&nested.join(".git"));
+    }
+
+    let journal = f.journal();
+    assert!(matches!(
+        f.open().snapshot(&journal),
+        Err(WorkspaceError::Invalid("reserved snapshot name"))
+    ));
+    assert_eq!(host::read(nested.join(".Git")).unwrap(), b"ordinary file");
+    assert_eq!(host::read_dir(root.join(STORE)).unwrap().count(), 0);
+    drop(journal);
+    assert!(replay(f.0.join("journal")).unwrap().is_empty());
+}
+
+#[test]
 fn denied_tree_entry_never_publishes_a_partial_snapshot() {
     let f = Fixture::new();
     let root = f.root();

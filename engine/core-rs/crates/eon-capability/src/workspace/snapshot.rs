@@ -101,11 +101,11 @@ impl Capture {
                 .file_name()
                 .to_str()
                 .map_err(|_| WorkspaceError::Invalid("unsupported snapshot name"))?;
-            if matches!(name, "." | "..")
-                || name.eq_ignore_ascii_case(".git")
-                || (depth == 0 && name == STORE)
-            {
+            if matches!(name, "." | ".." | ".git") || (depth == 0 && name == STORE) {
                 continue;
+            }
+            if name.eq_ignore_ascii_case(".git") {
+                return Err(WorkspaceError::Invalid("reserved snapshot name"));
             }
             if self.contents.len() >= MAX_ENTRIES || depth >= MAX_DEPTH {
                 return Err(WorkspaceError::Invalid("snapshot tree exceeds limit"));
