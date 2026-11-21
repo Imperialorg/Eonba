@@ -61,7 +61,10 @@ def measure(directory):
         raw = f.read(1_048_577)
     if len(raw) > 1_048_576:
         raise ValueError("oversized session manifest")
-    info = json.loads(raw, object_pairs_hook=distinct_keys)
+    try:
+        info = json.loads(raw, object_pairs_hook=distinct_keys)
+    except RecursionError as error:
+        raise ValueError("session manifest nested too deeply") from error
     if not isinstance(info, dict) or info.get("origin") != "authorized-single-clock-physical":
         raise ValueError("physical provenance declaration required")
     if not all(isinstance(info.get(key), str) and info[key].strip() for key in ("route", "gains")):
@@ -105,6 +108,12 @@ def measure(directory):
             seen.add(sample.fingerprint)
             started = bridge_started(label, "bridge_started", mode)
             latency = None
+            if started is False or sample.first_output_end is None:
+                # The last input window must leave time for even a near-deadline onset
+                # to be confirmed by sustained output. A truncated observation is not a miss.
+                required = acoustic.P99_LIMIT_MS + acoustic.SUSTAINED_OUTPUT_MS
+                if (sample.frames - sample.last_input_end) * 1000 < required * sample.rate:
+                    raise ValueError("insufficient post-stimulus recording to establish a miss")
             if started is False:
                 misses[path.name] = "no bridge started"
             elif sample.first_output_end is None:

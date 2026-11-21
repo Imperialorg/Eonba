@@ -13,6 +13,7 @@ from struct import iter_unpack
 MIN_TRIALS = 100
 P50_LIMIT_MS = 170
 P99_LIMIT_MS = 280
+SUSTAINED_OUTPUT_MS = 5
 
 
 @dataclass(frozen=True)
@@ -41,7 +42,12 @@ def _analyze(path: Path, threshold: int) -> Capture:
         raise ValueError("PCM analysis requires a little-endian host")
     if not 1 <= threshold <= 32767:
         raise ValueError("RMS threshold must be between 1 and 32767 PCM units")
-    with wave.open(str(path), "rb") as wav:
+    try:
+        reader = wave.open(str(path), "rb")
+    except RuntimeError as error:
+        # wave raises RuntimeError when skipping a subchunk outside the enclosing RIFF.
+        raise ValueError("invalid WAV chunk bounds") from error
+    with reader as wav:
         rate = wav.getframerate()
         frames = wav.getnframes()
         if (wav.getnchannels(), wav.getsampwidth(), wav.getcomptype()) != (2, 2, "NONE"):
@@ -74,7 +80,7 @@ def _analyze(path: Path, threshold: int) -> Capture:
                 if not output_run:
                     onset_end = end
                 output_run += 1
-                if output_run >= 5 and first_output is None and end == (ms + 1) * rate // 1000:
+                if output_run >= SUSTAINED_OUTPUT_MS and first_output is None and end == (ms + 1) * rate // 1000:
                     first_output = onset_end
             else:
                 output_run = 0

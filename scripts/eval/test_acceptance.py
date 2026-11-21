@@ -138,6 +138,30 @@ class PhysicalInventoryTests(unittest.TestCase):
         self.samples = {p: replace(s, rate=8000) for p, s in self.samples.items()}
         with self.assertRaisesRegex(ValueError, "control rate differs"):
             self.measure()
+
+    def test_truncated_reply_window_is_not_a_measured_miss(self):
+        path = self.root / "trials/0.wav"
+        original = self.samples[path]
+        tail = 16 * (physical.acoustic.P99_LIMIT_MS + physical.acoustic.SUSTAINED_OUTPUT_MS)
+        missed = replace(original, frames=original.last_input_end + tail, first_output_end=None)
+        self.samples[path] = replace(missed, frames=missed.frames - 1)
+        with self.assertRaisesRegex(ValueError, "insufficient post-stimulus"):
+            self.measure()
+        self.samples[path] = missed
+        self.assertIn("0.wav", self.measure()["task_10_2"]["misses"])
+
+    def test_malformed_parsers_return_invalid_not_measured_failure(self):
+        (self.root / "session.json").write_bytes(b"[" * 2000 + b"]" * 2000)
+        # Decoder recursion limits differ among Python builds.
+        with (patch.object(physical.json, "loads", side_effect=RecursionError),
+              contextlib.redirect_stderr(io.StringIO()) as errors):
+            self.assertEqual(physical.main([str(self.root)]), 2)
+        self.assertIn("nested too deeply", errors.getvalue())
+        (self.root / "session.json").write_text(json.dumps(self.info))
+        (self.root / "muted-control.wav").write_bytes(b"RIFF\x0c\0\0\0WAVEJUNK\xff\xff\xff\xff")
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(physical.main([str(self.root)]), 2)
+        self.assertIn("invalid WAV chunk bounds", errors.getvalue())
         for rate in (None, True, 7999, 192001, "8000"):
             with self.subTest(rate=rate), self.assertRaisesRegex(ValueError, "sample_rate_hz"):
                 if rate is None:
