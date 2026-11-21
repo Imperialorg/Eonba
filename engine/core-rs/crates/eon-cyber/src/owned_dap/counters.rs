@@ -30,14 +30,19 @@ fn local_scope(scopes: &Value, adapter: Adapter) -> Result<u64> {
     let local = &scopes[0];
     let expected = match adapter {
         Adapter::LldbDap => {
-            ids[0] == 1 && local["presentationHint"] == "locals" && local["namedVariables"] == LOCALS
+            ids[0] == 1
+                && local["presentationHint"] == "locals"
+                && local["namedVariables"] == LOCALS
         }
         Adapter::CodeLldb => {
             local.get("presentationHint").is_none_or(|h| h == "locals")
                 && local.get("namedVariables").is_none_or(|n| n == LOCALS)
         }
     };
-    if !expected || local["expensive"] != false || local.get("indexedVariables").is_some_and(|n| n != 0) {
+    if !expected
+        || local["expensive"] != false
+        || local.get("indexedVariables").is_some_and(|n| n != 0)
+    {
         return Err(Error::UnexpectedFixture);
     }
     Ok(ids[0])
@@ -112,9 +117,11 @@ mod tests {
             Adapter::LldbDap => &["Locals", "Globals", "Registers"],
             Adapter::CodeLldb => &["Local", "Static", "Global", "Registers"],
         };
-        let mut rows: Vec<_> = names.iter().enumerate().map(|(i, name)| {
-            json!({"name": name, "expensive":false, "variablesReference":i+1})
-        }).collect();
+        let mut rows: Vec<_> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| json!({"name": name, "expensive":false, "variablesReference":i+1}))
+            .collect();
         if adapter == Adapter::LldbDap {
             rows[0]["presentationHint"] = json!("locals");
             rows[0]["namedVariables"] = json!(3);
@@ -128,10 +135,14 @@ mod tests {
             let valid = scopes(adapter);
             assert_eq!(local_scope(&valid, adapter), Ok(1));
             for (field, bad) in [
-                ("name", json!("Registers")), ("expensive", json!(true)),
-                ("variablesReference", json!(2)), ("variablesReference", json!(0)),
-                ("variablesReference", json!(2147483648u64)), ("variablesReference", json!("1")),
-                ("namedVariables", json!(4)), ("indexedVariables", json!(1)),
+                ("name", json!("Registers")),
+                ("expensive", json!(true)),
+                ("variablesReference", json!(2)),
+                ("variablesReference", json!(0)),
+                ("variablesReference", json!(2147483648u64)),
+                ("variablesReference", json!("1")),
+                ("namedVariables", json!(4)),
+                ("indexedVariables", json!(1)),
                 ("presentationHint", json!("globals")),
             ] {
                 let mut wrong = valid.clone();
@@ -158,26 +169,49 @@ mod tests {
         let valid = variables();
         assert_eq!(
             parse_counters(&valid, Visit::Second),
-            Ok(AllocationCounters { allocations: 2, frees: 1 })
+            Ok(AllocationCounters {
+                allocations: 2,
+                frees: 1
+            })
         );
-        assert_eq!(parse_counters(&valid, Visit::Third), Err(Error::UnexpectedFixture));
+        assert_eq!(
+            parse_counters(&valid, Visit::Third),
+            Err(Error::UnexpectedFixture)
+        );
         for (field, bad) in [
-            ("name", json!("frees")), ("name", json!("other")), ("type", json!("unsigned int *")),
-            ("value", json!(2)), ("value", json!("+2")), ("value", json!("02")),
-            ("value", json!("2 ")), ("value", json!("0x2")), ("value", json!("4")),
-            ("value", json!("1")), ("value", json!("2".repeat(4096))),
-            ("variablesReference", json!(1)), ("indexedVariables", json!(1)),
+            ("name", json!("frees")),
+            ("name", json!("other")),
+            ("type", json!("unsigned int *")),
+            ("value", json!(2)),
+            ("value", json!("+2")),
+            ("value", json!("02")),
+            ("value", json!("2 ")),
+            ("value", json!("0x2")),
+            ("value", json!("4")),
+            ("value", json!("1")),
+            ("value", json!("2".repeat(4096))),
+            ("variablesReference", json!(1)),
+            ("indexedVariables", json!(1)),
             ("namedVariables", json!("0")),
         ] {
             let mut wrong = valid.clone();
             wrong[1][field] = bad;
-            assert_eq!(parse_counters(&wrong, Visit::Second), Err(Error::UnexpectedFixture));
+            assert_eq!(
+                parse_counters(&wrong, Visit::Second),
+                Err(Error::UnexpectedFixture)
+            );
         }
         let mut rows = valid.as_array().unwrap().clone();
         rows.pop();
-        assert_eq!(parse_counters(&json!(rows), Visit::Second), Err(Error::UnexpectedFixture));
+        assert_eq!(
+            parse_counters(&json!(rows), Visit::Second),
+            Err(Error::UnexpectedFixture)
+        );
         rows.extend([valid[2].clone(), valid[2].clone()]);
-        assert_eq!(parse_counters(&json!(rows), Visit::Second), Err(Error::UnexpectedFixture));
+        assert_eq!(
+            parse_counters(&json!(rows), Visit::Second),
+            Err(Error::UnexpectedFixture)
+        );
     }
 
     #[test]
@@ -200,19 +234,30 @@ mod tests {
                 (2, "variables", json!({"variables":vars})),
             ] {
                 let response = json!({"type":"response", "request_seq":seq, "command":cmd,
-                    "success":true, "body":body}).to_string();
+                    "success":true, "body":body})
+                .to_string();
                 write!(peer, "Content-Length: {}\r\n\r\n{response}", response.len()).unwrap();
-                if bad_scope { break; }
+                if bad_scope {
+                    break;
+                }
             }
             let mut wire = Wire::new(socket, Instant::now() + Duration::from_secs(1));
             assert_eq!(
-                observe(&mut wire, Adapter::CodeLldb, Visit::Second, &json!([{"id":11},{"id":12},{"id":13}])),
+                observe(
+                    &mut wire,
+                    Adapter::CodeLldb,
+                    Visit::Second,
+                    &json!([{"id":11},{"id":12},{"id":13}])
+                ),
                 Err(Error::UnexpectedFixture)
             );
             drop(wire);
             let mut requests = String::new();
             peer.read_to_string(&mut requests).unwrap();
-            assert_eq!(requests.matches("Content-Length: ").count(), if bad_scope {1} else {2});
+            assert_eq!(
+                requests.matches("Content-Length: ").count(),
+                if bad_scope { 1 } else { 2 }
+            );
             assert!(requests.contains(r#""command":"scopes""#));
             assert_eq!(requests.contains(r#""command":"variables""#), !bad_scope);
         }

@@ -1,4 +1,4 @@
-/* Test-only OpenJDK JDWP transport: the already-connected anonymous stdin/stdout
+/* Fixed-fixture OpenJDK JDWP transport: the already-connected anonymous stdin/stdout
  * pipes of OwnedFixture. No socket, address lookup, listener, or reconnect. */
 #include <jdwpTransport.h>
 #include <errno.h>

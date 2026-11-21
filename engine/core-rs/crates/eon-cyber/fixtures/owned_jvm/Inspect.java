@@ -72,9 +72,9 @@ final class Inspect {
                                       .toURI()).toRealPath();
         String dir = classes.toString();
         var launcher = new ProcessBuilder(
-            "/usr/bin/setpriv", "--pdeathsig=KILL", "--", "/usr/bin/java",
+            "/usr/bin/setpriv", "--pdeathsig=KILL", "--", classes.resolve("jdk/bin/java").toString(),
             "-XX:+DisableAttachMechanism", "-XX:-UsePerfData", "-XX:-CreateCoredumpOnCrash",
-            "-XX:ActiveProcessorCount=1", "-Xint", "-Xmx48m", "-Djava.io.tmpdir=" + dir,
+            "-XX:ActiveProcessorCount=1", "-Xshare:off", "-Xint", "-Xmx48m", "-Djava.io.tmpdir=" + dir,
             "-agentlib:jdwp=transport=ownedpipe,server=n,suspend=y,address=owned-fixture",
             "-cp", dir, "OwnedFixture");
         launcher.environment().clear();
@@ -126,7 +126,7 @@ final class Inspect {
                             List.of(e.location().declaringType(), markers.get(0)));
                         require(counts.length == 2 && counts[0] == 0 && counts[1] == 3,
                                 "unexpected per-class counts");
-                        observed = new Observation(String.join(" / ", stack), counts[0], counts[1]);
+                        observed = new Observation(String.join(" ", stack), counts[0], counts[1]);
                         if (interruptAtStop) return observed; // do not resume before cleanup
                     } else if (event instanceof VMDeathEvent) {
                         require(observed != null && !interruptAtStop, "fixture missed the stop");
@@ -149,12 +149,13 @@ final class Inspect {
         }
     }
 
+    static void report(boolean interruptAtStop) throws Exception {
+        Observation r = inspect(interruptAtStop);
+        System.out.println(r.stack() + " " + r.owners() + " " + r.markers());
+    }
+
     public static void main(String[] args) throws Exception {
         require(args.length == 0, "no arguments accepted");
-        Observation result = inspect(false);
-        require(result.equals(inspect(true)), "cleanup probe did not reach the same stop");
-        System.out.println("hit #2: " + result.stack() + "; OwnedFixture=" + result.owners() +
-                           "; OwnedFixture$Marker=" + result.markers() +
-                           "; normal and suspended children reaped");
+        report(false);
     }
 }

@@ -84,7 +84,7 @@ impl Visit {
 pub struct SourceFrame {
     /// One of the fixture's allowlisted function names, never adapter text.
     pub function: &'static str,
-    /// One-based physical line in the in-tree `count.c`.
+    /// One-based physical line in the selected fixture.
     pub line: u32,
 }
 

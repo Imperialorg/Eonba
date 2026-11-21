@@ -5,6 +5,12 @@ pub mod branches;
 pub mod benign_repair;
 pub mod cpg;
 pub mod defense;
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_pointer_width = "64"
+))]
+pub mod dev_dap;
 pub mod function_review;
 pub mod interproc;
 #[cfg(all(
@@ -19,6 +25,12 @@ pub mod owned_dap;
     target_pointer_width = "64"
 ))]
 pub mod owned_debugpy;
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_pointer_width = "64"
+))]
+pub mod owned_jvm;
 pub mod remediation;
 pub mod sbom;
 #[cfg(feature = "solver")]
