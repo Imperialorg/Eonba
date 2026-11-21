@@ -12,6 +12,10 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#ifndef EON_JAVA_CLASSPATH
+#define EON_JAVA_CLASSPATH "worker.jar:kotlin-compiler.jar:kotlin-stdlib.jar:kotlin-reflect.jar:kotlinx-coroutines-core-jvm.jar"
+#endif
+
 static int seal_exec(void) {
     struct sock_filter code[] = {
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
@@ -30,7 +34,7 @@ static int seal_exec(void) {
 static void *worker(void *unused) {
     (void)unused;
     JavaVMOption options[] = {
-        {"-Djava.class.path=worker.jar:kotlin-compiler.jar:kotlin-stdlib.jar:kotlin-reflect.jar:kotlinx-coroutines-core-jvm.jar", NULL},
+        {"-Djava.class.path=" EON_JAVA_CLASSPATH, NULL},
         {"-Djava.awt.headless=true", NULL}, {"-Duser.home=/eon-no-home", NULL},
         {"-Djava.io.tmpdir=/eon-no-scratch", NULL}, {"-Didea.home.path=/eon-no-idea", NULL},
         {"-Dfile.encoding=UTF-8", NULL}, {"-Duser.timezone=UTC", NULL},

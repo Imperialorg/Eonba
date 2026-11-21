@@ -214,8 +214,8 @@ query does not imply a sub-50-ms cold start or Kotlin support.
 
 #### Provisioning the confined Kotlin LSP
 
-This is a **Kotlin compiler frontend**, not fwcd Kotlin Language Server,
-Gradle or a JVM project build. `ServerKind::Kotlin` analyzes explicitly opened
+`ServerKind::Kotlin` has two operator-selected backends. Neither runs Gradle
+or builds the user's project. The **built-ins-only worker** analyzes explicitly opened
 `.kt` buffers as one Kotlin common 1.9 module using the compiler's built-ins.
 There is no project classpath: `Int`, `List` and declarations in other open
 buffers can resolve, but stdlib functions such as `listOf`, Java/Android APIs
@@ -270,6 +270,46 @@ p95 <50 ms** (20 samples each). Launch-to-first-diagnostic includes image
 verification. Edit-to-fresh-diagnostic is measured separately and does not
 reuse an earlier diagnostic report. These are fixture measurements, not a
 latency guarantee for arbitrary sources.
+
+**fwcd Kotlin Language Server snapshot backend.** To use stdlib/JVM semantics,
+select `fwcd-kotlin-language-server` instead. Obtain fwcd's
+[`server.zip`](https://github.com/fwcd/kotlin-language-server/releases/download/1.3.13/server.zip)
+and [1.3.13 source ZIP](https://codeload.github.com/fwcd/kotlin-language-server/zip/refs/tags/1.3.13).
+With the same vetted Temurin JDK, provision offline; the script checks both
+archive hashes before compiling the `provision/fwcd` overlay with the release's
+Kotlin 2.1.0 compiler. No Gradle wrapper or dependency resolver runs.
+
+```bash
+bash crates/eon-capability/provision/build-fwcd.sh "$JDK" "$SERVER_ZIP" "$SOURCE_ZIP" "$NEW_INSTALL"
+# Preserve the emitted pin in trusted operator configuration.
+EON_TEST_KOTLIN="$NEW_INSTALL/fwcd-kotlin-language-server" \
+EON_TEST_KOTLIN_SHA256="$APPROVED_PIN" bash crates/eon-capability/provision/test-kotlin.sh
+```
+
+Use the same `OperatorServer::new` and `with_kotlin_task_group` API with the
+new launcher and its independent pin. This is a patched fwcd, not the stock
+CLI: `KotlinLanguageServer`, its text-document service, `SourcePath`, JVM
+analysis, definition, references, hover and diagnostic conversion come from
+fwcd. The fixed entry point accepts only open `.kt` snapshots (16 × 64 KiB),
+with the release stdlib and the vetted JDK's `java.base` classes as data.
+It does not expose upstream workspace/command RPCs, formatting, decompilation,
+workspace symbols, database indexing, configuration, scripts or build output.
+The stock server's unconditional scratch-directory creation is removed; the
+kernel protections, including the no-exec seal, are unchanged.
+
+Every open, change or close invalidates the module. A diagnostic pull checks
+the requested document version and echoes it for the client to verify. Warm
+queries reuse the completed analysis of that exact set of buffers. The fwcd
+gate tests `listOf`, `sum` and `repeat`, overload selection across files,
+cross-buffer invalidation and close/reopen; it measures cold start and edit
+to fresh report separately. On the AMD EPYC 9V45 Linux runner, the 20-sample
+warm p95s were **0.746 ms definition, 1.100 ms references, 0.389 ms hover and
+0.103 ms diagnostics**. Cold launch to first diagnostic took **2.772 s**;
+edit to fresh report took **146.339 ms p95**. The sub-50-ms warm target is
+**not** an edit-latency target. A repeat with the same image took 4.749 s
+to the first diagnostic; warm definition, references, hover and diagnostics
+were 2.066, 2.085, 0.562 and 0.197 ms p95. Edit to fresh report was
+270.489 ms p95.
 
 ### 3.3 Cyber Defense & Hardening Capabilities (`cyber.defense.*`)
 Automates host security, static taint tracking, and live patching.

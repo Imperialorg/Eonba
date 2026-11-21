@@ -16,4 +16,8 @@ gate() {
         "$bin" --ignored --nocapture --exact "$test"
 }
 gate eon_capability sandbox::kotlin::tests::kotlin_kernel_boundary
-gate local_lsp_kotlin confined_kotlin_snapshots
+case "${EON_TEST_KOTLIN##*/}" in
+    kotlin-language-server) gate local_lsp_kotlin confined_kotlin_snapshots ;;
+    fwcd-kotlin-language-server) gate local_lsp_kotlin confined_fwcd_snapshots ;;
+    *) exit 2 ;;
+esac

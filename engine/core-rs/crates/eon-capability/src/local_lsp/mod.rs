@@ -6,8 +6,8 @@
 //! it receives file contents exclusively through the stdio overlay.
 //! The pinned vtsls image runs its TypeScript server in-process. Its inferred
 //! project contains only open snapshots and the embedded TypeScript library.
-//! Kotlin uses a fixed common-language compiler frontend on in-memory `.kt`
-//! sources and compiler built-ins only, not fwcd, Gradle or JVM project analysis.
+//! Kotlin supports a built-ins-only worker or the pinned fwcd snapshot image
+//! with fixed stdlib/JVM data. Neither discovers or builds projects.
 //! Servers requiring a disk-backed project or unsupported capabilities may decline queries.
 //! The native policy is for trusted workers, not arbitrary binaries. Deadlines bound
 //! protocol I/O, not kernel/filesystem latency or the worker's CPU and memory use.
@@ -138,7 +138,8 @@ impl OperatorServer {
         let executable = executable.canonicalize()?;
         let name = executable.file_name().and_then(|s| s.to_str()).unwrap_or_default();
         let expected = kind.executable_name();
-        if !(name == expected
+        let fwcd = kind == ServerKind::Kotlin && name == "fwcd-kotlin-language-server";
+        if !(fwcd || name == expected
             || name
                 .strip_prefix(expected)
                 .and_then(|s| s.strip_prefix('-'))
@@ -222,8 +223,8 @@ impl OperatorServer {
         Ok(self)
     }
 
-    /// Opt in to the fixed-entrypoint Kotlin common compiler frontend. Pin the
-    /// complete provisioned image (not just its JNI launcher); no extra classpath.
+    /// Opt in to the fixed-entrypoint Kotlin image selected by the operator's
+    /// launcher (built-ins or fwcd). Pin the complete image; no extra classpath.
     pub fn with_kotlin_task_group(mut self, group: &Path, image_sha256: [u8; 32]) -> io::Result<Self> {
         crate::sandbox::check_rust_analyzer_abi()?;
         if self.kind != ServerKind::Kotlin || !group.is_absolute() {
@@ -383,6 +384,7 @@ pub struct LocalLsp {
     version: i32,
     has_closed: bool,
     rust_ready: bool,
+    fwcd_snapshots: bool,
     python_names: Option<pyright::ModuleNames>,
 }
 
@@ -534,6 +536,8 @@ impl LocalLsp {
             version: 0,
             has_closed: false,
             rust_ready: false,
+            fwcd_snapshots: config.kotlin_image.is_some() && config.executable.file_name()
+                == Some("fwcd-kotlin-language-server".as_ref()),
             python_names,
         };
         let end = client.end();
@@ -572,6 +576,10 @@ impl LocalLsp {
         }
         if config.kotlin_image.is_some() {
             require(matches!(client.capabilities.diagnostics, Diagnostics::Pull { .. }), "expected Kotlin pull diagnostics")?;
+        }
+        if client.fwcd_snapshots {
+            require(init["serverInfo"]["name"] == "fwcd (EON snapshot)" && init["serverInfo"]["version"] == "1.3.13",
+                "expected fwcd 1.3.13 snapshot adapter")?;
         }
         // The pinned SEA installs this request handler unconditionally. Select
         // it in the fixed operator profile: early version-matched pushes can
@@ -925,7 +933,14 @@ impl LocalLsp {
             if let Some(id) = identifier {
                 params["identifier"] = json!(id);
             }
+            let version = self.docs[&uri].version;
+            if self.fwcd_snapshots {
+                params["x-eon-version"] = json!(version);
+            }
             let value = self.request("textDocument/diagnostic", params, end)?;
+            if self.fwcd_snapshots && value["x-eon-version"].as_i64() != Some(i64::from(version)) {
+                return Err(invalid("stale fwcd snapshot diagnostic"));
+            }
             if value["kind"] != "full" {
                 return Err(invalid("expected full diagnostic report"));
             }

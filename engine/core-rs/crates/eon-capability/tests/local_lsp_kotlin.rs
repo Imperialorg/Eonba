@@ -27,6 +27,97 @@ fn sample(label: &str, mut run: impl FnMut(usize)) -> Duration {
 }
 
 #[test]
+#[ignore = "requires pinned fwcd image and delegated capped cgroup v2"]
+fn confined_fwcd_snapshots() {
+    let image = PathBuf::from(std::env::var_os("EON_TEST_KOTLIN").unwrap());
+    assert_eq!(image.file_name().unwrap(), "fwcd-kotlin-language-server");
+    let pin = std::env::var("EON_TEST_KOTLIN_SHA256").unwrap();
+    assert_eq!(pin.len(), 64);
+    let pin = std::array::from_fn(|i| u8::from_str_radix(&pin[i*2..i*2+2],16).unwrap());
+    let mine = fs::read_to_string("/proc/self/cgroup").unwrap();
+    let group = Path::new("/sys/fs/cgroup").join(mine.trim().strip_prefix("0::/").unwrap());
+    let config = |digest| OperatorServer::new(ServerKind::Kotlin, &image, &[], Duration::from_secs(12))
+        .unwrap().with_kotlin_task_group(&group, digest).unwrap();
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target").canonicalize().unwrap();
+    let project = Project(dir.join(format!("eon-fwcd-{:016x}", getrandom::u64().unwrap())));
+    fs::DirBuilder::new().mode(0o700).create(&project.0).unwrap();
+    let a = "package calc\nfun twice(n: Int) = listOf(n, n).sum()\nfun twice(s: String) = s.repeat(2)\n";
+    let b = "package client\r\nimport calc.twice\r\n/*𝄞*/ val result: String = twice(3)\r\nval other = twice(\"ok\")\r\n";
+    fs::write(project.0.join("Math.kt"), a).unwrap();
+    fs::write(project.0.join("Quote.kt"), b).unwrap();
+    fs::write(project.0.join("Unopened.kt"), "package client\nval diskOnly = 1\n").unwrap();
+    fs::write(project.0.join("build.gradle.kts"), "error(\"unexpected build\")").unwrap();
+    let bad = LocalLspPool::start(&[config([0; 32])], &project.0).err().unwrap();
+    assert!(bad.to_string().contains("unapproved Kotlin image digest"), "{bad}");
+    let start = Instant::now();
+    let mut pool = LocalLspPool::start(&[config(pin)], &project.0).unwrap();
+    let server = pool.session(ServerKind::Kotlin).unwrap();
+    assert!(server.open("build.gradle.kts").is_err());
+    server.open("Math.kt").unwrap();
+    server.open("Quote.kt").unwrap();
+    let errors = server.diagnostics("Quote.kt").unwrap();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    let at = Position { line: 2, character: 28 };
+    assert_eq!(errors[0].range.start, at);
+    assert!(errors[0].message.contains("String") && errors[0].message.contains("Int"), "{errors:?}");
+    eprintln!("fwcd launch to first semantic diagnostic: {:?}", start.elapsed());
+    assert!(server.diagnostics("Math.kt").unwrap().is_empty());
+    let def = sample("fwcd definition", |_| {
+        let loc = server.goto_definition("Quote.kt", at).unwrap();
+        assert_eq!(loc.len(), 1, "{loc:?}");
+        assert_eq!(loc[0].relative_path, "Math.kt");
+        assert_eq!(loc[0].range.start, Position { line: 1, character: 4 });
+    });
+    let refs = sample("fwcd references", |_| {
+        let uses = server.find_references("Quote.kt", at).unwrap();
+        assert!(uses.iter().any(|l| l.relative_path == "Quote.kt" && l.range.start == at), "{uses:?}");
+        assert!(uses.iter().any(|l| l.relative_path == "Math.kt" && l.range.start.line == 1), "{uses:?}");
+        assert!(!uses.iter().any(|l| l.range.start.line == 3 || (l.relative_path == "Math.kt" && l.range.start.line == 2)));
+    });
+    let hover = sample("fwcd hover", |_| {
+        let h = server.hover_type("Quote.kt", at).unwrap().unwrap();
+        assert!(h.contains("twice(n: Int): Int"), "{h}");
+    });
+    let diag = sample("fwcd warm diagnostics", |_| assert_eq!(server.diagnostics("Quote.kt").unwrap(), errors));
+    assert!(def < Duration::from_millis(30) && [refs, hover, diag].iter().all(|d| *d < Duration::from_millis(50)));
+    let fixed = b.replace("result: String", "result: Int");
+    sample("fwcd edit to fresh diagnostic", |i| {
+        server.change("Quote.kt", if i % 2 == 0 { &fixed } else { b }).unwrap();
+        let actual = server.diagnostics("Quote.kt").unwrap();
+        if i % 2 == 0 { assert!(actual.is_empty(), "{actual:?}"); } else { assert_eq!(actual, errors); }
+    });
+    server.change("Math.kt", &a.replace("listOf(n, n).sum()", "n.toString()")).unwrap();
+    assert!(server.diagnostics("Quote.kt").unwrap().is_empty());
+    assert!(server.hover_type("Quote.kt", at).unwrap().unwrap().contains("twice(n: Int): String"));
+    server.close("Math.kt").unwrap();
+    assert!(!server.diagnostics("Quote.kt").unwrap().is_empty());
+    server.open("Math.kt").unwrap();
+    assert_eq!(server.diagnostics("Quote.kt").unwrap(), errors);
+    server.change("Quote.kt","package client\nval x = diskOnly").unwrap();
+    assert!(server.diagnostics("Quote.kt").unwrap().iter().any(|d| d.message.contains("diskOnly")));
+    // fwcd's default URI parser form-decodes '%' and '+'. A returned location
+    // must instead identify the exact caller-opened wire URI, even after edits.
+    let odd = "A +%π.kt";
+    fs::write(project.0.join(odd), "package calc\nfun odds() = listOf(1,3)\n").unwrap();
+    server.open(odd).unwrap();
+    server.change("Quote.kt","import calc.odds\nval n = odds().sum()").unwrap();
+    assert!(server.diagnostics("Quote.kt").unwrap().is_empty());
+    let loc = server.goto_definition("Quote.kt", Position {line:1, character:9}).unwrap();
+    assert_eq!(loc.len(), 1);
+    assert_eq!(loc[0].relative_path, odd);
+    let uses = server.find_references(odd, Position {line:1, character:5}).unwrap();
+    assert!(uses.iter().any(|l| l.relative_path == odd && l.range.start.line == 1));
+    assert!(uses.iter().any(|l| l.relative_path == "Quote.kt" && l.range.start.line == 1));
+    server.close(odd).unwrap();
+    server.change("Quote.kt", &(0..270).map(|i| format!("val n{i} = diskOnly\n")).collect::<String>()).unwrap();
+    assert!(server.diagnostics("Quote.kt").is_err());
+    server.change("Quote.kt", b).unwrap();
+    assert_eq!(server.diagnostics("Quote.kt").unwrap(), errors);
+    pool.shutdown().unwrap();
+    assert_eq!(fs::read_to_string(project.0.join("Quote.kt")).unwrap(), b);
+}
+
+#[test]
 #[ignore = "requires pinned Kotlin image and delegated capped cgroup v2"]
 fn confined_kotlin_snapshots() {
     let image = PathBuf::from(std::env::var_os("EON_TEST_KOTLIN").unwrap());

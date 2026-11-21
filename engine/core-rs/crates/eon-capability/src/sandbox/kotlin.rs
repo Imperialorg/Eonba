@@ -14,6 +14,16 @@ const IMAGE: &[&str] = &[
     "jre/lib/libzip.so", "jre/lib/libnet.so", "jre/lib/libnio.so", "jre/lib/libverify.so",
 ];
 
+const FWCD_IMAGE: &[&str] = &[
+    "fwcd-kotlin-language-server", "worker.jar", "kotlin-stdlib.jar", "java-base.jar",
+    "server-1.3.13.jar", "shared-1.3.13.jar", "kotlin-compiler-2.1.0.jar", "kotlin-reflect-2.1.0.jar",
+    "kotlinx-coroutines-core-jvm-1.6.4.jar", "trove4j-1.0.20200330.jar", "annotations-13.0.jar",
+    "org.eclipse.lsp4j-0.21.2.jar", "org.eclipse.lsp4j.jsonrpc-0.21.2.jar", "gson-2.10.1.jar",
+    "jre/lib/modules", "jre/lib/server/libjvm.so", "jre/lib/libjava.so", "jre/lib/libjimage.so",
+    "jre/lib/libzip.so", "jre/lib/libnet.so", "jre/lib/libnio.so", "jre/lib/libverify.so",
+    "jre/conf/security/java.security",
+];
+
 pub(super) fn jvm_filter(rules: &mut BTreeMap<i64, Vec<seccompiler::SeccompRule>>) -> EonResult<()> {
     use seccompiler::{SeccompCmpArgLen::{Dword, Qword}, SeccompCmpOp::Eq, SeccompCondition, SeccompRule};
     // libnet aborts during JVM startup unless it can query its *own* FD cap.
@@ -41,7 +51,8 @@ pub(super) fn ruleset(
     deadline: std::time::Instant,
 ) -> EonResult<RulesetCreated> {
     let err = |s| sandbox_err("Kotlin image", s);
-    if program.file_name() != Some(IMAGE[0].as_ref()) || read_only != [program] {
+    let image = if program.file_name() == Some(FWCD_IMAGE[0].as_ref()) { FWCD_IMAGE } else { IMAGE };
+    if program.file_name() != Some(image[0].as_ref()) || read_only != [program] {
         return Err(err("unexpected executable or extra grant"));
     }
     let root = program.parent().ok_or_else(|| err("missing installation"))?;
@@ -50,7 +61,7 @@ pub(super) fn ruleset(
     }
     let mut manifest = Sha256::new();
     let mut remaining = 192_i64 << 20;
-    for name in IMAGE {
+    for name in image {
         let path = root.join(name);
         if path.canonicalize().map_err(|e| sandbox_err("Kotlin image path", e))? != path {
             return Err(err("symlink in installation"));
@@ -82,7 +93,7 @@ pub(super) fn ruleset(
         }
         if read as i64 != meta.st_size { return Err(err("image size changed during verification")); }
         manifest.update(format!("{:x}  {name}\n", hash.finalize()));
-        let access = if *name == IMAGE[0] { AccessFs::ReadFile | AccessFs::Execute } else { AccessFs::ReadFile.into() };
+        let access = if *name == image[0] { AccessFs::ReadFile | AccessFs::Execute } else { AccessFs::ReadFile.into() };
         created = created.add_rule(PathBeneath::new(fd, access)).map_err(|e| sandbox_err("Kotlin image rule", e))?;
     }
     if manifest.finalize().as_slice() != digest {
