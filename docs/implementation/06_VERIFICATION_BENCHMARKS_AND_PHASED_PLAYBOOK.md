@@ -174,6 +174,16 @@ The analyzer bounds latency from sample positions in the last active input windo
 
 **Physical inputs to the combined runner (§3.7).** Supply `--physical-session /path/to/authorized-session` only for original, authorized, synchronized input-reference/isolated acoustic speaker recordings. Preserve the authorization and the recording conditions at acquisition. A declaration and matching bytes do not prove physical origin, scene or authorization. Never label generated PCM, digital loopback, callback observations or a null-sink trace as physical.
 
+On a dedicated Linux measurement rig, the optional interactive recorder collects and inventories the turns. First connect the input reference and isolated speaker pickup to two inputs of **one physical interface**, calibrate the gains and threshold, and prepare the stimuli. Use a new directory under an operator-owned parent:
+
+```sh
+python3 scripts/eval/record_physical_session.py /absolute/private/session \
+  --device hw:2,0 --rate 48000 --route 'description of the two channels and clock' \
+  --gains 'measured fixed gains' --threshold CALIBRATED_PCM_LEVEL --noisy
+```
+
+Replace the example device and threshold with the actual hardware number and calibration. This uses `arecord` from `alsa-utils`, never a default capture device. Nothing records until the operator confirms at the terminal. Exercise all included stimuli with the speaker muted for the 30-second control. Unmute, then start each turn at the prompt and apply its stimulus **after** recording begins. `--noisy` schedules 25 turns per scene including clean; without it all 100 are clean. For the noisy groups, supply the corresponding 0 dB mixtures on the input, not the speaker pickup. No raw audio is uploaded. A short read, overrun or interruption leaves the original files but no completed manifest. A timing miss stays in the inventory. The recorder does not start EON, select the stimulus, attest the wiring or produce a passing verdict; run the evaluator on the completed directory.
+
 Use `muted-control.wav`, a `trials/` directory containing only the original stereo PCM16 WAVs (one independent end-to-end turn per file), and `session.json` with these fields:
 
 | Field | Meaning |

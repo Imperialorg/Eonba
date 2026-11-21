@@ -36,6 +36,11 @@ def checked_capture(path, threshold, digest):
     return capture
 
 
+def check_control(control):
+    if control.any_output or (control.frames - control.last_input_end) * 1000 < acoustic.P99_LIMIT_MS * control.rate:
+        raise ValueError("muted control exceeds threshold or lacks post-stimulus tail")
+
+
 def measure(directory):
     if directory is None:
         raise ValueError("no authorized synchronized physical session supplied")
@@ -52,8 +57,7 @@ def measure(directory):
     if type(threshold) is not int:
         raise ValueError("integer calibrated threshold required")
     control = checked_capture(directory / "muted-control.wav", threshold, info.get("control_pcm_sha256"))
-    if control.any_output or (control.frames - control.last_input_end) * 1000 < acoustic.P99_LIMIT_MS * control.rate:
-        raise ValueError("muted control exceeds threshold or lacks post-stimulus tail")
+    check_control(control)
 
     trials = directory / "trials"
     if trials.is_symlink() or not trials.is_dir():
