@@ -320,8 +320,8 @@ impl PtyProvider {
         })
     }
 
-    /// Nonblocking byte pagination, including incomplete lines. An empty poll
-    /// is not I/O and does not keep a session alive.
+    /// Nonblocking byte pagination, including incomplete lines. Reading cached
+    /// output is not terminal I/O, even if a caller repeatedly reads a full page.
     pub fn pty_read_ring(
         &self,
         owner: &ProcessOwner,
@@ -329,13 +329,7 @@ impl PtyProvider {
         cursor: u64,
         limit: usize,
     ) -> io::Result<RingPage> {
-        self.access(owner, id, |s| {
-            let page = s.ring.page(cursor, limit)?;
-            if !page.bytes.is_empty() {
-                s.last_io = Instant::now();
-            }
-            Ok(page)
-        })
+        self.access(owner, id, |s| s.ring.page(cursor, limit))
     }
 
     /// Only typed signals to this session's own terminal/group, never a caller PID.

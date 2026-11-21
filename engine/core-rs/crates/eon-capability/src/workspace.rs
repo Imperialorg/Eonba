@@ -21,6 +21,8 @@ use rustix::io::Errno;
 use sha2::{Digest, Sha256};
 
 mod recovery;
+mod snapshot;
+pub use snapshot::SnapshotReceipt;
 
 pub const MAX_READ_BYTES: usize = 1024 * 1024;
 pub const MAX_EDIT_BYTES: usize = 1024 * 1024;
@@ -100,8 +102,12 @@ struct EditLock<'a>(&'a File);
 
 impl<'a> EditLock<'a> {
     fn acquire(parent: &'a File) -> Result<Self> {
-        match fs::flock(parent, fs::FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => Ok(Self(parent)),
+        Self::try_lock(parent, fs::FlockOperation::NonBlockingLockExclusive)
+    }
+
+    fn try_lock(dir: &'a File, operation: fs::FlockOperation) -> Result<Self> {
+        match fs::flock(dir, operation) {
+            Ok(()) => Ok(Self(dir)),
             Err(Errno::WOULDBLOCK) => Err(WorkspaceError::Conflict),
             Err(e) => Err(e.into()),
         }
@@ -203,12 +209,12 @@ impl Workspace {
         self.unchanged(path, &before)?;
 
         let store = self.snapshot_directory()?;
+        // Different parent directories can still be edited concurrently. A
+        // whole-workspace snapshot takes the exclusive side on this same inode.
+        let _snapshot_gate = EditLock::try_lock(&store, fs::FlockOperation::NonBlockingLockShared)?;
         let mut snapshot = PrivateFile::create(&store, "preimage")?;
         let snapshot_version = snapshot.persist_bytes(&preimage, Mode::RUSR)?;
         store.sync_all()?;
-        let mut stage = PrivateFile::create(&store, "stage")?;
-        let owner_mode = Mode::from_bits_truncate(before.mode() & 0o700);
-        let stage_version = stage.persist_bytes(replacement, owner_mode)?;
         let new_sha256 = digest(replacement);
         let record = preparation(
             &self.root.metadata()?,
@@ -222,23 +228,24 @@ impl Workspace {
         let journal_seq =
             append(record.to_string().into_bytes()).map_err(WorkspaceError::Journal)?;
 
+        // Do not put even private replacement bytes on disk ahead of the
+        // durable preparation. Recheck the store before creating a new name.
+        self.check_snapshot_directory(&store)?;
+        let mut stage = PrivateFile::create(&store, "stage")?;
+        let owner_mode = Mode::from_bits_truncate(before.mode() & 0o700);
+        let stage_version = stage.persist_bytes(replacement, owner_mode)?;
         if !same_inode(
             &parent.metadata()?,
-            &beneath(&self.root, parent_path, DIR)?.metadata()?,
-        ) || !same_inode(
-            &store.metadata()?,
-            &beneath(&self.root, STORE, DIR)?.metadata()?,
+            &self.edit_parent(parent_path)?.metadata()?,
         ) {
             return Err(WorkspaceError::Conflict);
         }
+        self.check_snapshot_directory(&store)?;
         // The journal preparation may have taken time. Revalidate both private names,
         // in addition to the public pathname, before consuming either.
         snapshot.check_name(&snapshot_version)?;
-        stage.check_name(&stage_version)?;
         self.unchanged(path, &before)?;
-        // Both names are single components relative to pinned directories.
-        fs::renameat(&store, stage.name.as_str(), &parent, leaf)?;
-        stage.remove_on_drop = false;
+        stage.install(&stage_version, &parent, leaf)?;
         let mut verify = || -> io::Result<()> {
             parent.sync_all()?;
             store.sync_all()?;
@@ -302,6 +309,17 @@ impl Workspace {
             ));
         }
         Ok(dir)
+    }
+
+    fn check_snapshot_directory(&self, store: &File) -> Result<()> {
+        if same_inode(
+            &store.metadata()?,
+            &self.open_snapshot_directory()?.metadata()?,
+        ) {
+            Ok(())
+        } else {
+            Err(WorkspaceError::Conflict)
+        }
     }
 
     fn source(&self, path: &str, access: OFlags) -> Result<(File, Metadata)> {
@@ -489,6 +507,13 @@ impl<'a> PrivateFile<'a> {
         if current.nlink() != 1 || !same_version(version, &current) {
             return Err(WorkspaceError::Conflict);
         }
+        Ok(())
+    }
+
+    fn install(&mut self, version: &Metadata, parent: &File, leaf: &str) -> Result<()> {
+        self.check_name(version)?;
+        fs::renameat(self.dir, self.name.as_str(), parent, leaf)?;
+        self.remove_on_drop = false;
         Ok(())
     }
 }

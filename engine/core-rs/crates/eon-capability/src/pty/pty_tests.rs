@@ -379,6 +379,38 @@ fn idle_watchdog_reaps_without_any_caller_or_lazy_sweep() {
 }
 
 #[test]
+fn cached_output_invalid_requests_and_resizes_do_not_renew_idle_workers() {
+    let auth = IdentityAuthority::new();
+    let owner = owner(&auth);
+    let mut p = PtyProvider::new(&auth).unwrap();
+    let id = p.pty_open(&owner, PtyMode::Loopback).unwrap();
+    let child = pid(&p, &id);
+    let opened = p.shared.lock().sessions[&id].last_io;
+    send(&p, &owner, &id, b"one");
+    until(|| p.pty_read_ring(&owner, &id, 0, MAX_READ).unwrap().bytes == b"one");
+    let active = p.shared.lock().sessions[&id].last_io;
+    assert!(active > opened);
+    for cursor in [0, 1, 2, 0, 3] {
+        p.pty_read_ring(&owner, &id, cursor, 2).unwrap();
+    }
+    assert!(p.pty_write(&owner, &id, b"").is_err());
+    p.pty_signal(&owner, &id, PtySignal::Resize { rows: 10, cols: 20 })
+        .unwrap();
+    assert_eq!(p.shared.lock().sessions[&id].last_io, active);
+    send(&p, &owner, &id, b"two");
+    until(|| p.pty_read_ring(&owner, &id, 3, 3).unwrap().bytes == b"two");
+    assert!(p.shared.lock().sessions[&id].last_io > active);
+
+    // Exercise the production timeout and background reaper without a five-minute sleep.
+    p.shared.lock().sessions.get_mut(&id).unwrap().last_io = Instant::now() - IDLE_TIMEOUT;
+    gone(child);
+    assert_eq!(
+        p.pty_read_ring(&owner, &id, 0, 1).unwrap_err().kind(),
+        ErrorKind::NotFound
+    );
+}
+
+#[test]
 fn child_has_only_pty_stdio_no_environment_no_secret_and_a_private_group() {
     const FD: &str = "EON_TEST_PTY_INHERITED_FD";
     const MARKER: &str = "EON_TEST_PTY_PRIVATE";

@@ -6,6 +6,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 mod recovery_tests;
+mod snapshot_tests;
 
 struct Fixture(PathBuf);
 
@@ -238,6 +239,7 @@ fn journal_failure_precedes_rename_and_preserves_a_recoverable_preimage() {
                 .join(STORE)
                 .join(event["snapshot_id"].as_str().unwrap());
             assert_eq!(host::read(snapshot).unwrap(), b"old");
+            assert_eq!(host::read_dir(root.join(STORE)).unwrap().count(), 1);
             assert_eq!(host::read(root.join("item")).unwrap(), b"old");
             Err(eon_foundation::EonError::InternalError(
                 "injected sync failure".into(),
@@ -286,7 +288,10 @@ fn directory_lock_lifetime_is_the_edit_not_an_inherited_descriptor() {
     let lock = EditLock::acquire(&parent).unwrap();
     // dup and fork both retain the same open file description.
     let inherited = parent.try_clone().unwrap();
-    assert!(matches!(EditLock::acquire(&other), Err(WorkspaceError::Conflict)));
+    assert!(matches!(
+        EditLock::acquire(&other),
+        Err(WorkspaceError::Conflict)
+    ));
     drop(lock);
     drop(parent);
     let _next = EditLock::acquire(&other).unwrap();
@@ -329,24 +334,17 @@ fn private_staging_substitution_fails_before_rename() {
     let root = f.root();
     file(&root.join("item"), b"old");
     file(&f.0.join("canary"), b"outside");
-    let result = f
-        .open()
-        .edit_with_record("item", digest(b"old"), b"new", |_| {
-            let stage = host::read_dir(root.join(STORE))
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .find(|path| {
-                    path.file_name()
-                        .unwrap()
-                        .as_encoded_bytes()
-                        .starts_with(b"stage-")
-                })
-                .unwrap();
-            host::remove_file(&stage).unwrap();
-            symlink(f.0.join("canary"), stage).unwrap();
-            Ok(1)
-        });
-    assert!(result.is_err());
+    let w = f.open();
+    let parent = w.edit_parent(".").unwrap();
+    let store = w.snapshot_directory().unwrap();
+    let mut stage = PrivateFile::create(&store, "stage").unwrap();
+    let version = stage
+        .persist_bytes(b"new", Mode::RUSR | Mode::WUSR)
+        .unwrap();
+    let name = root.join(STORE).join(&stage.name);
+    host::remove_file(&name).unwrap();
+    symlink(f.0.join("canary"), name).unwrap();
+    assert!(stage.install(&version, &parent, "item").is_err());
     assert_eq!(host::read(root.join("item")).unwrap(), b"old");
     assert_eq!(host::read(f.0.join("canary")).unwrap(), b"outside");
 }
