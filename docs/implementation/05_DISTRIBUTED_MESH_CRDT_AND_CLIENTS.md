@@ -94,6 +94,15 @@ Run `scripts/test_wan_nat.sh` as the build user on a machine that permits `sudo 
 
 Class 0 sends numbered 640-byte PCM datagrams every 20 ms, even while the reliable streams stall. `cut` spans route impairment through confirmed relay selection and the start of post-cut counter collection. The deadline is **one-way, application send to peer decode, strictly under 5 ms for every attempt during the cut**. A missing datagram misses the deadline. The roles share Linux `CLOCK_MONOTONIC`; echo RTT is measured and reported separately. Percentiles use received samples only; counts include all attempts. The default exit code gates connectivity, not latency. Add `--require-voice-deadline` to gate both. Raw per-sequence logs, stream receipts and packet counters persist in the printed `target/wan-nat-*` directory on success or failure; ephemeral keys are removed.
 
+The WAN sender gives unsent QUIC datagrams a 1,150-byte budget. A new 640-byte PCM chunk displaces an unsent chunk of the same size instead of waiting behind it. Smaller chunks can share the budget. This is not a time limit and does not retract in-flight data or change receiver buffering.
+
+| Cut phase on the same isolated topology | Attempts | Arrived <5 ms | Arrived late | No receipt | One-way p95 among arrivals |
+|---|---:|---:|---:|---:|---:|
+| Before bounding the sender | 754 | 4 | 730 | 20 | 13,864.779 ms |
+| With the bounded sender | 754 | 5 | 0 | 749 | 2.801 ms |
+
+Both runs migrated without reconnecting and both failed the strict deadline. The lower p95 in the second run describes only five arrivals; it does not mean voice continued through the cut.
+
 ### 2.3 Schema Reconciliation and Clock-Skew-Immune 15ms Spatial Election (`src/spatial.rs`)
 
 **Protobuf Reconciliation**: Update `SensoryClaim` in `proto/eon.proto` with two optional fields so it matches `DISTRIBUTED_NETWORKING_MESH.md` §8.1 without breaking existing field numbers `1..8`:

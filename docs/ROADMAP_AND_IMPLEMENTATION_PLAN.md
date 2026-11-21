@@ -281,7 +281,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/transport/iroh_node.rs`, `src/transport/qos_lanes.rs`
   - **Requirements**: `iroh` integration for Ed25519 node addressing, zero-config STUN hole-punching and DERP relay routing across 5G/Wi-Fi roaming. 4-class QUIC QoS prioritization using RFC 9221 datagrams for Class 0 voice/barge-in (< 5ms) and reliable streams for Class 1/2/3. Wire serialization via `proto/eon.proto`.
   - **Unit Tests**: `cargo test -p eon-mesh iroh_and_qos_tests`.
-  - **Verified subset**: In five isolated Linux namespaces, one pinned connection migrated from a private HTTPS relay to direct UDP across two NATs and back. All four classes carried traffic; path and relay byte counters confirmed transit. The strict test still fails: on the repeat, 4 of 755 audio datagrams arrived within 5 ms during the cut, 731 were late and 20 did not arrive. Direct mode is test-only; QAD is not RFC STUN and no physical carrier roam was measured.
+  - **Verified subset**: In five isolated Linux namespaces, one pinned connection migrated from a private HTTPS relay to direct UDP across two NATs and back. All four classes carried traffic; path and relay byte counters confirmed transit. Bounding the unsent voice queue prevented a backlog of late receipts in the measured cut, but only 5 of 754 attempts arrived within 5 ms; 749 had no receipt. The strict deadline remains unmet. Direct mode is test-only; QAD is not RFC STUN and no physical carrier roam was measured.
 
 ---
 
