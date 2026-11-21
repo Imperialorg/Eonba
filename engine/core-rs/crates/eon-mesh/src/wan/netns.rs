@@ -384,6 +384,7 @@ async fn peer(side: &str) -> EonResult<()> {
     let (mut ep, direct) = if private_stun() {
         let mut reject = config()?;
         reject.bind.set_port(41769);
+        reject.stun.set_port(3479);
         reject.stun_username.push_str("_reject");
         assert!(
             matches!(

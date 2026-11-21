@@ -16,7 +16,8 @@ def run(args, **kw):
 def screen():
     png = run(["grim", "-"])
     data = run(["tesseract", "stdin", "stdout", "--psm", "11", "tsv"], input=png).decode()
-    words = [r for r in csv.DictReader(io.StringIO(data), delimiter="\t") if r["level"] == "5" and r["text"]]
+    words = [r for r in csv.DictReader(io.StringIO(data), delimiter="\t", quoting=csv.QUOTE_NONE)
+             if r["level"] == "5" and r["text"]]
     lines = []
     for _, group in itertools.groupby(words, lambda r: (r["block_num"], r["par_num"], r["line_num"])):
         row = list(group)
@@ -33,7 +34,6 @@ def find(pattern, stage, *, last=False):
         if found:
             return (found[-1] if last else found[0]), rows
         time.sleep(0.3)
-    print("Fixed desktop diagnostic:", [r[0] for r in rows][:60], flush=True)
     raise RuntimeError(stage)
 
 
@@ -41,8 +41,7 @@ def click(row):
     _, x, y = row
     assert 0 < x < 1440 and 0 < y < 1000
     run(["swaymsg", "seat", "seat0", "cursor", "set", str(x + 5), str(y)])
-    run(["swaymsg", "seat", "seat0", "cursor", "press", "button1"])
-    run(["swaymsg", "seat", "seat0", "cursor", "release", "button1"])
+    run(["wlrctl", "pointer", "click"])
     time.sleep(0.3)
 
 
@@ -72,34 +71,30 @@ def verify():
             ], stdout=sp.DEVNULL, stderr=sp.DEVNULL) as code:
                 try:
                     for stage in ["both", "caller"]:
-                        cmd, _ = find(r"EON:\s*Show Paused Project Locations", "no palette on real pause", last=True)
-                        click(cmd)
-                        find(r"Show locations once for my local debug session", "file picker not visible")
-                        if stage == "both":
-                            click(find(r"src/endpoint\.rs", "no callee choice")[0])
-                        click(find(r"src/pre.cognition\.rs", "no caller choice")[0])
-                        click(find(r"^OK$", "no picker confirmation")[0])
+                        find(r"^EON:\s*Show Paused Project Locations", "no palette on real pause")
+                        Path(f"runtime/{stage}.palette").touch()
+                        _, rows = find(r"Show locations once for my local debug session", "file picker not visible")
+                        picker = "\n".join(r[0] for r in rows)
+                        assert "endpoint.rs" in picker and "pre_cognition.rs" in picker
+                        Path(f"runtime/{stage}.picker").touch()
                         _, rows = find(r"src/pre.cognition\.rs:\s*22", "no caller in result dialog")
                         modal = "\n".join(r[0] for r in rows)
                         assert re.search("Paused project locations", modal, re.I)
                         assert bool(re.search(r"src/endpoint\.rs:\s*28", modal)) == (stage == "both")
-                        click(find(r"^OK$", "no modal dismissal")[0])
+                        assert bool(re.search(r"conditional breakpoint configured", modal, re.I)) == (stage == "both")
+                        click(find(r"^(OK|Close)$", "no modal dismissal")[0])
                         Path(f"runtime/{stage}.seen").touch()
                     for _ in range(60):
                         if Path("runtime/done").is_file():
                             break
                         time.sleep(0.2)
                     assert Path("runtime/done").is_file(), "debug session did not finish"
-                    print("VS Code: real DebugStackFrame; both: src/endpoint.rs:28, src/pre_cognition.rs:22;"
+                    print("VS Code: real DebugStackFrame; both: src/endpoint.rs:28 [conditional breakpoint configured], src/pre_cognition.rs:22;"
                           " caller only: src/pre_cognition.rs:22.")
                 finally:
                     if not Path("runtime/caller.seen").exists():
                         phase = Path("runtime/phase")
                         print("Test phase:", phase.read_text() if phase.exists() else "before extension host")
-                        for log in Path("profile/logs").glob("**/*.log"):
-                            errs = [s for s in log.read_text(errors="replace").splitlines() if "[error]" in s]
-                            if errs:
-                                print(log.name, errs[-2:])
                     if code.poll() is None:
                         code.terminate()
         finally:

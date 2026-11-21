@@ -1,22 +1,24 @@
-"""RFC 8489 IPv4 Binding subset, only for test_wan_nat.sh's private namespaces.
-
-Fixed origin, two provisioned users, short-term MESSAGE-INTEGRITY-SHA256.
-No alternate server, name resolution, public listener or peer signalling.
-"""
+"""Private IPv4 STUN Binding publisher for one explicitly provisioned pair."""
 
 import hmac
+import ipaddress
+import json
 import os
+import re
+import secrets
+import signal
 import socket
+import stat
 import struct
 import sys
 import time
-from pathlib import Path
 
-SERVER = ("10.77.0.1", 3478)
 COOKIE = 0x2112A442
 HEADER = struct.Struct("!HHI12s")
 MI = struct.pack("!HH", 0x001C, 32)
-CLIENTS = {"a": ("192.168.1.2", "10.77.0.2"), "b": ("192.168.2.2", "10.77.0.3")}
+PROOF = struct.pack("!HH", 0xC0E5, 16)
+RFC1918 = tuple(map(ipaddress.IPv4Network, ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")))
+MAX_COUNT = (1 << 64) - 1
 
 
 def signed(kind, transaction, attributes, key):
@@ -55,66 +57,160 @@ def decode_mapped(attr):
     return socket.inet_ntop(socket.AF_INET, (value ^ COOKIE).to_bytes(4, "big")), port ^ (COOKIE >> 16)
 
 
-def credential(side):
-    return Path(f"keys/stun-{side}.psk").read_bytes().strip()
-
-
 def paired(pin, addr):
     ip, port = addr
     return struct.pack("!HH32s4sH2x", 0xC0E4, 38, pin, socket.inet_aton(ip), port)
 
 
-def serve(sock):
-    sock.bind(SERVER)
-    Path("stun-ready").touch()
-    pending, rejected = {}, {}
-    deadline = time.monotonic() + 60
-    while len(pending) < len(CLIENTS):
-        sock.settimeout(max(0.001, deadline - time.monotonic()))
-        data, source = sock.recvfrom(257)
-        side = next((s for s in CLIENTS if source[0] == CLIENTS[s][1]), None)
-        if side is None:
-            continue
-        try:
-            key = credential(side)
-            tx, attr = verified(data, 0x0001, key)
-            if attr not in (username(side), username(side + "_reject")):
+def require(ok):
+    if not ok:
+        raise ValueError("invalid private publisher configuration")
+
+
+def load_config(path):
+    require(os.path.isabs(path))
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as f:
+        st = os.fstat(f.fileno())
+        require(stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid()
+                and st.st_nlink == 1 and stat.S_IMODE(st.st_mode) in (0o400, 0o600))
+        data = f.read(4097)
+    require(len(data) <= 4096)
+
+    def unique_fields(items):
+        obj = dict(items)
+        require(len(obj) == len(items))
+        return obj
+
+    return Publisher(json.loads(data, object_pairs_hook=unique_fields))
+
+
+class Member:
+    def __init__(self, spec):
+        require(isinstance(spec, dict) and set(spec) == {"user", "pin", "password"})
+        require(re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", spec["user"]))
+        require(re.fullmatch("[0-9a-f]{64}", spec["pin"]) and int(spec["pin"], 16) != 0)
+        require(re.fullmatch("[0-9a-f]{64}", spec["password"]))
+        self.user, self.pin = username(spec["user"]), bytes.fromhex(spec["pin"])
+        self.key = spec["password"].encode("ascii")
+        self.pending = self.live = None  # (expiry, source, transaction, random return cookie)
+        self.credit, self.last = 8, 0
+        self.observed = self.published = 0
+
+    def expire(self, now):
+        if self.pending and now >= self.pending[0]:
+            self.pending = None
+        if self.live and now >= self.live[0]:
+            self.live = None
+
+    def allow(self, now):
+        self.credit = min(8, self.credit + 4 * (now - self.last))
+        self.last = now
+        if self.credit < 1:
+            return False
+        self.credit -= 1
+        return True
+
+
+class Publisher:
+    def __init__(self, cfg):
+        require(isinstance(cfg, dict) and set(cfg) == {"listen", "network", "ports", "members"})
+        require(all(isinstance(cfg[k], list) and len(cfg[k]) == 2 for k in ("listen", "ports", "members")))
+        host, port = cfg["listen"]
+        require(isinstance(host, str) and type(port) is int and 1024 <= port <= 65535)
+        ip = ipaddress.IPv4Address(host)
+        self.net = ipaddress.IPv4Network(cfg["network"], strict=True)
+        require(str(self.net) == cfg["network"] and self.net.prefixlen >= 24
+                and any(self.net.subnet_of(n) for n in RFC1918))
+        require(any(ip in n for n in RFC1918) and not self.reserved(ip))
+        self.listen = (str(ip), port)
+        self.lo, self.hi = cfg["ports"]
+        require(type(self.lo) is type(self.hi) is int and 1024 <= self.lo <= self.hi <= 65535
+                and self.hi - self.lo < 256)
+        a, b = self.members = tuple(Member(m) for m in cfg["members"])
+        require(a.user != b.user and a.pin != b.pin and a.key != b.key)
+
+    def reserved(self, ip):
+        return self.net.prefixlen < 31 and ip in (self.net.network_address, self.net.broadcast_address)
+
+    def reply(self, data, source, now):
+        for member in self.members:
+            member.expire(now)
+        ip = ipaddress.IPv4Address(source[0])
+        if (ip not in self.net or source[0] == self.listen[0] or not self.lo <= source[1] <= self.hi
+                or self.reserved(ip) or not 112 <= len(data) <= 256):
+            return None
+        for i, member in enumerate(self.members):
+            if not data[20:].startswith(member.user):
                 continue
-        except ValueError:
-            continue
-        if attr == username(side + "_reject"):
-            # Negative control: authentic response, correct peer pin, routable
-            # private host, but a port outside the configured pool.
-            other = "b" if side == "a" else "a"
-            pin = bytes.fromhex(Path(f"keys/{other}.pub").read_text().strip())
-            attrs = mapped(source) + paired(pin, (CLIENTS[other][1], 41999))
-            sock.sendto(signed(0x0101, tx, attrs, key), source)
-            rejected[side] = tx
-            continue
-        if side not in rejected or rejected[side] == tx:
-            raise ValueError("missing independent negative-control transaction")
-        pending[side] = (source, tx)
-        print(f"STUN authenticated Binding side={side} observed={source[0]}:{source[1]} negative_control=sent")
-    # Only the independent operator service publishes peer addresses. Use
-    # the *observed source*, never an address submitted by a client.
-    Path("stun-observed").touch()
-    while not Path("stun-reply").exists():
-        if time.monotonic() > deadline:
-            raise TimeoutError("missing fixture cookie witness")
-        time.sleep(0.005)
-    for side, (source, tx) in pending.items():
-        other = "b" if side == "a" else "a"
-        pin = bytes.fromhex(Path(f"keys/{other}.pub").read_text().strip())
-        attrs = mapped(source) + paired(pin, pending[other][0])
-        sock.sendto(signed(0x0101, tx, attrs, credential(side)), source)
+            try:
+                tx, attrs = verified(data, 1, member.key)
+            except ValueError:
+                return None
+            rest = attrs[len(member.user):]
+            proof = None
+            if rest.startswith(PROOF) and len(rest) >= 20:
+                proof, rest = rest[4:20], rest[20:]
+            # Only zero PADDING is allowed after USERNAME and optional proof.
+            if (len(rest) < 4 or rest[:4] != struct.pack("!HH", 0x0026, len(rest)-4)
+                    or any(rest[4:]) or len(rest) % 4 or not member.allow(now)):
+                return None
+            peer = self.members[1 - i]
+            if proof is None:
+                if not member.pending or member.pending[1:3] != (source, tx):
+                    member.pending = (now + 3, source, tx, secrets.token_bytes(16))
+                attrs = mapped(source) + PROOF + member.pending[3]
+            else:
+                def matches(record):
+                    return record and record[1:3] == (source, tx) and hmac.compare_digest(record[3], proof)
+                if matches(member.pending):
+                    member.live, member.pending = (now + 5, *member.pending[1:]), None
+                    member.observed = min(MAX_COUNT, member.observed + 1)
+                elif not matches(member.live):
+                    return None
+                if not peer.live or peer.live[1] == source:
+                    return None
+                attrs = mapped(source) + paired(peer.pin, peer.live[1])
+                member.published = min(MAX_COUNT, member.published + 1)
+            # At most one <=112-byte response to this >=112-byte authenticated
+            # request. Destination is always recvfrom's source, never wire data.
+            return signed(0x0101, tx, attrs, member.key)
+        return None
+
+
+def serve(service):
+    running = True
+
+    def stop(*_):
+        nonlocal running
+        running = False
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.bind(service.listen)
+        sock.settimeout(0.5)
+        print("private pair publisher ready", flush=True)
+        while running:
+            try:
+                data, source = sock.recvfrom(257)
+            except TimeoutError:
+                for member in service.members:
+                    member.expire(time.monotonic())
+                continue
+            response = service.reply(data, source, time.monotonic())
+            if response is not None:
+                try:
+                    sock.sendto(response, source)
+                except OSError:
+                    pass  # UDP route loss; clients can retransmit
+    for i, m in enumerate(service.members):
+        print(f"member={i} confirmed={m.observed} paired_replies={m.published}")
 
 
 if __name__ == "__main__":
-    ns = os.stat("/proc/self/ns/net").st_ino
-    if ns == int(os.environ["EON_WAN_PARENT_NS"]) or ns != int(os.environ["EON_WAN_NETNS"]):
-        raise SystemExit("requires the isolated namespace fixture")
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        if sys.argv[1:] == ["server"]:
-            serve(sock)
-        else:
-            raise SystemExit("unknown fixture role")
+    if len(sys.argv) != 3 or sys.argv[1] != "serve":
+        raise SystemExit("usage: wan_private_stun.py serve /absolute/private-config.json")
+    try:
+        serve(load_config(sys.argv[2]))
+    except (OSError, ValueError, TypeError, RecursionError):
+        raise SystemExit("private pair publisher could not start or continue") from None

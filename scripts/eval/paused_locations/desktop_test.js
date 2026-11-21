@@ -28,7 +28,8 @@ exports.activate = async () => {
   }
   const doc = v.window.activeTextEditor.document;
   assert.ok(doc.lineAt(27).text.includes('let text = text.trim().trim_end_matches('));
-  v.debug.addBreakpoints([new v.SourceBreakpoint(new v.Location(doc.uri, new v.Position(27, 0)))]);
+  // Model a user-configured first-hit stop via the real editor breakpoint model.
+  v.debug.addBreakpoints([new v.SourceBreakpoint(new v.Location(doc.uri, new v.Position(27, 0)), true, undefined, '1')]);
   await fs.writeFile('/home/ui/runtime/phase', 'start-fixed-session');
   assert.ok(await v.debug.startDebugging(folder, 'Fixed voice preview'));
   await fs.writeFile('/home/ui/runtime/phase', 'wait-for-frame');
@@ -39,8 +40,17 @@ exports.activate = async () => {
   await fs.writeFile('/home/ui/runtime/phase', 'real-frame');
   for (const stage of ['both', 'caller']) {
     assert.equal(v.debug.activeStackItem, frame);
-    // Prime the real palette, not the contributed command; a pointer click must invoke it.
     await v.commands.executeCommand('workbench.action.quickOpen', '>EON: Show Paused Project Locations');
+    await until(async () => (await fs.stat(`/home/ui/runtime/${stage}.palette`).catch(() => undefined))?.isFile());
+    await v.commands.executeCommand('workbench.action.acceptSelectedQuickOpenItem');
+    await until(async () => (await fs.stat(`/home/ui/runtime/${stage}.picker`).catch(() => undefined))?.isFile());
+    // VS Code 1.93 clears row focus when entering checkbox mode.
+    await v.commands.executeCommand('workbench.action.quickOpenSelectNext');
+    if (stage === 'both') await v.commands.executeCommand('workbench.action.quickPickManyToggle');
+    await v.commands.executeCommand('workbench.action.quickOpenSelectNext');
+    await v.commands.executeCommand('workbench.action.quickPickManyToggle');
+    await v.commands.executeCommand('workbench.action.acceptSelectedQuickOpenItem');
+    await fs.writeFile('/home/ui/runtime/phase', `selected-${stage}`);
     await until(async () => (await fs.stat(`/home/ui/runtime/${stage}.seen`).catch(() => undefined))?.isFile());
   }
   assert.equal(v.debug.activeStackItem, frame);

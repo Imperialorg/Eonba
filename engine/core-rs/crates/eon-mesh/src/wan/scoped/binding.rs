@@ -9,17 +9,35 @@ const INTEGRITY: [u8; 4] = [0, 0x1c, 0, 32];
 // Private comprehension-optional attribute: peer Ed25519 pin + six-byte
 // IPv4/port (network order), two zero padding bytes. Both attributes precede MI.
 const PAIRED: u16 = 0xc0e4;
+const PROOF: [u8; 4] = [0xc0, 0xe5, 0, 16];
 type Mapping = (SocketAddrV4, SocketAddrV4);
 
-fn request(user: &[u8], tx: &[u8; 12], key: &hmac::Key) -> Vec<u8> {
+#[derive(Debug, PartialEq, Eq)]
+enum Answer {
+    Challenge([u8; 16]),
+    Pair(Mapping),
+}
+
+fn request(user: &[u8], tx: &[u8; 12], key: &hmac::Key, proof: Option<[u8; 16]>) -> Vec<u8> {
     let padded = user.len().next_multiple_of(4);
     let mut msg = vec![0, 1];
-    msg.extend_from_slice(&((4 + padded + 36) as u16).to_be_bytes());
+    msg.extend_from_slice(&[0; 2]);
     msg.extend_from_slice(&COOKIE.to_be_bytes());
     msg.extend_from_slice(tx);
     msg.extend_from_slice(&[0, 6, 0, user.len() as u8]);
     msg.extend_from_slice(user);
     msg.resize(24 + padded, 0);
+    if let Some(token) = proof {
+        msg.extend_from_slice(&PROOF);
+        msg.extend_from_slice(&token);
+    }
+    // RFC 5780 PADDING keeps even the 112-byte pair response within the
+    // request's wire budget. The publisher never accepts an alternate target.
+    let padding = 112usize.saturating_sub(msg.len() + 4 + 36);
+    msg.extend_from_slice(&[0, 0x26, 0, padding as u8]);
+    msg.resize(msg.len() + padding, 0);
+    let length = (msg.len() - 20 + 36) as u16;
+    msg[2..4].copy_from_slice(&length.to_be_bytes());
     let tag = hmac::sign(key, &msg);
     msg.extend_from_slice(&INTEGRITY);
     msg.extend_from_slice(tag.as_ref());
@@ -31,7 +49,7 @@ fn response(
     tx: &[u8; 12],
     key: &hmac::Key,
     pin: EndpointId,
-) -> EonResult<Option<Mapping>> {
+) -> EonResult<Option<Answer>> {
     // Fixed, bounded profile. Ignore unrelated/malformed/unauthenticated
     // datagrams; never honor redirect, alternate server or a trailing attribute.
     if !(56..=256).contains(&packet.len())
@@ -52,6 +70,9 @@ fn response(
     if attrs.len() == 12 {
         return Ok(None);
     } // standard server: no private publication
+    if attrs.len() == 32 && attrs[..6] == [0, 0x20, 0, 8, 0, 1] && attrs[12..16] == PROOF {
+        return Ok(Some(Answer::Challenge(attrs[16..32].try_into().unwrap())));
+    }
     if attrs.len() != 56
         || attrs[..6] != [0, 0x20, 0, 8, 0, 1]
         || attrs[12..14] != PAIRED.to_be_bytes()
@@ -66,7 +87,10 @@ fn response(
         Ipv4Addr::from(<[u8; 4]>::try_from(&attrs[48..52]).unwrap()),
         u16::from_be_bytes(attrs[52..54].try_into().unwrap()),
     );
-    Ok(Some((SocketAddrV4::new(ip.into(), port), peer)))
+    Ok(Some(Answer::Pair((
+        SocketAddrV4::new(ip.into(), port),
+        peer,
+    ))))
 }
 
 pub(super) async fn discover(
@@ -79,7 +103,8 @@ pub(super) async fn discover(
         .fill(&mut tx)
         .map_err(|_| transport_error("STUN randomness unavailable"))?;
     let key = hmac::Key::new(hmac::HMAC_SHA256, &cfg.stun_password);
-    let req = request(cfg.stun_username.as_bytes(), &tx, &key);
+    let mut proof = None;
+    let mut req = request(cfg.stun_username.as_bytes(), &tx, &key, proof);
     let mut buf = [0; 257];
     for ms in [250, 500, 1000] {
         if socket.send_to(&req, cfg.stun).await.is_err() {
@@ -90,9 +115,19 @@ pub(super) async fn discover(
             tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await
         {
             if source == cfg.stun.into()
-                && let Some(mapping) = response(&buf[..n], &tx, &key, pin)?
+                && let Some(answer) = response(&buf[..n], &tx, &key, pin)?
             {
-                return Ok(Some(mapping));
+                match answer {
+                    Answer::Pair(mapping) => return Ok(Some(mapping)),
+                    Answer::Challenge(token) if proof.is_none() => {
+                        proof = Some(token);
+                        req = request(cfg.stun_username.as_bytes(), &tx, &key, proof);
+                        if socket.send_to(&req, cfg.stun).await.is_err() {
+                            return Ok(None);
+                        }
+                    }
+                    Answer::Challenge(_) => {}
+                }
             }
             if Instant::now() >= deadline {
                 break;
@@ -128,7 +163,10 @@ mod tests {
         let tag = hmac::sign(&key, &reply);
         reply.extend(INTEGRITY);
         reply.extend(tag.as_ref());
-        assert_eq!(response(&reply, &tx, &key, pin).unwrap(), Some((own, peer)));
+        assert_eq!(
+            response(&reply, &tx, &key, pin).unwrap(),
+            Some(Answer::Pair((own, peer)))
+        );
         assert!(response(&reply, &[9; 12], &key, pin).unwrap().is_none());
         assert!(response(&reply, &tx, &key, SecretKey::generate().public()).is_err());
         for i in 0..reply.len() {

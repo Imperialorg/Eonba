@@ -208,17 +208,57 @@ await_marker() {
     return 1
 }
 if [[ $discovery == stun ]]; then
-    stun() {
-        inside "$1" sudo -n -u "$user" env EON_WAN_PARENT_NS="$parent" \
-            EON_WAN_NETNS="$(stat -Lc %i "/run/netns/$1")" \
-            timeout --kill-after=2s 65s python3 -I "$stun_helper" "$2"
-    }
+    python3 -I - <<'PY'
+import json
+from pathlib import Path
+members = [{"user": s, "pin": Path(f"keys/{s}.pub").read_text().strip(),
+            "password": Path(f"keys/stun-{s}.psk").read_text().strip()} for s in ("a", "b")]
+Path("keys/publisher.json").write_text(json.dumps({"listen": ["10.77.0.1", 3478],
+    "network": "10.77.0.0/29", "ports": [41728, 41855], "members": members}))
+PY
+    # Independent negative-control responder, never a production server mode.
+    # Only the two fixed NAT sources, on a different port in the isolated relay.
     registering=1
-    stun "$relay" server >stun.log 2>&1 &
+    inside "$relay" sudo -n -u "$user" timeout 65s python3 -I - "$stun_helper" \
+        "$(stat -Lc %i "/run/netns/$relay")" >negative.log 2>&1 <<'PY' &
+import os, runpy, socket, sys
+from pathlib import Path
+assert os.stat("/proc/self/ns/net").st_ino == int(sys.argv[2])
+w = runpy.run_path(sys.argv[1])
+waiting = {("10.77.0.2", 41769): ("a", "b"), ("10.77.0.3", 41769): ("b", "a")}
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+    sock.bind(("10.77.0.1", 3479))
+    Path("negative-ready").touch()
+    while waiting:
+        packet, src = sock.recvfrom(257)
+        if src not in waiting:
+            continue
+        side, other = waiting[src]
+        key = Path(f"keys/stun-{side}.psk").read_bytes().strip()
+        tx, attrs = w["verified"](packet, 1, key)
+        assert attrs.startswith(w["username"](side + "_reject"))
+        pin = bytes.fromhex(Path(f"keys/{other}.pub").read_text().strip())
+        addr = ("10.77.0.3" if side == "a" else "10.77.0.2", 41999)
+        sock.sendto(w["signed"](0x0101, tx, w["mapped"](src) + w["paired"](pin, addr), key), src)
+        del waiting[src]
+PY
     jobs+=("$!")
     registering=0
     (( !interrupted )) || exit 1
-    await_marker stun-ready
+    await_marker negative-ready
+    registering=1
+    inside "$relay" sudo -n -u "$user" timeout --kill-after=2s 65s bash -c \
+        'echo "$$" >publisher.pid; exec python3 -I "$1" serve "$2"' \
+        sh "$stun_helper" "$scratch/keys/publisher.json" >stun.log 2>&1 &
+    jobs+=("$!")
+    registering=0
+    (( !interrupted )) || exit 1
+    # Observe the real Binding request on the socket, not a preliminary
+    # bind by a different client. Delay the first challenge until both cookies
+    # are captured; the production publisher needs no fixture IPC.
+    for outer in 2 3; do
+        inside "$relay" iptables -I OUTPUT -p udp --sport 3478 -d "10.77.0.$outer" -j DROP
+    done
 fi
 role "$relay" relay
 await_marker ready
@@ -227,7 +267,14 @@ role "$a" a
 if [[ $discovery == stun ]]; then
     # Distinguish this direct-first migration from the QAD relay-first test.
     # Snapshot each live kernel socket *after* Binding and before publication.
-    await_marker stun-observed
+    wait "${jobs[0]}"
+    jobs=("${jobs[@]:1}")
+    await_marker publisher.pid
+    observed() {
+        inside "$relay" iptables -nvxL OUTPUT | awk '/spt:3478/ && $1 > 0 {n++} END{exit n != 2}'
+    }
+    for ((i=0; i<50; i++)); do observed && break; sleep .01; done
+    observed
     udp_cookie() { inside "$1" ss -HOaune "src $2" | awk '{for(i=1;i<=NF;i++) if ($i ~ /^sk:/) print $i}'; }
     a_cookie=$(udp_cookie "$a" 192.168.1.2) b_cookie=$(udp_cookie "$b" 192.168.2.2)
     [[ $a_cookie =~ ^sk:[[:xdigit:]]+$ && $b_cookie =~ ^sk:[[:xdigit:]]+$ ]]
@@ -240,10 +287,9 @@ ipn "$na" route del blackhole 10.77.0.3/32
 ipn "$nb" route del blackhole 10.77.0.2/32
 touch route-open
 if [[ $discovery == stun ]]; then
-    touch stun-reply
-    wait "${jobs[0]}"
-    jobs=("${jobs[@]:1}")
-    cat stun.log
+    for outer in 2 3; do
+        inside "$relay" iptables -D OUTPUT -p udp --sport 3478 -d "10.77.0.$outer" -j DROP
+    done
 fi
 direct=0
 await_marker direct-proven && direct=1
@@ -260,6 +306,14 @@ if [[ $discovery == stun ]]; then
         [[ $count == 0 ]] || { echo "unexpected packets to rejected candidate: $count" >&2; exit 1; }
         echo "$ep rejected signed candidate before send: packets=$count" >>routes.log
     done
+    publisher_pid=$(cat publisher.pid)
+    [[ $publisher_pid =~ ^[1-9][0-9]*$ ]]
+    [[ $(stat -Lc %i "/proc/$publisher_pid/ns/net") == "$(stat -Lc %i "/run/netns/$relay")" ]]
+    kill -TERM "$publisher_pid"
+    wait "${jobs[0]}"
+    jobs=("${jobs[@]:1}")
+    cat stun.log
+    [[ $(grep -cE '^member=[01] confirmed=1 paired_replies=[1-9][0-9]*$' stun.log) == 2 ]]
 fi
 standby_cookie() {
     inside "$a" ss -HOetn state established src 172.30.84.2 dst "10.77.0.1:$1" |
