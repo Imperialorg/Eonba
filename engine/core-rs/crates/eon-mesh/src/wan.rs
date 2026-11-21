@@ -149,6 +149,9 @@ impl WanEndpoint {
         let transport = QuicTransportConfig::builder()
             .max_concurrent_uni_streams(0u8.into())
             .max_concurrent_bidi_streams(8u8.into())
+            // Only Class 0 uses DATAGRAM. Let new audio displace unsent audio
+            // under pressure instead of replaying a large FIFO after an outage.
+            .datagram_send_buffer_size(MAX_AUDIO)
             .build();
         timeout(wait, async {
             let ep = builder
@@ -269,6 +272,9 @@ impl Budget {
 }
 
 impl WanEndpoint {
+    /// Queue one unreliable PCM chunk. Success is not a delivery receipt:
+    /// newer chunks can evict it before transmission, and in-flight chunks
+    /// can still arrive late or out of order.
     pub fn send_audio(&self, pcm: &AudioPcmChunk) -> EonResult<()> {
         pcm.validate()?;
         if pcm.encoded_len() > self.conn.max_datagram_size().unwrap_or(0) {

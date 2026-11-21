@@ -189,6 +189,47 @@ async fn iroh_and_qos_tests_pinned_relay_carries_all_four_lanes_on_one_connectio
     Ok(())
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn iroh_and_qos_tests_voice_burst_replaces_unsent_audio() -> EonResult<()> {
+    let (a, b) = (SecretKey::generate(), SecretKey::generate());
+    let (aid, bid) = (a.public(), b.public());
+    let (relay, url) = relay(&[&a, &b]).await;
+    let (left, right) = tokio::try_join!(endpoint(a, bid, &url), endpoint(b, aid, &url))?;
+
+    for (tx, rx) in [(&left, &right), (&right, &left)] {
+        let frame = |seq: u8| AudioPcmChunk {
+            sequence_number: i64::from(seq),
+            pcm_data: vec![seq; 640], // 20 ms of 16 kHz mono PCM16
+            ..Default::default()
+        };
+        // No await in this burst: the same-thread QUIC driver cannot drain
+        // the sender between frames. The wire may deliver only the newest.
+        for seq in 1..=8 {
+            tx.send_audio(&frame(seq))?;
+        }
+        assert_eq!(
+            timeout(WAIT, rx.recv_audio())
+                .await
+                .unwrap()?
+                .sequence_number,
+            8
+        );
+
+        // A subsequent send still works; no old PCM may be waiting ahead of it.
+        tx.send_audio(&frame(9))?;
+        assert_eq!(
+            timeout(WAIT, rx.recv_audio())
+                .await
+                .unwrap()?
+                .sequence_number,
+            9
+        );
+    }
+    tokio::join!(left.close(), right.close());
+    relay.shutdown().await.unwrap();
+    Ok(())
+}
+
 #[tokio::test]
 async fn iroh_and_qos_tests_relay_membership_does_not_authorize_an_application_peer()
 -> EonResult<()> {
