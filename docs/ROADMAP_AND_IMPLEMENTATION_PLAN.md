@@ -120,12 +120,12 @@
   - **Unit Tests**: `cargo test -p eon-capability registry_tests`, `taint_enforcement_tests`.
   - **Verified backend**: Registered import-free Wasm on Linux. Both dispatch APIs require durable redacted attempt and outcome records. The registry checks the descriptor, module digest, schema and taint; the worker limits fuel, memory, output and execution time. Its deadline includes compilation but does not cover host journal I/O, approval storage or masked review.
 
-- [ ] **Task 4.2: Local Workspace, Process & Persistent PTY Multiplexer Providers**
+- [x] **Task 4.2: Local Workspace, Process & Persistent PTY Multiplexer Providers**
   - **Crate**: `eon-capability`
   - **Files**: `src/providers/workspace.rs`, `src/providers/process.rs`, `src/providers/pty.rs`
   - **Requirements**: Range reads, atomic temp-file writes, SHA-256 digest validation, pre-write journal snapshots. Persistent bidirectional PTY session multiplexer (`portable-pty`) exposing `process.pty_open`, `process.pty_write`, `process.pty_read_ring`, and `process.pty_signal` with in-memory 10,000-line circular ring buffer and 300s idle watchdog.
   - **Unit Tests**: `cargo test -p eon-capability workspace_tests`, `process_tests`, `pty_tests`.
-  - **Verified subset**: Linux and Android/Bionic x86_64 share the devpts lifecycle, workflow ownership, ring and idle watchdog. On enforcing API 35, 11 PTY tests passed inside a permissionless app; an altered APK helper was rejected before launch. The mobile backend supports only copy, uppercase and space-squeeze. Linux workspace edits retain durable preimages and bounded private checkpoints. Neither terminal backend uses upstream `portable-pty`.
+  - **Verification**: On x86_64 glibc Linux, the opt-in allocator uses upstream `portable-pty` in a private `mode=0600` devpts instance. The combined workspace, process and PTY suite passed 43 tests, including ring rollover, idle reap, durable preimages and first-unlock ownership. Separate wrong-mode and wrong-digest runs were refused. The default secured devpts backend passed 41 tests. Android keeps its signed-APK devpts helper, not the Linux allocator. Reproduction: `provision/portable-pty/README.md` in `eon-capability`.
 
 - [x] **Task 4.3: Network & Web Research Providers**
   - **Crate**: `eon-capability`
@@ -232,14 +232,14 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Requirements**: Tree-sitter AST parsing across Rust, Kotlin, C/C++, Python, TypeScript. PageRank architectural RepoMap generator. Embedded Debug Adapter Protocol (DAP) client bridge (`dev.dap`) interfacing with `codelldb`, `debugpy`, and `jdwp` to inspect live stack frames, conditional breakpoints, and heap allocations. Automated compiler diagnostic capture and localized syntax tree repair.
   - **Unit Tests**: `cargo test -p eon-cyber ast_tests`, `self_healing_tests`, `dap_tests`.
   - **Verified subset**: Across four languages, 48 of 50 benign repair cases passed independent behavior checks after one edit, 49 within three revisions. All ten Kotlin cases passed; the compact superclass repair needs an unambiguous syntax match at the K2 diagnostic and inserts only `()`. The separate RepoMap parses all six languages and ranks lexical membership and unambiguous syntactic call matches. Its hand-checked fixture covers 19 declarations in eight files. This is not compiler name resolution or live debugger verification.
-  - **Debugger evidence**: Through the host bridge, CodeLLDB reported 3 allocations and 2 frees on the third visit; debugpy reported 2 markers allocated and 1 retained on the second. JDI over private JDWP pipes stopped on the second visit and counted 3 live marker instances. All three returned the expected three live frames. These are fixed, built-in programs and conditions, not a debugger for an operator's project. The general project-debugging bridge remains open.
+  - **Debugger evidence**: CodeLLDB, debugpy and JDI/JDWP returned verified frames and allocation or instance counts for fixed local programs. The Linux VS Code command can also show selected `file:line` locations from an already-paused project. A native LLVM 18 test returned two real source locations and omitted the unselected file on a second request. Project-level conditional breakpoint and heap inspection are not implemented by that command.
 
 - [ ] **Task 7.2: Defensive source review, repair proposals and platform telemetry**
   - **Crate**: `eon-cyber`
   - **Files**: `src/defense/taint_auditor.rs`, `src/defense/auto_patch.rs`, `src/defense/telemetry.rs`
   - **Requirements**: Review authorized source for patterns associated with CWE-119, CWE-89, CWE-362 and observable timing differences. Produce reviewable constant-time and bounds-checking edits, without executing submitted code or patching a running process. Collect opt-in, metadata-only telemetry on supported Linux/Android eBPF, Windows ETW and stock Android backends. Distinguish observed evidence from unsupported rules and unavailable sensors.
   - **Verification**: Exercise both matching and nonmatching source, compile and test the reviewed repair, check that reports do not disclose the source, and test each claimed telemetry backend on its supported host. Local `/proc/self/io` counters do not establish eBPF, ETW or VPN coverage.
-  - **Platform evidence**: The stock API 35 process-time sensor measured 334 ms for an opted-in local action. A separate self-only eBPF sensor recorded CPU-clock samples on supported Linux. On enforcing Android 15, a permissionless app ran the production CLI twice: opt-out omitted the field, opt-in reported `Unavailable`, and both reviews returned identical findings. Neither API accepts a target PID. Native Windows ETW readback and positive Android eBPF sampling remain unverified.
+  - **Platform evidence**: Stock API 35 process time and self-only Linux eBPF CPU sampling passed. Android raw CPU sampling correctly returned `Unavailable`. The opt-in Android platform UID counter measured exactly 17,280 bytes in each direction on two loopback runs. An independent metadata check verified the attached eBPF programs and backing map on that image. This is network accounting, not CPU sampling. Native Windows ETW readback is still unverified.
 
 - [x] **Task 7.3: Offline dependency and advisory assessment**
   - **Crate**: `eon-cyber`
@@ -338,7 +338,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
 - [ ] **Task 10.2: Sub-170ms Time-To-First-Audio (TTFA) Benchmark**
   - **Directory**: `tests/latency-benchmarks/`
   - **Requirements**: Automated end-to-end benchmark measuring audio input to speaker output. Asserts P50 < 170ms, P99 < 280ms.
-  - **Measurement**: Manual 06 §3.3 includes an interactive recorder for a dedicated stereo rig. It collects a separate muted control and 100 synchronized turns without dropping misses. The acquisition and analysis tests passed; no physical session was supplied, so neither P50 nor P99 was measured.
+  - **Measurement**: The recorder can now drive EON from its live left input while retaining the isolated speaker channel on the same clock. A recorded speech test exercised Silero, streaming Zipformer and a rendered Kokoro prefix; silence produced no reply. No authorized physical session was available, so neither P50 nor P99 was measured. Manual 06 §3.3 gives the rig command and the endpoint timing constraints.
 
 - [x] **Task 10.3: Autonomous Cyber Defense & Patch Verification Test**
   - **Directory**: `tests/cyber-security-tests/`

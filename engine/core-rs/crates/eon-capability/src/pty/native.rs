@@ -4,69 +4,38 @@
 mod android;
 #[cfg(target_os = "android")]
 pub(super) use android::Programs;
+#[cfg(target_os = "linux")]
+mod host;
+#[cfg(target_os = "linux")]
+use host::host_elf;
+#[cfg(feature = "portable-pty-allocator")]
+#[path = "allocator/grant.rs"]
+mod grant;
+#[cfg(feature = "portable-pty-allocator")]
+mod portable;
 
 use std::fs::File;
 use std::io::{self, ErrorKind, Read, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd};
-#[cfg(target_os = "linux")]
-use std::os::unix::fs::FileExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
 #[cfg(target_os = "linux")]
-use std::path::{Component, Path};
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use rustix::fs::{self, Mode};
-use rustix::process::{self, Resource, Rlimit};
+use rustix::fs;
+#[cfg(any(not(feature = "portable-pty-allocator"), test))]
+use rustix::fs::Mode;
 #[cfg(target_os = "linux")]
-use rustix::{fs::OFlags, process::Signal};
+use rustix::process::Signal;
+use rustix::process::{self, Resource, Rlimit};
 
 use super::{PtyMode, PtySignal};
 #[cfg(target_os = "linux")]
 use crate::sandbox::{ConfinementPolicy, WorkerIo, confine_command};
-
-// Walk from a trusted root using directory handles, never following symlinks.
-// Checking the file alone would also accept a link to a different root-owned binary.
-#[cfg(target_os = "linux")]
-fn host_elf(path: &Path) -> io::Result<File> {
-    let mut parts = path.components();
-    if parts.next() != Some(Component::RootDir) {
-        return Err(io::Error::from(ErrorKind::InvalidInput));
-    }
-    let mut file = File::open("/")?;
-    for part in parts {
-        let Component::Normal(name) = part else {
-            return Err(io::Error::from(ErrorKind::InvalidInput));
-        };
-        let m = file.metadata()?;
-        if !m.is_dir() || m.uid() != 0 || m.mode() & 0o022 != 0 {
-            return Err(io::Error::from(ErrorKind::PermissionDenied));
-        }
-        file = fs::openat(
-            &file,
-            name,
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-            Mode::empty(),
-        )?
-        .into();
-    }
-    let m = file.metadata()?;
-    if !m.is_file() || m.uid() != 0 || m.mode() & 0o6022 != 0 || file.as_raw_fd() < 3 {
-        return Err(io::Error::from(ErrorKind::PermissionDenied));
-    }
-    let mut magic = [0; 4];
-    file.read_exact_at(&mut magic, 0)?;
-    if &magic != b"\x7fELF" {
-        return Err(io::Error::new(
-            ErrorKind::InvalidData,
-            "expected host ELF image",
-        ));
-    }
-    Ok(file)
-}
 
 fn fd_path(f: &File) -> PathBuf {
     format!("/proc/self/fd/{}", f.as_raw_fd()).into()
@@ -247,6 +216,8 @@ impl Image {
 pub(super) struct Programs {
     cat: Image,
     tr: Image,
+    #[cfg(feature = "portable-pty-allocator")]
+    grant: grant::Grant,
 }
 
 #[cfg(target_os = "linux")]
@@ -255,6 +226,8 @@ impl Programs {
         Ok(Self {
             cat: Image::pin(Utility::Cat)?,
             tr: Image::pin(Utility::Tr)?,
+            #[cfg(feature = "portable-pty-allocator")]
+            grant: grant::Grant::pin()?,
         })
     }
 
@@ -263,7 +236,13 @@ impl Programs {
             PtyMode::Loopback => (&self.cat, &[]),
             PtyMode::Filter(filter) => (&self.tr, filter.args()),
         };
-        spawn_terminal(mode, image.command(args)?, |cmd| image.confine(cmd))
+        #[cfg(feature = "portable-pty-allocator")]
+        let acquire = || portable::acquire(&self.grant);
+        #[cfg(not(feature = "portable-pty-allocator"))]
+        let acquire = private_locked_pair;
+        spawn_terminal(mode, image.command(args)?, acquire, |cmd| {
+            image.confine(cmd)
+        })
     }
 }
 
@@ -290,10 +269,11 @@ fn require_waitable_children() -> io::Result<()> {
 fn spawn_terminal(
     mode: PtyMode,
     mut cmd: Command,
+    acquire: impl FnOnce() -> io::Result<(File, File)>,
     confine: impl FnOnce(&mut Command) -> io::Result<()>,
 ) -> io::Result<Terminal> {
     require_waitable_children()?;
-    let (master, slave) = pair()?;
+    let (master, slave) = pair(acquire()?)?;
     // SAFETY: in the child stdio is already installed. setsid makes a new
     // process group and session before claiming the slave as controlling
     // terminal. Only async-signal-safe native operations before confinement.
@@ -377,6 +357,7 @@ fn peer(master: &File, flags: i32) -> io::Result<File> {
     }
 }
 
+#[cfg(any(not(feature = "portable-pty-allocator"), test))]
 pub(super) fn private_locked_pair() -> io::Result<(File, File)> {
     // portable-pty 0.9's Unix openpty returns an already-unlocked slave and
     // sets CLOEXEC afterwards. Neither is safe to repair after acquisition.
@@ -446,8 +427,7 @@ fn open_private_slave(master: &File) -> io::Result<File> {
     }
 }
 
-fn pair() -> io::Result<(File, File)> {
-    let (master, pin) = private_locked_pair()?;
+fn pair((master, pin): (File, File)) -> io::Result<(File, File)> {
     let slave = open_private_slave(&master)?;
     let expected = pin.metadata()?;
     let actual = slave.metadata()?;

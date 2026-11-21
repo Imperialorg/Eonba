@@ -128,7 +128,7 @@ impl Programs {
                 PtyMode::Filter(StreamFilter::AsciiUppercase) => "upper",
                 PtyMode::Filter(StreamFilter::SqueezeSpaces) => "squeeze",
             });
-        spawn_terminal(mode, cmd, |cmd| {
+        spawn_terminal(mode, cmd, super::private_locked_pair, |cmd| {
             // SAFETY: only child-side syscalls; retain Command's spawn-error
             // pipe and pinned image through exec, but no inherited fd beyond it.
             unsafe {

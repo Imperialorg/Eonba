@@ -5,6 +5,15 @@
 //! The host must leave this provider responsible for waiting on its own children.
 //! Linux uses pinned GNU tools; Android x86_64 uses the fixed, signed-APK
 //! companion built by `provision/android-pty/build-worker.sh`. Both use devpts.
+//! The optional `portable-pty-allocator` selects upstream allocation on
+//! provisioned x86_64 glibc Linux. See `provision/portable-pty/README.md`.
+#[cfg(all(
+    feature = "portable-pty-allocator",
+    not(all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"))
+))]
+compile_error!(
+    "portable-pty-allocator requires x86_64 glibc Linux; use the default secured devpts provider on other supported targets"
+);
 mod native;
 #[cfg(target_os = "linux")]
 mod process;
