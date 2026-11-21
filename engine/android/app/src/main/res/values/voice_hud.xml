@@ -44,5 +44,5 @@
     <string name="voice_tasks_unavailable">EON activity task counts unavailable.</string>
     <string name="open_eon_controls">Open EON controls</string>
     <string name="close_voice_session">End session</string>
-    <string name="voice_hud_help">With EON selected, use your assistant gesture while unlocked. Expand the card to check a profile or tone, or explicitly start a microphone meter. No audio is saved.</string>
+    <string name="voice_hud_help">Use your assistant gesture while unlocked. Hardware hotwords are unsupported by EON: Android 12 and later do not expose the detector or enrollment check to ordinary apps. EON does not listen for a wake word. Expand the card to check a profile or explicitly start the microphone meter.</string>
 </resources>

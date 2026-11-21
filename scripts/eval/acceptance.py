@@ -98,7 +98,8 @@ def run(directory):
         device = evidence["task_10_2"]
         device = {**device, "status": measured(device["passed"])}
         scenes = evidence["noisy_scenes"]
-        timing = verdict("unavailable" if s["max_ttfa_ms"] is None else measured(s["max_ttfa_ms"] < 200)
+        timing = verdict("failed" if s["misses"] else
+                         "unavailable" if s["max_ttfa_ms"] is None else measured(s["max_ttfa_ms"] < 200)
                          for s in scenes.values())
         gates["noisy_physical_ttfa"] = {"status": timing, "scenes": scenes}
         session = evidence["manifest_sha256"]

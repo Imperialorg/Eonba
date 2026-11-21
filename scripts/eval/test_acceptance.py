@@ -17,12 +17,12 @@ class PhysicalInventoryTests(unittest.TestCase):
     """Test inventory/aggregation with analyzer records, not simulated physical WAVs."""
 
     def setUp(self):
-        area = tempfile.TemporaryDirectory(dir=bench.noisy_duplex.ROOT)
+        area = tempfile.TemporaryDirectory()
         self.addCleanup(area.cleanup)
         self.root = Path(area.name)
         (self.root / "trials").mkdir()
         self.samples = {}
-        self.info = {"origin": "authorized-single-clock-physical", "route": "unit-test",
+        self.info = {"origin": "authorized-single-clock-physical", "route": "unit-test", "mode": "passive",
                      "gains": "unit-test", "threshold_pcm": 500, "trials": {}}
         self.add("muted-control.wav", None)
         for i in range(100):
@@ -49,16 +49,53 @@ class PhysicalInventoryTests(unittest.TestCase):
         self.samples[path] = replace(self.samples[path], first_output_end=4200)  # 200, not <200
         result = self.measure()
         self.assertEqual(result["task_10_2"], {"passed": True, "trials": 100, "p50_ms": 100, "p99_ms": 100})
-        self.assertEqual(result["noisy_scenes"]["babble-0db"], {"trials": 34, "max_ttfa_ms": 200})
+        self.assertEqual(result["noisy_scenes"]["babble-0db"], {"trials": 34, "max_ttfa_ms": 200, "misses": 0})
         for label in self.info["trials"].values():
             label["scene"] = "control"
         self.assertTrue(all(v["max_ttfa_ms"] is None for v in self.measure()["noisy_scenes"].values()))
 
+    def test_driven_misses_even_with_speaker_noise_and_started_bridge_without_sound(self):
+        self.info.update(mode="driven", control_bridge_started=True)
+        for label in self.info["trials"].values():
+            label["bridge_started"] = True
+        self.assertTrue(self.measure()["task_10_2"]["passed"])
+        self.info["trials"]["0.wav"]["bridge_started"] = False  # analyzer sees a plausible acoustic onset
+        path = self.root / "trials/1.wav"
+        self.samples[path] = replace(self.samples[path], first_output_end=None)
+        measured = self.measure()
+        self.assertEqual(measured["task_10_2"], {
+            "passed": False, "trials": 100, "p50_ms": None, "p99_ms": None,
+            "misses": {"0.wav": "no bridge started", "1.wav": "no sustained speaker response"},
+        })
+        self.assertEqual(measured["noisy_scenes"][physical.SCENES[0]],
+                         {"trials": 34, "misses": 1, "max_ttfa_ms": None})
+
+    def test_no_implicit_mode_unknown_outcome_or_unexercised_driven_control(self):
+        del self.info["mode"]
+        with self.assertRaisesRegex(ValueError, "recording mode"):
+            self.measure()
+        self.info.update(mode="driven", control_bridge_started=False)
+        with self.assertRaisesRegex(ValueError, "control did not start"):
+            self.measure()
+        self.info["control_bridge_started"] = True
+        for wrong in (None, 0, 1, "false"):
+            if wrong is not None:
+                self.info["trials"]["0.wav"]["bridge_started"] = wrong
+            with self.assertRaisesRegex(ValueError, "requires boolean bridge_started"):
+                self.measure()
+        self.info["mode"] = "passive"
+        with self.assertRaisesRegex(ValueError, "passive recording cannot declare"):
+            self.measure()
+        del self.info["control_bridge_started"]
+        with self.assertRaisesRegex(ValueError, "passive recording cannot declare"):
+            self.measure()
+
     def test_any_missing_response_duplicate_rate_change_or_partial_batch_invalidates_result(self):
         path = self.root / "trials/0.wav"
         original = self.samples[path]
-        for bad, why in ((replace(original, first_output_end=None), "no sustained"),
-                         (replace(original, rate=8000), "rate differs"),
+        self.samples[path] = replace(original, first_output_end=None)
+        self.assertEqual(self.measure()["task_10_2"]["misses"], {"0.wav": "no sustained speaker response"})
+        for bad, why in ((replace(original, rate=8000), "rate differs"),
                          (self.samples[self.root / "trials/1.wav"], "duplicate PCM")):
             with self.subTest(why=why):
                 self.samples[path] = bad
@@ -131,7 +168,7 @@ class AcceptanceTests(unittest.TestCase):
     def test_every_gate_must_pass_and_200_ms_is_not_below_200(self):
         checked = {"status": "passed"}
         physical_result = {"task_10_2": {"passed": True}, "manifest_sha256": "test", "noisy_scenes": {
-            scene: {"max_ttfa_ms": 199} for scene in physical.SCENES}}
+            scene: {"max_ttfa_ms": 199, "misses": 0} for scene in physical.SCENES}}
         with (patch.object(bench, "kernel_checks", return_value=(checked, checked)),
               patch.object(bench.polyglot_repair, "run_corpus", return_value={"cases": 50, "passed": True}),
               patch.object(bench, "speaker_checks", return_value=checked) as speaker,
@@ -140,6 +177,9 @@ class AcceptanceTests(unittest.TestCase):
             for value, expected in ((200, "failed"), (None, "unavailable")):
                 physical_result["noisy_scenes"][physical.SCENES[1]]["max_ttfa_ms"] = value
                 self.assertEqual(bench.run(None)["task_10_6"]["status"], expected)
+            physical_result["noisy_scenes"][physical.SCENES[1]]["misses"] = 1
+            self.assertEqual(bench.run(None)["task_10_6"]["status"], "failed")
+            physical_result["noisy_scenes"][physical.SCENES[1]]["misses"] = 0
             speaker.return_value = {"status": "failed"}
             self.assertEqual(bench.run(None)["task_10_6"]["status"], "failed")
 

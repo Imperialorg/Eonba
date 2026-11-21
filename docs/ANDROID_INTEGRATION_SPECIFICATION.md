@@ -265,28 +265,35 @@ On stock Android the user may select EON as the **digital assistant (`ROLE_ASSIS
 flowchart TD
     AndroidOS["Android 14/15+ Framework"] -->|Binds via android.service.voice| AssistantService["EonVoiceInteractionService (ROLE_ASSISTANT)"]
 
-    subgraph AssistantPrivileges["System Assistant Level Privileges"]
-        DSPWake["Hardware DSP Low-Power Hotword (AlwaysOnHotwordDetector)"]
-        LegalMic["Audio only with permission and an OS-permitted capture session"]
-        ScreenAssist["Direct AssistStructure & Screenshot Ingestion (onHandleAssist)"]
-        Restart["Restore durable state after process death"]
-    end
-
-    AssistantService --> DSPWake
-    AssistantService --> LegalMic
-    AssistantService --> ScreenAssist
-    AssistantService --> Restart
-    
-    LegalMic --> NativeCore["Native AAudio NDK Stream (eon-voice)"]
-    ScreenAssist --> VisionCore["OmniParser-v2 Keyframe Analysis (eon-vision)"]
+    Source["Private EON profile page"] -->|User approves one profile check| Local["Android local voice interaction"]
+    Local -->|AssistState.ActivityId only| Session["Selected EON session"]
+    AssistantService --> Session
+    Session -->|Matching activity ID: request and perform direct action| Source
+    Source -->|One profile result via Android| Session
 ```
 
 ### 6.1 `EonVoiceInteractionService` Implementation
 Declaring a `VoiceInteractionService` makes the app eligible; it does not select the app for the user.
-- **Hotword detection**: Check OS support, hardware availability, and enrollment. If unavailable, offer an explicit user-initiated interaction.
+- **Hardware hotword: unsupported by this ordinary app.** The public SDK removed `AlwaysOnHotwordDetector` and its factory in API 31, the first API where EON enables its voice service. On Android 15 the factory is `@SystemApi` and `VoiceInteractionService.listModuleProperties()` is `@TestApi`. Selection does not expose them. EON uses neither, requests no enrollment, and offers the system assistant gesture instead. This is not a claim about the physical hardware of arbitrary phones.
 - **Microphone**: Require the OS permissions and active capture conditions. Denial or role loss must stop capture, not trigger a fallback recorder.
-- **Assist context**: A `VoiceInteractionSession` can receive assist data and a screenshot in separate callbacks. Treat missing data, disabled sharing and protected windows as normal; do not capture around them.
+- **Assist context**: The binding always disables both structure and screenshot. On Android 15 even an activity-token-scoped show passes through that same binding-wide mask. Filtering an incoming tree by package would be too late. EON does not select an Autofill provider, request an Autofill structure, or send a page to a provider for assistant use.
 - **Process death**: The OS controls process priority. Restore durable work after restart instead of relying on an OOM score or immunity from process management.
+
+#### Owner-only direct action (API 35 device check)
+
+With EON selected, open **Review an Android assistant profile check**. Back leaves without checking. **Allow one profile check** starts `Activity.startLocalVoiceInteraction()` from that private page. Only the first showing of a fresh session with the live five-second Binder ticket can proceed. Android scopes the local invocation to its starting activity. The session compares the opaque `AssistState.activityId` with the ID from the source’s `VoiceInteractor.notifyDirectActionsChanged()`; it does not read view data or enumerate visible activities. Only after they match does it call `requestDirectActions`. Android checks the active session and the task’s assist token. EON performs only the fixed `CHECK_MODEL_PROFILE` action; its source rechecks the ticket, policy, selected binding and foreground before reading device memory size. A new showing cannot reuse the result.
+
+This is **OS-supplied assist identity and OS-routed execution, not `AssistStructure` extraction**. The resulting profile is computed by EON, not supplied by Android. The platform details are in Android 15’s [`VoiceInteractionManagerService`](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/voiceinteraction/java/com/android/server/voiceinteraction/VoiceInteractionManagerService.java), [`VoiceInteractionManagerServiceImpl`](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/voiceinteraction/java/com/android/server/voiceinteraction/VoiceInteractionManagerServiceImpl.java) and [`VoiceInteractionSessionConnection`](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/voiceinteraction/java/com/android/server/voiceinteraction/VoiceInteractionSessionConnection.java).
+
+Use the signed APK and observer installation described below, on a fresh 3 GiB API 35 Google APIs x86_64 AVD. Select EON through Settings. Run the separate observer in both modes, changing **Use text from screen** through Android Settings between runs:
+
+```sh
+OBS=com.eon.assistant.keystoretest/com.eon.assistant.ProfileActionAcceptance
+"$ANDROID_HOME/platform-tools/adb" -s "$SERIAL" shell am instrument -w -r "$OBS"
+"$ANDROID_HOME/platform-tools/adb" -s "$SERIAL" shell am instrument -w -r -e policy denied "$OBS"
+```
+
+On `AE3A.240806.043/12960925` (enforcing, emulator in a loopback-only host network namespace, no host audio or cameras), the same APK passed `PASS-os-action` and `PASS-policy-denied`. The first observed the source execute and the assistant report `p0_mobile_ultralight`; the second observed a refusal and no source execution. Both opened a fresh ordinary assistant card with no retained result and verified `mDisabledShowContext=3`. `RECORD_AUDIO` remained ignored. An **observer-side** `dumpsys soundtrigger_middleware` listed only `AOSP fake STHAL`, architecture `injection`; `dumpsys voiceinteraction` listed no enrolled keyphrase models. No fake trigger was injected, and these shell diagnostics are not production capability APIs.
 
 ### 6.2 `MediaProjection` Token Lifecycle
 **Implemented on API 35+: grant lifecycle only.** Select EON as the digital assistant in Android Settings, open EON controls, choose **Review a no-output projection grant**, then explicitly open Android's picker. Choose **one app → EON**. The OS owns the scope choice; EON neither queries that scope nor reads anything from it. Assistant selection alone never starts the picker or a grant.

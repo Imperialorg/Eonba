@@ -148,6 +148,15 @@ class AssistantActivity : Activity() {
                     }
                 }
             }.also(column::addView)
+            column.addView(Button(this).apply {
+                id = R.id.profile_action_open
+                setText(R.string.profile_action_open)
+                filterTouchesWhenObscured = true
+                setOnClickListener {
+                    if (resumed && hasWindowFocus())
+                        startActivity(Intent(this@AssistantActivity, ProfileActionActivity::class.java))
+                }
+            })
             column.addView(TextView(this).apply { setText(R.string.voice_hud_help) })
             micPermissionStatus = TextView(this).also(column::addView)
             column.addView(Button(this).apply {

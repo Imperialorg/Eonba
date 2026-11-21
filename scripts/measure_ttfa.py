@@ -107,6 +107,10 @@ def main(argv=None) -> int:
     try:
         if not args.captures.is_dir():
             raise ValueError("capture directory does not exist")
+        trials = args.captures.resolve()
+        if trials.name == "trials" and (
+                (trials.parent / "session.json").exists() or (trials.parent / "muted-control.wav").exists()):
+            raise ValueError("rig session: use the --physical-session validator; WAVs alone omit responder outcomes")
         control = None
         if args.muted_control is not None:
             if not args.muted_control.is_file():

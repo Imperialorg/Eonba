@@ -4,5 +4,5 @@
     android:sessionService="com.eon.assistant.EonVoiceSessionService"
     android:recognitionService="unusedOnApi31AndLater"
     android:supportsAssist="true"
-    android:supportsLocalInteraction="false"
+    android:supportsLocalInteraction="true"
     android:supportsLaunchVoiceAssistFromKeyguard="false" />

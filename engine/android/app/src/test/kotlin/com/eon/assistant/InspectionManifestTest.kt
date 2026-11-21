@@ -86,7 +86,10 @@ class InspectionManifestTest {
         assertEquals("com.eon.assistant" + session.attr("name"), config.attr("sessionService"))
         assertTrue(config.attr("recognitionService").isNotBlank())
         assertEquals("true", config.attr("supportsAssist"))
-        assertEquals("false", config.attr("supportsLocalInteraction"))
+        assertEquals("true", config.attr("supportsLocalInteraction"))
+        val source = root("AndroidManifest.xml").elements("activity").single { it.attr("name") == ".ProfileActionActivity" }
+        assertEquals("false", source.attr("exported"))
+        assertTrue(source.elements("intent-filter").isEmpty())
         assertEquals("false", config.attr("supportsLaunchVoiceAssistFromKeyguard"))
         assertFalse(config.hasAttributeNS(android, "hotwordDetectionService"))
         assertFalse(config.hasAttributeNS(android, "visualQueryDetectionService"))

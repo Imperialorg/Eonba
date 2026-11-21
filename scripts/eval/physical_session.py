@@ -41,6 +41,16 @@ def check_control(control):
         raise ValueError("muted control exceeds threshold or lacks post-stimulus tail")
 
 
+def bridge_started(label, key, mode):
+    if mode == "driven":
+        if type(label.get(key)) is not bool:
+            raise ValueError(f"driven recording requires boolean {key}")
+        return label[key]
+    if key in label:
+        raise ValueError(f"passive recording cannot declare {key}")
+    return None
+
+
 def measure(directory):
     if directory is None:
         raise ValueError("no authorized synchronized physical session supplied")
@@ -53,11 +63,16 @@ def measure(directory):
         raise ValueError("physical provenance declaration required")
     if not all(isinstance(info.get(key), str) and info[key].strip() for key in ("route", "gains")):
         raise ValueError("describe the single capture route and fixed gains")
+    mode = info.get("mode")
+    if mode not in ("passive", "driven"):
+        raise ValueError("explicit passive or driven recording mode required")
     threshold = info.get("threshold_pcm")
     if type(threshold) is not int:
         raise ValueError("integer calibrated threshold required")
     control = checked_capture(directory / "muted-control.wav", threshold, info.get("control_pcm_sha256"))
     check_control(control)
+    if bridge_started(info, "control_bridge_started", mode) is False:
+        raise ValueError("driven muted control did not start a bridge")
 
     trials = directory / "trials"
     if trials.is_symlink() or not trials.is_dir():
@@ -68,6 +83,7 @@ def measure(directory):
         raise ValueError("trial inventory must cover exactly the entire trials directory")
     seen = {control.fingerprint}
     latencies = []
+    misses = {}
     by_scene = {scene: [] for scene in SCENES}
     for path in paths:
         label = inventory[path.name]
@@ -81,14 +97,25 @@ def measure(directory):
             if sample.fingerprint in seen:
                 raise ValueError("duplicate PCM recording")
             seen.add(sample.fingerprint)
-            latency = sample.latency_ms()
+            started = bridge_started(label, "bridge_started", mode)
+            latency = None
+            if started is False:
+                misses[path.name] = "no bridge started"
+            elif sample.first_output_end is None:
+                misses[path.name] = "no sustained speaker response"
+            else:
+                latency = sample.latency_ms()
         except INPUT_ERRORS as error:
             raise ValueError(f"{path.name}: {error}") from error
         latencies.append(latency)
         if label["scene"] in by_scene:
             by_scene[label["scene"]].append(latency)
-    device = acoustic.summarize(latencies)
-    noisy = {scene: {"trials": len(values), "max_ttfa_ms": max(values, default=None)}
+    if len(paths) < acoustic.MIN_TRIALS:
+        raise ValueError(f"need at least {acoustic.MIN_TRIALS} trials")
+    device = ({"passed": False, "trials": len(paths), "p50_ms": None, "p99_ms": None, "misses": misses}
+              if misses else acoustic.summarize(latencies))
+    noisy = {scene: {"trials": len(values), "misses": values.count(None),
+                     "max_ttfa_ms": None if None in values else max(values, default=None)}
              for scene, values in by_scene.items()}
     return {
         "manifest_sha256": hashlib.sha256(raw).hexdigest(),

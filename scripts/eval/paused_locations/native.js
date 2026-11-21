@@ -4,27 +4,11 @@
 // production eon-voice files. No project/program/adapter/breakpoint arguments.
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
-const { createHash } = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 const { once } = require('node:events');
 const assert = require('node:assert/strict');
 const { repo, workDirectory, editor } = require('./host');
-
-const project = path.join(repo, 'engine/core-rs/crates/eon-voice');
-const llvm = '/usr/lib/llvm-18/bin';
-const inputs = [
-  ['src/endpoint.rs', '24c839b1f80898e6bb29e1abe2a81c27b588768b65974815b8e7558c6b6e8a22', '-> Option<Self> {\n        let text = text.trim().trim_end_matches('],
-  ['src/pre_cognition.rs', '3fb0812fd2487460faa3c4abc7404c3e20d016e997573ad016d9bae9cf190a92', '&& let Some(hint) = ReflexHint::from_partial(text)'],
-];
-
-function checked(file, digest) {
-  const st = fs.lstatSync(file);
-  assert.ok(st.isFile() && st.size < 64 * 1024 && !(st.mode & 0o022));
-  const bytes = fs.readFileSync(file);
-  assert.equal(createHash('sha256').update(bytes).digest('hex'), digest);
-  return bytes.toString('utf8');
-}
+const { prepare, checked, inputs, llvm, project } = require('./subject');
 
 // Bounded, private stdio peer for this one scripted interaction. No reverse requests.
 async function* messages(stdout) {
@@ -50,38 +34,11 @@ async function* messages(stdout) {
 }
 
 async function verify(work) {
-  const env = { HOME: work, TMPDIR: work, XDG_CACHE_HOME: work, PATH: '/usr/bin:/bin',
-    LLDB_DEBUGSERVER_PATH: `${llvm}/lldb-server`, PYTHONNOUSERSITE: '1' };
-  const files = [];
-  const lines = [];
-  fs.mkdirSync(path.join(work, 'src'), { mode: 0o700 });
-  for (const [rel, digest, marker] of inputs) {
-    const file = path.join(project, rel);
-    const text = checked(file, digest);
-    const offset = text.indexOf(marker);
-    assert.ok(offset >= 0 && offset === text.lastIndexOf(marker));
-    files.push([file, text]);
-    lines.push(text.slice(0, offset + marker.length).split('\n').length);
-    fs.writeFileSync(path.join(work, rel), text);
-  }
-  fs.writeFileSync(path.join(work, 'main.rs'), `
-#[path = "src/endpoint.rs"] mod endpoint;
-#[path = "src/pre_cognition.rs"] mod pre_cognition;
-fn main() {
-    use pre_cognition::IntentPreview;
-    assert_eq!(IntentPreview::from_partial("how long"), Some(IntentPreview::Question));
-}
-`);
+  const { env, files, lines } = prepare(work);
   const guard = path.join(repo, 'engine/core-rs/crates/eon-cyber/fixtures/owned_dap/launch.c');
   fs.writeFileSync(path.join(work, 'guard.c'), checked(guard, '5381158e94b80aa431059c32dd963432c0f545c36b0519cc06e825fcd6ad2128'));
-  for (const [tool, args] of [
-    [`${llvm}/clang`, ['--no-default-config', '--ld-path=/usr/bin/ld', '-O2', 'guard.c', '-o', 'guard']],
-    [path.join(os.homedir(), '.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc'),
-      ['--edition=2024', '-g', '-C', 'opt-level=0', '-C', 'linker=/usr/bin/cc',
-        '--remap-path-prefix', `${path.join(work, 'src')}=${path.join(project, 'src')}`, path.join(work, 'main.rs'), '-o', 'preview']],
-  ]) {
-    assert.equal(spawnSync(tool, args, { cwd: work, env, stdio: 'ignore', timeout: 30_000 }).status, 0);
-  }
+  assert.equal(spawnSync(`${llvm}/clang`, ['--no-default-config', '--ld-path=/usr/bin/ld', '-O2', 'guard.c', '-o', 'guard'],
+    { cwd: work, env, stdio: 'ignore', timeout: 30_000 }).status, 0);
 
   const guardProcess = spawn(path.join(work, 'guard'), [], { cwd: work, env, stdio: ['pipe', 'pipe', 'ignore'] });
   const closed = once(guardProcess, 'close');

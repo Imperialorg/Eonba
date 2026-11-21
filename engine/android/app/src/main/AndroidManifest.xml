@@ -23,6 +23,9 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+        <activity android:name=".ProfileActionActivity" android:exported="false"
+            android:enabled="@bool/voice_hud_supported" android:noHistory="true"
+            android:excludeFromRecents="true" />
         <activity android:name=".ProjectionGrantActivity" android:exported="false"
             android:launchMode="singleTask" android:taskAffinity="com.eon.assistant.grant"
             android:enabled="@bool/projection_grant_supported" />

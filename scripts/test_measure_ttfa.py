@@ -61,6 +61,16 @@ class LatencyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no sustained"):
             latency_ms(self.fixture(frames=8 * 204 + 1), 500)
 
+    def test_wav_only_cli_does_not_bypass_rig_inventory(self):
+        trial = self.fixture()
+        trials = trial.parent / "trials"
+        trials.mkdir()
+        trial.rename(trials / trial.name)
+        (trial.parent / "session.json").write_text("{}")
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(main([str(trials), "--threshold", "500"]), 2)
+        self.assertIn("--physical-session", errors.getvalue())
+
     def test_muted_control_detects_bleed_short_tail_and_mismatched_clocks(self):
         trial = self.fixture()
         for options, expected in [

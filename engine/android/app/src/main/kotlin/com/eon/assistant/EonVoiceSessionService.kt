@@ -40,6 +40,11 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
     private var microphone: SessionMic? = null
     private var contextDisplay: ControlsConsent.Ticket? = null
     private var contextNotice: String? = null
+    private var firstCandidate = ProfileActionReview.candidate()
+    private var actionReview: ProfileActionReview? = null
+    private var assistId: ActivityId? = null
+    private var sourceId: ActivityId? = null
+    private var actionStop: CancellationSignal? = null
     private val contextGuard = object : Runnable {
         override fun run() {
             val receipt = contextDisplay ?: return
@@ -81,15 +86,18 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
     override fun onPrepareShow(args: Bundle?, showFlags: Int) {
         clearShowing()
         val eligible = eligible()
+        val review = ProfileActionReview.take(firstCandidate, showFlags, args)
+        firstCandidate = null
         val ticket = if (eligible) ControlsAssist.takeShow(args, showFlags) else null
-        val allowed = surface.show(ticket != null || userInvokedVoiceHud(showFlags), eligible)
+        val allowed = surface.show(review != null || ticket != null || userInvokedVoiceHud(showFlags), eligible)
+        if (allowed) actionReview = review
         if (allowed && ticket != null) {
             contextDisplay = ticket
             if (contextSharingEnabled()) {
                 contextNotice = context.getString(if (ticket.timing) R.string.voice_context_timed else R.string.voice_context_untimed)
             } else unavailableContext()
         } else ControlsAssist.cancel(ticket)
-        setUiEnabled(allowed)
+        setUiEnabled(allowed && actionReview == null)
     }
 
     override fun onShow(args: Bundle?, showFlags: Int) {
@@ -107,11 +115,80 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
         if (requireVisible()) {
             render()
             if (contextDisplay != null) main.post(contextGuard)
+            actionReview?.let { review ->
+                main.postDelayed({
+                    if (actionReview === review && !review.presenting) closeHud()
+                }, ProfileActionReview.TIMEOUT)
+            }
         }
     }
 
-    override fun onHandleAssist(state: AssistState) = Unit
+    // A local show is scoped by Android to the starting activity token. Do not open any
+    // AssistData, AssistStructure, AssistContent, screenshot or visible-activity list.
+    override fun onHandleAssist(state: AssistState) {
+        val r = actionReview ?: return
+        if (!authorized(r) || !state.isFocused || state.count != 1 || assistId != null) return
+        assistId = state.activityId
+        discover(r)
+    }
     override fun onHandleScreenshot(screenshot: Bitmap?) = Unit
+
+    override fun onDirectActionsInvalidated(activityId: ActivityId) {
+        val r = actionReview ?: return
+        if (!r.notified || !r.valid() || r.presenting || sourceId != null) return
+        // Wait for the owner's local interactor before transferring focus, even for denial.
+        if (!contextSharingEnabled()) { presentAction(r, null); return }
+        if (!authorized(r)) return
+        sourceId = activityId
+        discover(r)
+    }
+
+    private fun authorized(r: ProfileActionReview) = actionReview === r && !r.presenting && r.valid() &&
+        surface.canUse(eligible()) && contextSharingEnabled()
+
+    private fun discover(r: ProfileActionReview) {
+        val id = assistId ?: return
+        if (id != sourceId || !authorized(r) || r.discovering) return
+        r.discovering = true
+        r.permitted = { authorized(r) }
+        val stop = CancellationSignal().also { actionStop = it }
+        try {
+            requestDirectActions(id, stop, context.mainExecutor) { actions ->
+                if (!authorized(r)) return@requestDirectActions
+                val action = if (r.offered) actions.singleOrNull() else null
+                if (action?.id != ProfileActionReview.ACTION) return@requestDirectActions presentAction(r, null)
+                r.performing = true
+                try {
+                    performDirectAction(action, Bundle().apply { putBinder(ProfileActionReview.KEY, r.token) },
+                        stop, context.mainExecutor) { result ->
+                        if (authorized(r)) presentAction(r, if (r.completed) result?.getString(ProfileActionReview.RESULT) else null)
+                    }
+                } catch (_: RuntimeException) { presentAction(r, null) }
+            }
+        } catch (_: RuntimeException) { presentAction(r, null) }
+    }
+
+    private fun presentAction(r: ProfileActionReview, profile: String?) {
+        if (actionReview !== r || !requireVisible() || r.presenting) return
+        if (!r.valid()) { closeHud(); return }
+        r.presenting = true
+        r.permitted = null
+        contextNotice = if (profile != null && contextSharingEnabled())
+            context.getString(R.string.profile_action_result, profile)
+            else context.getString(R.string.profile_action_unavailable)
+        setUiEnabled(true)
+        render()
+        main.postDelayed({ if (actionReview === r) closeHud() }, 30_000)
+        if (profile != null) main.post(actionResultGuard)
+    }
+
+    private val actionResultGuard = object : Runnable {
+        override fun run() {
+            val r = actionReview ?: return
+            if (r.source.review !== r || !contextSharingEnabled() || !eligible()) closeHud()
+            else main.postDelayed(this, 300)
+        }
+    }
 
     private fun discardContext() {
         ControlsAssist.cancel(contextDisplay)
@@ -334,6 +411,12 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
     }
 
     private fun clearShowing() {
+        actionReview?.permitted = null
+        actionReview = null
+        actionStop?.cancel()
+        actionStop = null
+        assistId = null
+        sourceId = null
         discardContext()
         clearMic()
         surface.hide()
