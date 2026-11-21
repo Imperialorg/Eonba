@@ -306,13 +306,12 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Unit Tests**: Android test harness with simulated UI hierarchies.
   - **Verified on stock Android for EON's private window**: The demo locates its counter, sample list and unsaved input by accessible resource ID, class and window. Input lookup reports presence only; it survived child reordering and rejected a sensitive field, a wrong class and a same-ID replacement. On separate API 35 AVDs the same signed APK passed both the denied scenario and operator-approved native and local hit-test click/scroll routes. Cancellation produced no change. No foreign windows, text readback or global gesture injection.
 
-- [ ] **Task 9.4: Persistent Overlay HUD & Visualizer**
+- [x] **Task 9.4: Persistent Overlay HUD & Visualizer**
   - **Directory**: `clients/android/overlay/`
   - **Files**: `src/main/kotlin/com/eon/android/ui/EonOverlayManager.kt`, `AudioVisualizerView.kt`
   - **Requirements**: Persistent unobtrusive floating presence. Visualizes thought state, active listening wave, and task completion notices.
-  - **Verified subset**: Android opened the selected assistant's card on API 35. A visible user-started analysis of a built-in tone produced 11 levels (peak 42% RMS); Stop/Clear, Back and a fresh invocation passed. The card can count EON's own Android activity tasks. Neither the tone nor those counts establish a microphone waveform or a live workflow feed.
-  - **Live meter**: On setup-complete API 35 emulators, the selected card refused Start without reviewed access. With reviewed access, a private virtual input produced 12 half-second levels (highest RMS 43%). The observer saw EON's recording operation active during measurement and inactive after completion, Stop and dismissal. A fresh card opened with the meter off.
-  - **Workflow notice**: On API 35, tapping **Check model profile** in the selected assistant card completed one kernel task. The card showed the count and the expected profile; after dismissal, the next card had neither. This verifies notices for that user-started workflow, not a persistent overlay outside the assistant session.
+  - **Verified on Android API 35**: After a user tap, the 278 px passive card stayed visible over Home and showed the status and completion of a kernel profile check. A tap through its center reached the underlying test app; Android hid the card when that app protected its window. Revoking overlay access removed the window, service and notification.
+  - **Live meter**: Granting microphone access did not start recording. A separate tap started a six-second take. The floating graph showed 12 half-second levels from a private virtual input (peak 50% RMS) while Android reported `RECORD_AUDIO` active. Capture ended on completion, notification Stop and screen-off. No physical microphone or speaker latency is claimed.
 
 - [ ] **Task 9.5: Native Digital Assistant Role & OS Survival (`ROLE_ASSISTANT`)**
   - **Directory**: `clients/android/app/`

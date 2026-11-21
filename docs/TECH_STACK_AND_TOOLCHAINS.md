@@ -212,6 +212,20 @@ Use separate instrumentation gates for the stock app and the selected assistant'
   with snapshots of EON's Android recording operation. It cannot see activity between
   snapshots, read PCM samples or measure power to a physical microphone.
   A build, permission dialog, silent input or built-in tone result does not verify capture.
+* **Floating HUD (separate from the selected assistant):** On disposable, setup-complete
+  API 35 AVDs, install the matching debug target and the signed test APK from
+  `python3 app/keystore_device_test.py --build-only`. Use only a private virtual
+  source for the microphone AVD. Do not pregrant microphone access or connect a host mic.
+  Set `TEST=com.eon.assistant.keystoretest/com.eon.assistant.FloatingHudAcceptance`.
+  Run `adb -s "$SERIAL" shell am instrument -w -r "$TEST"` and follow the printed
+  `awaiting` checkpoints: review display and notification access in Android, tap
+  **Start floating HUD**, return Home, run the notification profile check and tone,
+  stop, start fresh, then turn the screen off. Expect `floatingHud=PASS-operator`.
+  Separately run `adb -s "$MIC_SERIAL" shell am instrument -w -r -e mode mic "$TEST"`.
+  From the floating controls, review while-in-use microphone access and tap
+  **Start 6-second live mic** for each take. Let the first finish, stop the second
+  using the notification and turn the screen off during the third. Expect
+  `floatingHud=PASS-mic` and `INSTRUMENTATION_CODE: -1`, not just a successful `adb` exit.
 
 **Optional process CPU measurement:** In EON, check **Measure EON process CPU during the next profile check**, then tap **Check model profile**. The box clears after one use or when leaving the activity. `SelfProcessCpu.measure` brackets that synchronous action with two `android.os.Process.getElapsedCpuTime()` reads only when requested. The result is a delta in **CPU milliseconds across all threads of the current app process**, not action latency, CPU percentage, or time attributable solely to that code. Equal positive counters can yield a genuine 0 ms at the counter's resolution. Missing/nonpositive, decreasing or out-of-order samples and intervals exceeding 10 seconds are unavailable. Neither sample leaves the call stack as a resumable baseline, so a process restart or reboot cannot produce a delta against old data. No listener, permission, persistent record or network access is needed.
 
