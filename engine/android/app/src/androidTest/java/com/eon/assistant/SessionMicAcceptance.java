@@ -9,11 +9,15 @@ import android.content.Context;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import android.os.SystemClock;
 import android.text.TextUtils;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
 import java.util.List;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Matcher;
@@ -218,6 +222,61 @@ public final class SessionMicAcceptance extends Instrumentation {
         });
     }
 
+    private int eonPid() {
+        // The shipping components share EON's default process. Query no other process's data.
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(
+                new ParcelFileDescriptor.AutoCloseInputStream(ui.executeShellCommand("pidof " + EON))))) {
+            String pid = r.readLine();
+            if (pid == null) return 0;
+            require(pid.matches("[1-9][0-9]*") && r.readLine() == null);
+            return Integer.parseInt(pid);
+        } catch (IOException e) { throw new AssertionError(e); }
+    }
+
+    private void processDeath(int original, long deadline) {
+        step = "active-original-process";
+        require(eonPid() == original && active());
+        int oldWindow = cardWindow;
+        // The operator sends SIGKILL as the debug app's UID. Stop, hide, or natural completion
+        // in a still-live process is not evidence that death stopped a running take.
+        until("active-process-death", deadline, () -> {
+            boolean running = active();
+            if (eonPid() != original) return true;
+            require(running);
+            return false;
+        });
+        until("death-record-op-release", Math.min(deadline, now() + RELEASE_MS), () -> !active());
+        require(startClick > 0 && !toggleClicked && stopClick == 0);
+        ui.setOnAccessibilityEventListener(null);
+        until("old-card-gone", now() + RELEASE_MS, () -> {
+            require(!active());
+            return !sameCard(root());
+        });
+        fresh(); // Poll for inactivity through the operator's next invocation and expansion.
+        step = "replacement-process";
+        int replacement = eonPid();
+        require(replacement > 0 && replacement != original && cardWindow != oldWindow);
+        require(getTargetContext().getPackageManager().checkPermission(android.Manifest.permission.RECORD_AUDIO,
+                EON) == PackageManager.PERMISSION_GRANTED);
+        long quiet = now() + QUIET_MS;
+        until("replacement-idle", quiet + RELEASE_MS, () -> {
+            require(!active());
+            AccessibilityNodeInfo r = root();
+            require(sameCard(r) && cleanExpanded(r));
+            return now() >= quiet;
+        });
+        startClick = stopClick = 0;
+        toggleClicked = false;
+        watchCardClicks();
+        until("replacement-start-denied", now() + MANUAL_MS, () -> {
+            require(!active());
+            AccessibilityNodeInfo r = root();
+            require(sameCard(r));
+            return startClick > 0 && terminal(r); // Denied despite retained OS permission.
+        });
+        require(eonPid() == replacement);
+    }
+
     private void observe() {
         until("idle-card", now() + MANUAL_MS, () -> {
             require(!active());
@@ -226,6 +285,9 @@ public final class SessionMicAcceptance extends Instrumentation {
             cardWindow = r.getWindowId();
             return true;
         });
+        boolean death = "process-death".equals(mode);
+        int original = death ? eonPid() : 0;
+        if (death) require(original > 0);
         require(!active()); // start timing from a verified clean, inactive card
         watchCardClicks();
         armed = true;
@@ -265,7 +327,8 @@ public final class SessionMicAcceptance extends Instrumentation {
                 progressUptime = SystemClock.uptimeMillis();
                 return true;
             });
-            finishTake(start, end);
+            if (death) processDeath(original, end);
+            else finishTake(start, end);
         }
         long terminalUptime = SystemClock.uptimeMillis();
         long quiet = now() + QUIET_MS;
@@ -287,7 +350,8 @@ public final class SessionMicAcceptance extends Instrumentation {
         try {
             require(arguments != null && arguments.size() == 1);
             mode = arguments.getString("mode");
-            require("denied".equals(mode) || "complete".equals(mode) || "stop".equals(mode) || "hide".equals(mode));
+            require("denied".equals(mode) || "complete".equals(mode) || "stop".equals(mode) || "hide".equals(mode)
+                    || ("process-death".equals(mode) && Build.VERSION.SDK_INT >= 35));
             step = "preflight";
             Context test = getTargetContext();
             require(Build.VERSION.SDK_INT >= 34 && ("ranchu".equals(Build.HARDWARE) || "goldfish".equals(Build.HARDWARE))

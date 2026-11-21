@@ -109,6 +109,11 @@ MIC_PHASES = {
             "and a nonzero virtual input, tap Start. Half a second after the first nonzero level, dismiss "
             "without collapsing or tapping Stop. Leave the "
             "controls visible for a second, invoke a fresh card, pause, then expand without starting.",
+    "process-death": "On API 35+, with permission reviewed and a nonzero virtual input, tap Start. "
+                     "After the first nonzero level, send SIGKILL only to EON's verified debug PID "
+                     "using run-as. Do not dismiss or stop the take. After the old card disappears, "
+                     "invoke a new card, pause, expand and wait at least one second before tapping Start. "
+                     "Leave the refusal visible. Do not change the retained OS permission.",
 }
 
 
@@ -146,7 +151,8 @@ def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, stock_assi
 
     selected_session = preconfigured_hud or preconfigured_workflow or preconfigured_context or mic_phase is not None
     preconfigured = preconfigured_allowed or selected_session
-    require_stock_emulator(adb, serial, 34 if demo_denied or stock_hud or stock_assistant or preconfigured else 28)
+    minimum_api = 34 if demo_denied or stock_hud or stock_assistant or preconfigured else 28
+    require_stock_emulator(adb, serial, 35 if mic_phase == "process-death" else minimum_api)
     if selected_session:
         require_setup_complete(adb)
     if context_denied and (not preconfigured_context or

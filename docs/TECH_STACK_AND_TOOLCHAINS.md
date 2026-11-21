@@ -212,6 +212,43 @@ Use separate instrumentation gates for the stock app and the selected assistant'
   with snapshots of EON's Android recording operation. It cannot see activity between
   snapshots, read PCM samples or measure power to a physical microphone.
   A build, permission dialog, silent input or built-in tone result does not verify capture.
+* **Selected-role microphone, process death (9.5):** Use the APK build above with
+  `ANDROID_HOME=/usr/local/lib/android/sdk`, JDK 17, Rust 1.100.0 and cargo-ndk 4.1.2.
+  The run used emulator 37.3.10 (16970787), `system-images;android-35;google_apis;x86_64`
+  rev 9, enforcing build `AE3A.240806.043/12960925`. Run adb, PulseAudio and the emulator
+  as the KVM-capable user inside a fresh Linux network namespace with **only `lo` up**,
+  no route, physical audio or cameras. In that namespace, set `D` to a new private build
+  directory; use a fresh `pixel_4` AVD named `eon-mic-death` in `$D/avd`:
+  ```sh
+  export ANDROID_AVD_HOME="$D/avd" ANDROID_USER_HOME="$D/user" ANDROID_ADB_SERVER_PORT=5086
+  export PULSE_RUNTIME_PATH="$D/pulse" PULSE_SERVER="unix:$D/pulse/native" PULSE_SOURCE=eon_fixture PULSE_SINK=eon_discard
+  export QEMU_PA_SERVER="$PULSE_SERVER" QEMU_PA_SOURCE="$PULSE_SOURCE" QEMU_PA_SINK="$PULSE_SINK"
+  mkdir -m 700 "$ANDROID_AVD_HOME" "$ANDROID_USER_HOME" "$D/pulse"
+  pulseaudio -n --daemonize=no --exit-idle-time=-1 --load="module-native-protocol-unix socket=$D/pulse/native" \
+    --load='module-null-sink sink_name=eon_discard' --load='module-sine-source source_name=eon_fixture frequency=440' &
+  printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n eon-mic-death \
+    -k 'system-images;android-35;google_apis;x86_64' --device pixel_4
+  "$ANDROID_HOME/platform-tools/adb" start-server
+  xvfb-run -a -f "$D/auth" -s '-screen 0 1280x1280x24 -nolisten tcp' "$ANDROID_HOME/emulator/emulator" \
+    -avd eon-mic-death -port 5586 -no-snapshot -no-boot-anim -gpu swiftshader_indirect -qt-hide-window \
+    -camera-front none -camera-back none -audio pa -allow-host-audio -accel on
+  ```
+  Use the full Qt emulator on Xvfb; this release's `-no-window` binary did not initialize
+  Pulse. Before granting access, match QEMU's client and source-output to the `eon_fixture`
+  index (`pactl list clients short`, `pactl list sources short`, `pactl list source-outputs short`).
+  Install the target and tap **Request microphone permission → While using the app** before
+  selecting EON in Android's Default digital assistant app settings. Return to EON controls.
+  Run `python3 app/keystore_device_test.py --preconfigured-mic-serial emulator-5586 --mic-phase process-death`
+  as above. Invoke via the system Assist key, expand and pause. Save the single positive
+  PID from `adb -s emulator-5586 shell pidof com.eon.assistant`, then tap **Start**.
+  After the first nonzero level (~1.5 s), verify the PID is unchanged and the package's
+  `cmd appops get com.eon.assistant RECORD_AUDIO` shows `(running)`. Send
+  `adb -s emulator-5586 shell run-as com.eon.assistant kill -9 "$pid"`; do not dismiss or
+  force-stop. After the old card disappears, invoke again, pause, expand, wait at least
+  one second and tap **Start**. `micHud=PASS-process-death` verified AppOps release within
+  1 s of detecting death, a different PID and idle card with no levels, and refusal of the
+  new tap despite the retained OS grant. Omitting SIGKILL failed at `active-process-death`.
+  Stop the private services and discard the AVD and namespace after the run.
 * **Floating HUD (separate from the selected assistant):** On disposable, setup-complete
   API 35 AVDs, install the matching debug target and the signed test APK from
   `python3 app/keystore_device_test.py --build-only`. Use only a private virtual

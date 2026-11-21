@@ -170,7 +170,7 @@ class DeviceModes(unittest.TestCase):
                 ][:len(values)])
 
     def test_mic_observes_only_requested_phase_and_leaves_existing_app_alone(self):
-        for phase in ("denied", "complete", "stop", "hide"):
+        for phase in ("denied", "complete", "stop", "hide", "process-death"):
             with self.subTest(phase=phase):
                 parsed = parse_args(["--preconfigured-mic-serial", "emulator-5556", "--mic-phase", phase])
                 self.assertEqual(parsed.mic_phase, phase)
@@ -195,7 +195,7 @@ class DeviceModes(unittest.TestCase):
                       patch("keystore_device_test.require_preconfigured_apk") as identity,
                       contextlib.redirect_stdout(io.StringIO())):
                     run(Path("/sdk"), parsed.preconfigured_mic_serial, Path("/test.apk"), mic_phase=phase)
-                self.assertEqual(emulator.call_args.args[1:], ("emulator-5556", 34))
+                self.assertEqual(emulator.call_args.args[1:], ("emulator-5556", 35 if phase == "process-death" else 34))
                 setup.assert_called_once()
                 identity.assert_called_once()
                 self.assertEqual(len(calls), 4)
