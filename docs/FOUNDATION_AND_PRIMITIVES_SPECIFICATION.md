@@ -205,6 +205,17 @@ flowchart LR
 - **Windows**: The Rust broker retains only current-user DPAPI ciphertext and the expected plaintext length between calls. It does not require or attest a TPM.
 - **Android**: The app host uses a non-exportable AndroidKeyStore AES-256-GCM key for a one-use inspection proof. The key can outlive the app process; proof entries and grants cannot. This is not a Rust child-stdin backend. Neither non-exportability nor an emulator test establishes TEE or StrongBox backing.
 
+**Verifying DPAPI.** On native Windows, build the locked production dependencies
+and require `windows_dpapi_owner_grants_and_child_stdin` and
+`windows_dpapi_broker_lifetime_and_invalid_ciphertext` to each report `ok`.
+The Windows job in [run 44702429741](https://github.com/Imperialorg/Eonba/actions/runs/44702429741/job/136180858787)
+started a test executable but was cancelled. Although its `windows.rs` matches
+revision `26344a1`, its child-stdin test helper, `eon-primitives` sources and
+workspace lockfile do not. It also predates the [payload-free ETW test](../engine/core-rs/crates/eon-cyber/tests/review_etw.ps1).
+[Run 44909840253](https://github.com/Imperialorg/Eonba/actions/runs/44909840253)
+on `26344a1` reported `action_required` with zero jobs and zero artifacts.
+Neither run establishes native success.
+
 ### 6.3 Late-Binding Resolution in Memory
 The host provisions or rotates an owner-scoped handle with `MANAGE_CREDENTIALS`. At execution time it calls `CredentialBroker::bind_to_stdin` with the selected child's pipe. Both `USE_CREDENTIALS` and `EXECUTE_PROCESS` are checked before the store is read. The broker writes into the pipe and wipes its transient buffer, including on write failure. It does not return plaintext to the caller or control what the child does with it.
 
