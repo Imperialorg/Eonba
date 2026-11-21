@@ -25,6 +25,7 @@ internal const val ASSISTANT_ROLE_REQUEST = 1
 /** ACTION_ASSIST launches a normal, foreground activity. It doesn't inspect the incoming intent. */
 class AssistantActivity : Activity() {
     private lateinit var measureNextProfile: CheckBox
+    private var measureUidTraffic: CheckBox? = null
     private lateinit var roleStatus: TextView
     private lateinit var requestRole: Button
     private lateinit var inspectionStatus: TextView
@@ -57,25 +58,27 @@ class AssistantActivity : Activity() {
             setOnCheckedChangeListener { _, _ -> resetContextReview() }
         }
         column.addView(measureNextProfile)
+        if (Build.VERSION.SDK_INT >= 35) {
+            measureUidTraffic = CheckBox(this).apply {
+                text = "Compare EON’s platform UID traffic counters during the next profile check"
+                isSaveEnabled = false
+                filterTouchesWhenObscured = true
+            }.also(column::addView)
+        }
         column.addView(Button(this).apply {
             text = "Check model profile"
+            filterTouchesWhenObscured = true
             setOnClickListener {
-                val optedIn = measureNextProfile.isChecked
+                val cpu = measureNextProfile.isChecked
+                val traffic = measureUidTraffic?.isChecked == true && resumed && hasWindowFocus()
                 measureNextProfile.isChecked = false
-                val delta = SelfProcessCpu.measure(optedIn) {
-                    val info = ActivityManager.MemoryInfo()
-                    getSystemService(ActivityManager::class.java).getMemoryInfo(info)
-                    result.text = try {
-                        "Model profile: ${selectModelProfile(info.totalMem / 1_000_000_000.0)}"
-                    } catch (_: BridgeException) {
-                        "Could not select a profile for this device."
-                    } catch (_: LinkageError) {
-                        "The native bridge could not be loaded."
-                    }
-                }
-                if (optedIn) {
-                    result.append(if (delta.isPresent) "\nEON process CPU: ${delta.asLong} ms."
-                                  else "\nEON process CPU unavailable.")
+                measureUidTraffic?.isChecked = false
+                val delta = SelfUidTraffic.measure(traffic) { checkModelProfile(cpu, result) }
+                if (traffic) {
+                    result.append(if (delta.isPresent)
+                        "\nPlatform UID counter change: ${delta.get().rxBytes} B received, ${delta.get().txBytes} B sent." +
+                            " Android may cache these totals; they cover the whole UID, not just this action."
+                        else "\nPlatform UID counters unavailable or no established baseline.")
                 }
             }
         })
@@ -216,7 +219,10 @@ class AssistantActivity : Activity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (!hasFocus) resetContextReview()
+        if (!hasFocus) {
+            resetContextReview()
+            measureUidTraffic?.isChecked = false
+        }
         if (Build.VERSION.SDK_INT >= 35) ProjectionGrantActivity.launcherFocus(this, hasFocus)
     }
 
@@ -231,6 +237,24 @@ class AssistantActivity : Activity() {
     }
 
     private companion object { const val MIC_REQUEST = 2 }
+
+    private fun checkModelProfile(cpu: Boolean, result: TextView) {
+        val delta = SelfProcessCpu.measure(cpu) {
+            val info = ActivityManager.MemoryInfo()
+            getSystemService(ActivityManager::class.java).getMemoryInfo(info)
+            result.text = try {
+                "Model profile: ${selectModelProfile(info.totalMem / 1_000_000_000.0)}"
+            } catch (_: BridgeException) {
+                "Could not select a profile for this device."
+            } catch (_: LinkageError) {
+                "The native bridge could not be loaded."
+            }
+        }
+        if (cpu) {
+            result.append(if (delta.isPresent) "\nEON process CPU: ${delta.asLong} ms."
+                          else "\nEON process CPU unavailable.")
+        }
+    }
 
     private fun openSettings(action: String) {
         try {
@@ -313,6 +337,7 @@ class AssistantActivity : Activity() {
         if (Build.VERSION.SDK_INT >= 31) ControlsAssist.cancelSource(contextSource)
         resetContextReview()
         measureNextProfile.isChecked = false
+        measureUidTraffic?.isChecked = false
         InspectionAccess.cancelPendingConfirmation()
         consent?.dismiss()
         consent = null
