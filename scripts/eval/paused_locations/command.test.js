@@ -148,6 +148,29 @@ test('rejects malformed or oversized replies and never relays adapter errors', a
   assert.ok(h.messages.every(msg => !msg.includes('SENSITIVE') && !msg.includes(h.root)));
 });
 
+test('labels only enabled conditional source breakpoints on selected frame lines, without evaluation', async t => {
+  const h = setup(t);
+  h.v.SourceBreakpoint = class {};
+  const point = (line, opts = {}) => Object.assign(new h.v.SourceBreakpoint(), {
+    enabled: true, location: { uri: h.docs[0].uri, range: { start: { line } } }, ...opts,
+  });
+  const unrelated = point(0);
+  Object.defineProperty(unrelated, 'condition', { get() { throw Error('unselected condition was read'); } });
+  for (const opts of [{ condition: 'never expose this' }, { hitCondition: '7' }]) {
+    h.v.debug.breakpoints = [unrelated, point(2, opts)];
+    await h.command();
+    assert.equal(h.messages.at(-1), 'two words.rs:3 [conditional breakpoint configured]');
+  }
+  for (const points of [[point(2, { condition: 'private', enabled: false })],
+    [point(2, { logMessage: 'private', condition: 'private' })], [point(2)], Array(257).fill(point(2))]) {
+    h.v.debug.breakpoints = points;
+    await h.command();
+    assert.equal(h.messages.at(-1), 'two words.rs:3');
+  }
+  assert.equal(h.calls.length, 6);
+  assert.ok(h.calls.every(([cmd]) => cmd === 'stackTrace'));
+});
+
 test('re-checks focus, exact document/version and files across consent and the outstanding request', async t => {
   for (const when of ['picker', 'reply']) {
     for (const change of [

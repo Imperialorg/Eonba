@@ -30,10 +30,27 @@ function locations(body, selected) {
         typeof source.path !== 'string' || source.path.length > 4096) continue;
     const item = selected.find(s => s.file === source.path);
     if (item && Number.isSafeInteger(frame.line) && frame.line >= 1 && frame.line <= item.doc.lineCount) {
-      rows.push(`${item.label}:${frame.line}`);
+      rows.push({ item, line: frame.line });
     }
   }
   return rows;
+}
+
+// Editor configuration, not the reason for the stop. Never send an expression to the adapter.
+function describe(v, rows) {
+  const configured = new Set();
+  const points = v.debug.breakpoints;
+  if (Array.isArray(points) && points.length <= 256) {
+    for (const point of points) {
+      if (!(point instanceof v.SourceBreakpoint) || !point.enabled) continue;
+      const file = localPath(point.location.uri);
+      const line = point.location.range.start.line + 1;
+      if (!rows.some(row => row.item.file === file && row.line === line)) continue;
+      if (!point.logMessage && (point.condition || point.hitCondition)) configured.add(`${file}:${line}`);
+    }
+  }
+  return rows.map(({ item, line }) => `${item.label}:${line}` +
+    (configured.has(`${item.file}:${line}`) ? ' [conditional breakpoint configured]' : ''));
 }
 
 function register(v) {
@@ -98,7 +115,7 @@ function register(v) {
       const after = await Promise.all(selected.map(s => fileStamp(root, s.file)));
       checkEditor();
       if (!after.every((s, i) => s === before[i])) throw Error();
-      await tell(rows.length ? rows.join('\n') : 'No selected file matched the first 12 frames.');
+      await tell(rows.length ? describe(v, rows).join('\n') : 'No selected file matched the first 12 frames.');
     } catch {
       await tell(unavailable); // Never surface debugger messages, exceptions, paths or source text.
     } finally {
