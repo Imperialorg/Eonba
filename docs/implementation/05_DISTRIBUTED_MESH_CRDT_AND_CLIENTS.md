@@ -86,6 +86,82 @@ Eon/
 | **Class 2 (CRDT Deltas / Keyframes)** | Bidirectional stream, `send.set_priority(50)` | Cap `4 MiB` per frame | Coalesced in `25 ms` batches during active voice turns. |
 | **Class 3 (Model Weights / Build Blobs)** | `iroh-blobs` verified BLAKE3 Bao tree streams, `send.set_priority(0)` | Chunked resumable | Application-level `Semaphore` throttles chunk reads to `25%` link rate whenever Class 0 datagrams or Class 1 streams were active in the past `200 ms`. |
 
+#### Private WAN path-change test (Linux)
+
+`WanEndpoint::open` and `open_with_relay_root` remain **relay-only** and check reciprocal Ed25519 pins. The latter trusts only the supplied DER CA for the HTTPS relay. `paths()` reads counters without sending traffic. The native iroh IP transport used for the QAD test is **test-only**: a peer pin and iroh's publication filter do not constrain peer-advertised IP candidates. The scoped constructor described below uses a different transport.
+
+Run `scripts/test_wan_nat.sh` as the build user on a machine that permits `sudo ip netns`, veth, bridge, conntrack/SNAT and private UDP/TCP. The script creates five namespaces with no uplink or default route. Two peers bootstrap through one privately certified relay behind independent stateful NATs without port forwarding. The relay also provides iroh 1.4's QUIC address discovery (QAD, **not** RFC STUN). After verifying relay transit the fixture opens the private peer route, notifies iroh of the network change, and verifies a 64 KiB transfer on the translated peer sockets. It then drops only the direct routes. It requires the same connection to carry the four typed classes after returning to the relay, with peer path byte deltas and independent forwarding counters. This is not a physical 5G/Wi-Fi handoff.
+
+Class 0 sends numbered 640-byte PCM datagrams every 20 ms, even while the reliable streams stall. `cut` spans route impairment through confirmed relay selection and the start of post-cut counter collection. The deadline is **one-way, application send to peer decode, strictly under 5 ms for every attempt during the cut**. A missing datagram misses the deadline. The roles share Linux `CLOCK_MONOTONIC`; echo RTT is measured and reported separately. Percentiles use received samples only; counts include all attempts. The default exit code gates connectivity, not latency. Add `--require-voice-deadline` to gate both. Raw per-sequence logs, stream receipts and packet counters persist in the printed `target/wan-nat-*` directory on success or failure; ephemeral keys are removed.
+
+The WAN sender budgets 1,150 bytes for unsent datagrams. The receiver budgets 1,200 bytes including queue overhead: one maximum-size legal chunk fits, but not two ordinary 640-byte PCM chunks. A slow reader drops the oldest arrivals rather than accumulating a playback backlog. Smaller frames can share either budget. Neither budget checks frame age or sequence order, or retracts in-flight data.
+
+Run the strict test first with default timing, then add `--short-path-timeout`. Only the direct-capable test endpoints use the shorter profile: 250 ms path keepalive and 1 s default path idle timeout instead of 5 s and 15 s. iroh sets the relay path's idle timeout separately. Neither run signals a network change at the cut. Shorter timers can cost idle traffic and abandon a temporarily slow path; neither public constructor changes its timers.
+
+| Cut phase on the same isolated topology | Attempts | Arrived <5 ms | Arrived late | No receipt | One-way p95 among arrivals | Longest peer decode gap overlapping cut |
+|---|---:|---:|---:|---:|---:|---:|
+| Before bounding the sender | 754 | 4 | 730 | 20 | 13,864.779 ms | Not recorded |
+| Bounded sender only | 754 | 5 | 0 | 749 | 2.801 ms | Not recorded |
+| Both queues bounded, default path timing | 756 | 6 | 1 | 749 | 13.908 ms | 15,013.569 ms |
+| Both queues bounded, short path timing | 54 | 5 | 0 | 49 | 1.747 ms | 1,002.226 ms |
+
+All four runs migrated without reconnecting and failed the strict deadline. The short profile reduced the interruption, not the 20 ms send cadence. The gap is the longest time between consecutive peer decodes that overlaps the cut. The `cut-start` and `counter-ready` marker timestamps bound the cut, not the next sender ticks. This includes the receipts bracketing a cut with no arrivals. A low latency percentile for the few frames received is not continuous voice delivery.
+
+**Opt-in media duplication.** Both operators can call `enable_media_standby` on their existing pinned sessions, supplying a **distinct** private HTTPS relay IP origin and its DER CA. The same Ed25519 peers authenticate on `eon/mesh/wan-media-copy/1`; direction-specific TLS exporter proofs bind the fresh standby handshake to the primary. This is another QUIC transport, not another logical session. It accepts no application streams. `send_audio` never offloads: only `send_redundant_audio` queues copies on both transports and reports which queues accepted them. Class 1–3 streams and receipts stay on the primary. A slow stream does not hold up PCM.
+
+Both copies are valid PCM protobufs. A nine-byte fixed64 extension (field 15, first on the wire) fits **inside** the existing 1,150-byte limit. An ordinary receiver ignores it, including after asymmetric setup failure. A bound receiver suppresses duplicates with a 128-ID sliding window per direction; falling behind the window drops the frame rather than playing a replay. Ending the primary revokes the lane; reconnect requires fresh consent. Duplication uses additional bandwidth and cannot help if both routes fail.
+
+Add `--redundant-media` to the original gate. For `--lose-direct-interface`, the script checks both original TLS socket cookies across removal of `wan0`. Selected-path byte deltas, private relay counters, primary-only PCM echoes and Class 1–3 receipts still witness primary migration. Strict accounting uses **send timestamps** in `[cut-start, counter-ready)`, including absent and late decodes; skipped send slots fail. A separate standby witness must be sent **after** impairment installation and decoded before either endpoint shows recovery.
+
+The following are historical results. The earlier **fixture-only** STUN client released its local port and rebound it for QUIC. Those runs do not establish live-socket Binding.
+
+| Reviewed private cut run (`--require-voice-deadline` throughout) | Attempts | <5 ms | Late | Missing | Standby first, after installation and before recovery | Strict result |
+|---|---:|---:|---:|---:|---:|---|
+| Interface loss, short timers, QAD, primary only | 57 | 7 | 0 | 50 | 0 | Fail |
+| Interface loss, short timers, QAD, redundant | 56 | 56 | 0 | 0 | 49 | Pass |
+| Interface loss, default timers, private STUN, redundant | 1,276 | 1,169 | 107 | 0 | 288 | Fail |
+| Silent blackhole, default timers, private STUN, redundant | 758 | 750 | 8 | 0 | 746 | Fail |
+
+All four earlier runs migrated and skipped zero send slots. These are not physical 5G/Wi-Fi handoffs or a general 5 ms guarantee.
+
+**Scoped production opt-in (`WanEndpoint::open_private`).** Provision both peers with reciprocal keys, a literal RFC1918 HTTPS relay and private DER CA, a local IPv4 bind (port `0` is fine), and a literal private Binding origin with a separate random short-term credential per identity. `CandidateScope::new` requires an **operator-owned, dedicated** RFC1918 prefix `/24` through `/32` and a range of at most 256 unprivileged ports. Owning the relay does not establish ownership of an arbitrary subnet. No live peer IP or NAT port is entered by either client. A plain Binding server learns only the client's own mapping; this mode requires an operator service that knows the pair.
+
+**Run the paired publisher.** On a private Linux host, run `python3 -I /absolute/path/to/scripts/wan_private_stun.py serve /absolute/path/to/pair.json` as an unprivileged user. It uses only Python's standard library. Put the configuration in an operator-only directory, set `umask 077` **before** creating it, and use an owner-only regular file (mode `0600` or `0400`, no symlinks or hard links). The JSON shape is:
+
+```json
+{"listen":["10.77.0.1",3478],"network":"10.77.0.0/29","ports":[41728,41855],
+ "members":[{"user":"a","pin":"<A Ed25519 public key: 64 lowercase hex characters>","password":"<A random 64-character lowercase hex secret>"},
+            {"user":"b","pin":"<B Ed25519 public key: 64 lowercase hex characters>","password":"<B independent random 64-character lowercase hex secret>"}]}
+```
+
+Replace placeholders offline. Configure each client with **its own** user and password (64 ASCII bytes, not hex-decoded), its peer's pin, and the same scope. Do not copy the full service configuration to either client. Bind only on a private unicast interface and dedicate the source range to this pair, excluding other services; RFC1918 addresses alone do not prove network ownership. Keep the listener off public ingress. No DNS, directory service, registration, arbitrary target field or origin redirect. Stopping the foreground process stops publication, not existing QUIC sessions. To rotate credentials, restart with the new file and reprovision the affected clients. Logs contain only startup status and aggregate counts per slot.
+
+Binding uses a fresh 96-bit transaction ID per attempt, USERNAME, zero PADDING and MESSAGE-INTEGRITY-SHA256. An authenticated challenge returns XOR-MAPPED-ADDRESS and a random 16-byte return cookie (private attribute `0xc0e5`). The client echoes the cookie on the same socket and transaction with a new MAC before the publisher will advertise the **observed source**. Only one 3-second challenge and one confirmed 5-second observation are retained per identity, timed by the server's monotonic clock.
+
+Each confirmed request pays for **one** paired reply to its proven source. The signed cookie echo specifies the remaining receive window (attribute `0xc0e6`: four big-endian bytes, 1–1,000 ms); the publisher conservatively measures it from challenge issuance. Update the publisher first: it accepts the original echo with a 1-second bound, but older publishers do not understand the new attribute. When both observations are live it answers each still-waiting transaction immediately, under that member's own key, with the private `0xc0e4` attribute (length 38: peer pin, IPv4 address, big-endian port; two padding bytes). The two replies consume two separate requests. An expired, replaced or spent request cannot trigger a delayed send. Replaying a proof cannot renew an observation or earn another reply; loss recovery requires a fresh challenge. No reply exceeds its authenticated request size; the per-identity limit remains burst 8 and 4 requests/s. The client independently checks the origin, transaction, MAC, pin and both mappings.
+
+The **same bound UDP socket** then connects to exactly the approved peer mapping. It becomes an iroh 1.4.1 `CustomTransport`; `CustomSender` rejects anything other than that one address even if the new address would be in the pool. There is no unrestricted IP sender, QAD, portmapper or address lookup. Only the operator's relay is supplied to rendezvous; QUIC still authenticates the peer key and the scoped ALPN. Discovery failure or an unreachable direct path permits relay-only startup. Optional Binding gets at most one quarter of the caller's open budget and never more than 1.75 s; the original overall deadline is not extended. A bad authenticated pair assertion fails closed. The custom address represents the translated UDP tuple; it is not a public discovery record.
+
+If direct wins establishment, iroh keeps a standby path on the same connection. For scoped Class 1–3 streams the sender first exchanges a one-byte offer/ready handshake. If iroh selects the relay before the offer completes, the sender can discard that **empty** stream and offer once on the same connection; it never replays application data or extends the 30 s receipt timeout. This costs a round trip and does not guarantee delivery of a payload already in flight. `reconnect` discards direct and media consent. A fresh scoped open is needed for new mappings. In particular, iroh's custom transport does **not** automatically re-punch a new translated address after a relay-first startup. Do not equate this scoped direct → relay result with the QAD relay → direct → relay test above.
+
+Run `scripts/test_wan_nat.sh --private-stun --redundant-media --require-voice-deadline`, then repeat with `--lose-direct-interface`. This profile exercises the production constructor with no timing overrides. For each peer the fixture checks the kernel socket cookie from authenticated Binding through direct QUIC delivery, uses a count-only OUTPUT rule to witness **zero** sends to an authentically published out-of-pool port, and checks direct/fallback byte deltas, all reliable receipts, and zero QAD connections. The interface test also checks the independent established primary and media TLS socket cookies. After scoring, it verifies relay-only reconnect and fresh startup with the publisher unavailable.
+
+With the operator publisher on five private Linux namespaces and two SNATs, **each identity confirmed one observation and received one paired reply in each run**. All three reliable lanes migrated on the original connection. Both clients retained their Binding socket for QUIC and sent zero packets to the separate negative control's disallowed candidate. After publisher shutdown, fresh opens used only the relay.
+
+| Operator publisher, default timers, redundant media | Cut decodes <5 ms / attempts | Max one-way | Missing / skipped slots | Longest in-cut Class 1–3 receipt |
+|---|---:|---:|---:|---:|
+| Silent blackhole | 750/750 | 1.777 ms | 0 / 0 | 14.977 s |
+| Direct interface removed | 290/290 | 1.830 ms | 0 / 0 | 5.771 s |
+
+| Earlier one-shot publisher, default timers, redundant media | Cut attempts | <5 ms | Late | Missing | Skipped slots | Max one-way | Longest in-cut Class 1–3 receipt |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Silent blackhole, first scored run | 752 | 717 | 35 | 0 | 0 | 9.504 ms | 14.994 s |
+| Direct interface removed, first scored run | 290 | 289 | 1 | 0 | 0 | 6.595 ms | 5.779 s |
+| Silent blackhole, final verification | 752 | 752 | 0 | 0 | 0 | 3.056 ms | 15.011 s |
+| Direct interface removed, final verification | 293 | 293 | 0 | 0 | 0 | 2.531 ms | 5.782 s |
+
+All four runs migrated on the original connection. **Both final runs passed the original strict gate; the earlier misses show it is not a repeatable latency guarantee.** None of the four lost a cut frame or skipped a send slot. In the final runs the separate media relay delivered 750 and 288 first decodes, respectively, after impairment installation and before primary recovery. The original QAD relay-first regression also migrated in both modes but missed the deadline on 12/755 and 99/1,271 frames, respectively. These measurements cover an isolated Linux topology, not a carrier roam.
+
 ### 2.3 Schema Reconciliation and Clock-Skew-Immune 15ms Spatial Election (`src/spatial.rs`)
 
 **Protobuf Reconciliation**: Update `SensoryClaim` in `proto/eon.proto` with two optional fields so it matches `DISTRIBUTED_NETWORKING_MESH.md` §8.1 without breaking existing field numbers `1..8`:

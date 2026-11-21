@@ -122,12 +122,11 @@ flowchart LR
     KokoroONNX --> AudioPCM["24kHz 16-bit Mono PCM Samples"]
 ```
 
-1. **Embedded Phonemizer (`misaki` / `espeak-ng`)**:
-   - Converts English orthography into IPA phoneme representations with native stress markers.
-   - Executes in $< 1\text{ms}$ per clause in pure Rust without spawning child processes.
+1. **Native phonemizer (`espeak-ng`)**:
+   - Runs the operator-installed `espeak-ng` on a trusted executable search path, with fixed `-v en-us -q --ipa=3` arguments. Clause text (at most 2,048 bytes) is stdin, never an argument.
+   - Nonblocking stdin/stdout share a two-second elapsed deadline with process exit. More than 16 KiB of stdout fails the clause rather than truncating it; stderr is discarded. Readback and the normal reply renderer can cancel pending pronunciation. On cancellation, timeout or I/O failure, the worker kills the direct child and arranges to reap it without waiting on a pipe. Eight process-wide slots cover both running children and outstanding cleanup; calls fail without queuing if all are occupied. This deadline does not bound Kokoro inference.
 2. **Phoneme Vocabulary Tokenizer (`kokoro_vocab.json`)**:
-   - Maps IPA symbols to Kokoro's exact internal token indices defined in `perception/models/tts/kokoro_vocab.json`.
-   - Replaces missing or unmapped symbols with silence pauses (`_`), preventing tensor shape mismatches or runtime panics.
+   - Maps known IPA symbols using `eon-voice/assets/kokoro_vocab.json`, skipping unmapped symbols as before. Requires 1–509 tokens before the two model boundary tokens.
 
 ### 3.4 The Dual-Channel Verbalizer Rule (Speaking Code Aloud)
 In software engineering, devops, and cyber operations, raw technical text contains file paths (`engine/core-rs/crates/eon-cyber/src/ast/tree_sitter_engine.rs`), 64-character SHA-256 digests (`4722513f56da...`), raw pointers (`0x7fff5fbff8c0`), and Rust generics (`EonResult<Option<Arc<RwLock<Task>>>>`). Reading these character-by-character over audio creates acoustic chaos and listener fatigue.

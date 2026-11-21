@@ -19,6 +19,65 @@ The Android subsystem provides:
 4. **Multimodal Screen Perception**: Captures screen frames via `MediaProjection` and streams keyframes to `eon-vision` for OmniParser-v2 UI element detection.
 5. **Quick Settings Tile**: `EonTileService` allows one-tap toggling of EON between Dormant, Silent Copilot, and Full-Duplex Voice modes.
 
+### Shipped boundary: the private action demo (API 34+)
+
+The inspection shortcut is read-only. Actions are available only in the foreground
+`DemoActionActivity`, on its own counter and sample list. To try the fallback on stock
+widgets, choose **Try samples without native actions**, then review and confirm a
+counter click or list scroll. Changing sample mode clears approval; it does not grant
+authority. The confirmation names the route. An advertised native action takes
+precedence; once attempted, even a false return or a missing effect **never** causes
+a fallback or retry.
+
+The fallback is **activity-local hit testing and UI dispatch**, not an Android input
+gesture. A display gesture cannot be bound to the reviewed `View` at delivery. Instead,
+the activity derives the unclipped control's center in its own decor at review and
+again at confirmation. That point must lie on the known button or a known list row,
+with no overlapping sibling on its path. No coordinates are accepted, saved or
+exported. The activity calls `performClick()` on that button or `scrollBy()` by at
+most one viewport on that list; it never synthesizes touch events, flings, or uses
+`AccessibilityService.dispatchGesture`. No manifest permission is needed for this route.
+
+The 15-second, one-use review binds the route, control, starting value, window token,
+and inspection-service epoch. Dispatch requires the unlocked, resumed, focused,
+full-screen demo, the assistant role, and the enabled service and shortcut. The only
+success signal is a counter increase of exactly one or observed forward scroll of
+at most one viewport. Native scrolling may animate, so it gets one delayed **read**,
+not another dispatch. A canceled or stale review cannot be replayed.
+
+From `engine/android`, build `:app:assembleDebug` and use the existing device gates:
+
+```sh
+python3 app/keystore_device_test.py --serial "$CLEAN_AVD" --demo-denied
+python3 app/keystore_device_test.py --preconfigured-allowed-serial "$OPERATOR_AVD"
+```
+
+Both require explicitly selected, disposable API 34+ emulators. For the allowed
+gate, manually install the matching target APK, select EON as assistant, and enable
+its accessibility service and shortcut. Leave the device unlocked and the test APK
+uninstalled. Neither gate sets roles or enables services. They are separate tests:
+passing the clean-device denial gate is not evidence that the allowed gate ran.
+
+On the API 35 Google APIs image, Android reported that EON's assigned accessibility
+button was not *shown*. That does not mean the user revoked the shortcut. For this
+private demo only, check the exact component in the current user's
+`accessibility_button_targets`, the enabled service's button flag and the existing
+role, lock and window checks. If Android does not expose the setting, refuse the
+action. A change to the assignment invalidates pending review. The shortcut inspector
+itself remains read-only.
+
+Lookup starts at the private sample group's `AccessibilityNodeInfo` and matches the
+window, package, resource ID and class of each expected child, not its position in
+the view list. It does not enumerate other windows. Two fresh API 35 AVDs passed
+`demo=PASS-allowed` and `demo=PASS-denied` with the same signed APK: cancel left
+the counter at 0, the native click produced 1, the local fallback produced 2, and
+both scroll routes advanced the rendered list by at most one viewport.
+
+**Locate sample field** reports only whether the demo's own unsaved `EditText` was
+found. It does not expose a value, open an IME, accept edits or grant an action.
+The API 35 gate changes the order of the field and its label, then checks that
+sensitive, wrong-class and same-ID replacement controls cannot satisfy the lookup.
+
 ---
 
 ## 2. Android Manifest & Permissions (`AndroidManifest.xml`)
@@ -200,37 +259,55 @@ Modern Android releases (API 34/35) enforce aggressive background restrictions:
 1. Third-party apps attempting background microphone recording or screen capture are abruptly killed with `SecurityException` or targeted by OEM battery killers (e.g. Samsung Phantom Process Killer).
 2. Background services attempting to launch activities or show overlays face strict foreground initiation barriers.
 
-EON overcomes these barriers by integrating as Android's **Native Digital Assistant (`ROLE_ASSISTANT`)**:
+On stock Android the user may select EON as the **digital assistant (`ROLE_ASSISTANT`)**. The design must respect restrictions even when the role is active:
 
 ```mermaid
 flowchart TD
     AndroidOS["Android 14/15+ Framework"] -->|Binds via android.service.voice| AssistantService["EonVoiceInteractionService (ROLE_ASSISTANT)"]
 
-    subgraph AssistantPrivileges["System Assistant Level Privileges"]
-        DSPWake["Hardware DSP Low-Power Hotword (AlwaysOnHotwordDetector)"]
-        LegalMic["Legal Background Audio Streaming (Bypasses BG Recording Restrictions)"]
-        ScreenAssist["Direct AssistStructure & Screenshot Ingestion (onHandleAssist)"]
-        OEMImmunity["OEM Killer Immunity (OOM Adj -800 System Priority)"]
-    end
-
-    AssistantService --> DSPWake
-    AssistantService --> LegalMic
-    AssistantService --> ScreenAssist
-    AssistantService --> OEMImmunity
-    
-    LegalMic --> NativeCore["Native AAudio NDK Stream (eon-voice)"]
-    ScreenAssist --> VisionCore["OmniParser-v2 Keyframe Analysis (eon-vision)"]
+    Source["Private EON profile page"] -->|User approves one profile check| Local["Android local voice interaction"]
+    Local -->|AssistState.ActivityId only| Session["Selected EON session"]
+    AssistantService --> Session
+    Session -->|Matching activity ID: request and perform direct action| Source
+    Source -->|One profile result via Android| Session
 ```
 
 ### 6.1 `EonVoiceInteractionService` Implementation
-By declaring `android.service.voice.VoiceInteractionService`, EON gains assistant role status:
-- **Hardware DSP Hotword Detection**: Integrates with Qualcomm/MediaTek audio DSPs via `AlwaysOnHotwordDetector`, allowing continuous wake-word listening with near-zero battery consumption while the main CPU sleeps.
-- **Immediate Background Mic Capture**: The assistant role holds an explicit system entitlement to activate the microphone from the background without foreground activity preconditions.
-- **Deep Screen Context (`onHandleAssist`)**: When the user triggers an assist gesture (long-press power button or swipe from bottom corner), Android calls `onHandleAssist(AssistStructure, AssistContent, Bundle)`. EON receives the parsed view hierarchy, foreground application package, and full-resolution screenshot without requiring user prompts or UI flickers.
-- **OOM Killer Immunity**: In the `ROLE_ASSISTANT` state, the Android OS assigns EON a privileged OOM score adjustment (`adj = -800`), making it immune to routine OEM background battery pruning.
+Declaring a `VoiceInteractionService` makes the app eligible; it does not select the app for the user.
+- **Hardware hotword: unsupported by this ordinary app.** The public SDK removed `AlwaysOnHotwordDetector` and its factory in API 31, the first API where EON enables its voice service. On Android 15 the factory is `@SystemApi` and `VoiceInteractionService.listModuleProperties()` is `@TestApi`. Selection does not expose them. EON uses neither, requests no enrollment, and offers the system assistant gesture instead. This is not a claim about the physical hardware of arbitrary phones.
+- **Microphone**: Require the OS permissions and active capture conditions. Denial or role loss must stop capture, not trigger a fallback recorder.
+- **Assist context**: The binding always disables both structure and screenshot. On Android 15 even an activity-token-scoped show passes through that same binding-wide mask. Filtering an incoming tree by package would be too late. EON does not select an Autofill provider, request an Autofill structure, or send a page to a provider for assistant use.
+- **Process death**: The OS controls process priority. Restore durable work after restart instead of relying on an OOM score or immunity from process management.
+
+#### Owner-only direct action (API 35 device check)
+
+With EON selected, open **Review an Android assistant profile check**. Back leaves without checking. **Allow one profile check** starts `Activity.startLocalVoiceInteraction()` from that private page. Only the first showing of a fresh session with the live five-second Binder ticket can proceed. Android scopes the local invocation to its starting activity. The session compares the opaque `AssistState.activityId` with the ID from the source’s `VoiceInteractor.notifyDirectActionsChanged()`; it does not read view data or enumerate visible activities. Only after they match does it call `requestDirectActions`. Android checks the active session and the task’s assist token. EON performs only the fixed `CHECK_MODEL_PROFILE` action; its source rechecks the ticket, policy, selected binding and foreground before reading device memory size. A new showing cannot reuse the result.
+
+This is **OS-supplied assist identity and OS-routed execution, not `AssistStructure` extraction**. The resulting profile is computed by EON, not supplied by Android. The platform details are in Android 15’s [`VoiceInteractionManagerService`](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/voiceinteraction/java/com/android/server/voiceinteraction/VoiceInteractionManagerService.java), [`VoiceInteractionManagerServiceImpl`](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/voiceinteraction/java/com/android/server/voiceinteraction/VoiceInteractionManagerServiceImpl.java) and [`VoiceInteractionSessionConnection`](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/voiceinteraction/java/com/android/server/voiceinteraction/VoiceInteractionSessionConnection.java).
+
+Use the signed APK and observer installation described below, on a fresh 3 GiB API 35 Google APIs x86_64 AVD. Select EON through Settings. Run the separate observer in both modes, changing **Use text from screen** through Android Settings between runs:
+
+```sh
+OBS=com.eon.assistant.keystoretest/com.eon.assistant.ProfileActionAcceptance
+"$ANDROID_HOME/platform-tools/adb" -s "$SERIAL" shell am instrument -w -r "$OBS"
+"$ANDROID_HOME/platform-tools/adb" -s "$SERIAL" shell am instrument -w -r -e policy denied "$OBS"
+```
+
+On `AE3A.240806.043/12960925` (enforcing, emulator in a loopback-only host network namespace, no host audio or cameras), the same APK passed `PASS-os-action` and `PASS-policy-denied`. The first observed the source execute and the assistant report `p0_mobile_ultralight`; the second observed a refusal and no source execution. Both opened a fresh ordinary assistant card with no retained result and verified `mDisabledShowContext=3`. `RECORD_AUDIO` remained ignored. An **observer-side** `dumpsys soundtrigger_middleware` listed only `AOSP fake STHAL`, architecture `injection`; `dumpsys voiceinteraction` listed no enrolled keyphrase models. No fake trigger was injected, and these shell diagnostics are not production capability APIs.
 
 ### 6.2 `MediaProjection` Token Lifecycle
-For continuous multimodal perception (`eon-vision` 1-5 FPS adaptive sampling):
-1. `EonCoreService` obtains an initial `MediaProjection` token via `MediaProjectionManager.createScreenCaptureIntent()` during user onboarding.
-2. The service binds the token to `FOREGROUND_SERVICE_MEDIA_PROJECTION`.
-3. In-flight virtual display buffers (`ImageReader`) are shared directly with native Rust `eon-vision` through Android Hardware Buffers (`AHardwareBuffer`), achieving zero-copy GPU-to-model keyframe ingestion.
+**Implemented on API 35+: grant lifecycle only.** Select EON as the digital assistant in Android Settings, open EON controls, choose **Review a no-output projection grant**, then explicitly open Android's picker. Choose **one app → EON**. The OS owns the scope choice; EON neither queries that scope nor reads anything from it. Assistant selection alone never starts the picker or a grant.
+
+The private singleton controls require EON's live voice binding, the assistant role and an unlocked, interactive device. On return from the picker, the secure controls or the exact EON launcher instance which opened them must have resumed and gained focus. A result expires after 1.5 seconds; both dispatch and consumption check the monotonic deadline. Only an opaque, process-local request ID goes in the service command. The service promotes itself with type `mediaProjection` **before** exchanging the result for a `MediaProjection`, registers its stop callback and retains only the grant. There is **no virtual display, surface, image reader, frame, storage, audio, native bridge, or network output** in this path.
+
+Stop from the grant controls, or use Android's sharing controls if the OS provides them. The diagnostic lease also expires after one minute. Role/binding loss, screen off, task/service teardown and process death invalidate ownership. The service is not sticky. Another session always needs a new foreground tap and picker result. The voice service keeps assist structure and screenshot disabled (`mDisabledShowContext=3`); this is not continuous perception or hotword detection.
+
+#### Reproduce the device checks
+
+Use an empty, offline, setup-complete API 35 `ranchu` AVD, no host audio or cameras, and an explicitly selected `adb -s emulator-N` throughout. In `engine/android`, run `./gradlew :app:test :app:assembleDebug` and `python3 app/keystore_device_test.py --build-only`. Install `app/build/outputs/apk/debug/app-debug.apk` and `app/build/intermediates/keystore-test/keystore-test.apk` with `install -t`. Choose the role through Android Settings, not a shell role or app-op grant. Start EON by its normal launcher entry. Leave accessibility and microphone setup untouched.
+
+1. Run `adb -s emulator-N shell am instrument -w -r com.eon.assistant.keystoretest/com.eon.assistant.ProjectionGrantAcceptance`. The instrumentation targets its **own** package, not the selected voice service. Open the grant controls and obtain the one-app EON grant. If Android foregrounds the selected EON launcher task, reopen the grant controls to expose the `active` checkpoint.
+2. Try the system chip's **Stop** if the device exposes it. Alternatively, on the disposable AVD, start `adb -s emulator-N shell am start -n com.eon.assistant.keystoretest/com.eon.assistant.ProjectionReplacementFixture`. Tap the fixture button and approve the **second real Android dialog**. Its typed foreground service holds only the replacement token for three seconds. The observer must see **Android stopped the grant (onStop callback)**, not an app-initiated stop or a timer. Open the picker again and cancel with Back. Expect `PASS-external-stop-denied`.
+3. Return to the EON launcher controls. Repeat the instrumentation with `-e phase restart` before the component name. After the real `active` checkpoint, run `adb -s emulator-N shell am force-stop com.eon.assistant`. Relaunch EON, reopen controls and cancel a fresh picker. Expect `PASS-restart-denied`. This checks the previous PID is gone, the new one differs, and both the projection and typed service are gone.
+
+On the tested `system-images;android-35-ext15;google_apis;x86_64` image (`AE3A.240806.046.B2`), the real one-app chooser foregrounded the owned EON launcher. `dumpsys media_projection` reported `(com.eon.assistant, uid=10210): TYPE_SCREEN_CAPTURE` and the service reported `isForeground=true`, type `0x00000020`. External replacement changed the platform owner to the fixture UID, triggered EON's callback, and left `Media Projection: null` and neither service running after release. Both acceptance modes passed. **A tappable status-bar Stop chip was not verified on this image**, including in a discarded null-surface experiment. No flag was changed to enable one; the shipped implementation needs no display.

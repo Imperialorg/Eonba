@@ -1,6 +1,6 @@
 //! WeSpeaker ResNet34 speaker embeddings and the owner gate (docs/implementation/04, biometric gate).
 //!
-//! Audio goes through the shared 80-bin fbank front end, then per-utterance mean normalization over time, then the
+//! Audio goes through the WeSpeaker 80-bin fbank front end, then per-utterance mean normalization over time, then the
 //! network. The 256-dim embedding is L2-normalized, so cosine similarity is a dot product. The gate compares a candidate
 //! against the enrolled owner embedding. The assistant's own echo should score low, which is why the gate sits behind
 //! barge-in detection.
@@ -11,11 +11,12 @@ use eon_primitives::{EonError, EonResult};
 use ort::session::Session;
 use ort::value::Tensor;
 
-use crate::features::{kaldi_fbank, NUM_MEL_BINS};
+use crate::features::{NUM_MEL_BINS, wespeaker_fbank};
 
 pub const EMBEDDING_DIM: usize = 256;
-/// Shortest audio the embedder accepts: 0.5 s, which is 50 fbank frames.
 const MIN_FRAMES: usize = 50;
+/// A complete 25 ms window, plus 49 shifts of 10 ms (515 ms at 16 kHz).
+pub(crate) const MIN_SAMPLES: usize = 400 + (MIN_FRAMES - 1) * 160;
 
 fn speaker_err(operation: &str, reason: impl std::fmt::Display) -> EonError {
     EonError::OperationFailed {
@@ -39,9 +40,9 @@ impl SpeakerEmbedder {
         Ok(Self { session })
     }
 
-    /// Returns the L2-normalized embedding of 16 kHz mono speech of at least 0.5 s.
+    /// Returns the L2-normalized embedding of normalized 16 kHz mono speech (at least 515 ms).
     pub fn embed(&mut self, samples: &[f32]) -> EonResult<Vec<f32>> {
-        let frames = kaldi_fbank(samples)?;
+        let frames = wespeaker_fbank(samples)?;
         if frames.len() < MIN_FRAMES {
             return Err(EonError::ValidationError(format!(
                 "speaker embedding needs at least {MIN_FRAMES} frames, got {}",
@@ -70,7 +71,10 @@ impl SpeakerEmbedder {
             .try_extract_tensor::<f32>()
             .map_err(|e| speaker_err("embs", e))?;
         if embedding.len() != EMBEDDING_DIM {
-            return Err(speaker_err("embs", format!("expected {EMBEDDING_DIM} values, got {}", embedding.len())));
+            return Err(speaker_err(
+                "embs",
+                format!("expected {EMBEDDING_DIM} values, got {}", embedding.len()),
+            ));
         }
         Ok(normalize(embedding))
     }
@@ -103,11 +107,10 @@ pub struct SpeakerGate {
 
 impl SpeakerGate {
     pub fn enroll(owner: &[f32], threshold: f32) -> EonResult<Self> {
-        if owner.len() != EMBEDDING_DIM {
-            return Err(EonError::ValidationError(format!(
-                "owner embedding must have {EMBEDDING_DIM} values, got {}",
-                owner.len()
-            )));
+        if !valid_embedding(owner) || !(-1.0..=1.0).contains(&threshold) {
+            return Err(EonError::ValidationError(
+                "expected a finite nonzero 256-dimensional owner and a cosine threshold in [-1, 1]".into(),
+            ));
         }
         Ok(Self {
             owner: normalize(owner),
@@ -120,8 +123,13 @@ impl SpeakerGate {
     }
 
     pub fn accepts(&self, candidate: &[f32]) -> bool {
-        self.score(candidate) >= self.threshold
+        valid_embedding(candidate) && self.score(candidate) >= self.threshold
     }
+}
+
+fn valid_embedding(v: &[f32]) -> bool {
+    let power = v.iter().map(|x| x * x).sum::<f32>();
+    v.len() == EMBEDDING_DIM && power.is_finite() && power > 0.0
 }
 
 #[cfg(test)]
