@@ -198,6 +198,29 @@ def responding_take(args, take):
                 worker.kill()
 
 
+def configuration(args):
+    info = {"origin": "authorized-single-clock-physical", "route": args.route, "gains": args.gains,
+            "mode": "driven" if args.responder else "passive", "threshold_pcm": args.threshold,
+            "sample_rate_hz": args.rate, "trials": {}}
+    path = args.route_calibration
+    if args.responder:
+        if path is None or not path.is_absolute():
+            raise ValueError("driven acquisition requires an absolute --route-calibration record")
+        with session.regular(path).open("rb") as f:
+            raw = f.read(16_385)
+        if len(raw) > 16_384:
+            raise ValueError("oversized route calibration")
+        try:
+            cal = json.loads(raw, object_pairs_hook=session.distinct_keys)
+        except RecursionError as error:
+            raise ValueError("route calibration nested too deeply") from error
+        info.update(capture_device=args.device, speaker=args.speaker, route_calibration=cal)
+        session.route_bound(info)
+    elif path is not None:
+        raise ValueError("--route-calibration is for driven acquisition only")
+    return info
+
+
 def acquire(args):
     if sys.platform != "linux" or sys.byteorder != "little":
         raise ValueError("supported acquisition hosts are little-endian Linux")
@@ -212,6 +235,7 @@ def acquire(args):
         print(f"The local responder {args.responder} will receive the LEFT channel only, and play on {args.speaker}.")
     if not args.route.strip() or not args.gains.strip() or not 1 <= args.threshold <= 32767:
         raise ValueError("provide the common route, fixed gains and calibrated threshold")
+    info = configuration(args)
     if not args.directory.is_absolute():
         raise ValueError("use a new absolute session directory under your private directory")
     parent = args.directory.parent.stat()
@@ -235,15 +259,18 @@ def acquire(args):
         os.mkdir(args.directory.name, 0o700, dir_fd=parent_fd)
         fd = os.open(args.directory.name, os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
         try:
-            with endpoint(args.device, args.rate) as take:
-                collect(args, Path(f"/proc/self/fd/{fd}"), turns, take)
+            controller = info["route_calibration"]["capture_controller"] if args.responder else None
+            with endpoint(args.device, args.rate, controller) as take:
+                if args.responder:
+                    info["verified_capture_controller"] = controller
+                collect(args, Path(f"/proc/self/fd/{fd}"), turns, take, info)
         finally:
             os.close(fd)
     finally:
         os.close(parent_fd)
 
 
-def collect(args, directory, turns, take):
+def collect(args, directory, turns, take, info):
     # Use the pinned private directory, not a path that can be redirected between takes.
     trials = directory / "trials"
     trials.mkdir(mode=0o700)
@@ -252,9 +279,7 @@ def collect(args, directory, turns, take):
         raise ValueError("control cancelled")
     with responding_take(args, take) if args.responder else nullcontext(take) as capture:
         control_hash, outcome = record(control, capture, args.rate, 30, args.threshold)
-        info = {"origin": "authorized-single-clock-physical", "route": args.route, "gains": args.gains,
-                "mode": "driven" if args.responder else "passive", "threshold_pcm": args.threshold,
-                "sample_rate_hz": args.rate, "control_pcm_sha256": control_hash, "trials": {}}
+        info["control_pcm_sha256"] = control_hash
         if args.responder:
             info["control_bridge_started"] = outcome.started
             info["control_playback_frame"] = outcome.playback_frame
@@ -297,6 +322,8 @@ def main(argv=None):
     cli.add_argument("--responder", type=Path, help="absolute path to your trusted local eon-rig-turn executable")
     cli.add_argument("--models", type=Path, help="digest-verified local model directory for --responder")
     cli.add_argument("--speaker", help="dedicated responder output ID: alsa:hw:CARD=NAME,DEV=N")
+    cli.add_argument("--route-calibration", type=Path, help="driven only: absolute path to the same-route "
+                     "latency calibration JSON (Manual 06 §3.3)")
     args = cli.parse_args(argv)
     try:
         acquire(args)

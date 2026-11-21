@@ -25,18 +25,51 @@ class RigTests(unittest.TestCase):
         self.dest = self.root / "takes"
         self.args = argparse.Namespace(directory=self.dest, route="unit test", gains="fixed",
                                        threshold=500, device="hw:2,0", rate=16000, seconds=2, noisy=True,
-                                       responder=None, speaker=None, models=None)
+                                       responder=None, speaker=None, models=None, route_calibration=None)
         self.console = self.enterContext(contextlib.redirect_stdout(io.StringIO()))
         self.device = self.enterContext(patch.object(rig, "endpoint"))
 
     def responder(self, body):
         self.args.speaker = "alsa:hw:CARD=Test,DEV=1"
         self.args.models = self.root
+        self.args.route_calibration = self.root / "calibration.json"
+        self.args.route_calibration.write_text(json.dumps({
+            "reference": "unit-test fixture only", "capture_device": self.args.device, "speaker": self.args.speaker,
+            "capture_controller": "/dev/snd/by-id/usb-Rig_SN01-00",
+            "route": self.args.route, "gains": self.args.gains, "sample_rate_hz": self.args.rate, "upper_bound_frames": 160,
+        }))
         self.args.responder = self.root / "test-worker"
         self.args.responder.write_text("#!/usr/bin/env python3\nimport os, sys, struct\n"
                                        "reader = sys.stdin.buffer\n"
                                        "def header(): return struct.unpack('<I', reader.read(4))[0]\n" + body)
         self.args.responder.chmod(0o700)
+
+    def collect(self, directory, turns, take):
+        info = rig.configuration(self.args)
+        info["verified_capture_controller"] = info["route_calibration"]["capture_controller"]  # test endpoint
+        rig.collect(self.args, directory, turns, take, info)
+
+    def test_driven_acquire_passes_calibrated_controller_to_endpoint(self):
+        self.responder("")
+        with (patch.object(rig.sys.stdin, "isatty", return_value=True), patch("builtins.input", return_value="RECORD"),
+              patch.object(rig, "collect") as collect):
+            rig.acquire(self.args)
+        identity = "/dev/snd/by-id/usb-Rig_SN01-00"
+        self.device.assert_called_once_with("hw:2,0", 16000, identity)
+        self.assertEqual(collect.call_args.args[-1]["verified_capture_controller"], identity)
+
+    def test_missing_or_different_route_calibration_stops_before_capture(self):
+        self.responder("")
+        path = self.args.route_calibration
+        with patch.object(rig.sys.stdin, "isatty", return_value=True), patch("builtins.input") as prompt:
+            for value, reason in ((None, "--route-calibration"), (self.root / "missing", "regular file"),
+                                  (path, "acquisition speaker")):
+                self.args.route_calibration = value
+                self.args.speaker = "alsa:hw:CARD=Other,DEV=0"
+                with self.subTest(value=value), self.assertRaisesRegex(ValueError, reason):
+                    rig.acquire(self.args)
+            prompt.assert_not_called()
+            self.device.assert_not_called()
 
     def test_device_selection_and_consent_before_capture(self):
         with (patch.object(rig.sys.stdin, "isatty", return_value=False) as tty,
@@ -81,13 +114,14 @@ class RigTests(unittest.TestCase):
             self.assertEqual(manifest["sample_rate_hz"], 16000)
             self.assertNotIn("control_bridge_started", manifest)
             self.assertNotIn("control_playback_frame", manifest)
+            self.assertNotIn("route_calibration", manifest)
             expected = ["control", *rig.session.SCENES]
             self.assertEqual(manifest["trials"], {
                 name: {"pcm_sha256": hashlib.sha256(name.encode()).hexdigest(), "scene": expected[i // 25]}
                 for i, name in enumerate(f"turn-{n:03d}.wav" for n in range(1, 101))
             })
             self.assertEqual(recorder.call_count, 101)
-            self.device.assert_called_once_with("hw:2,0", 16000)
+            self.device.assert_called_once_with("hw:2,0", 16000, None)
             self.assertEqual({call.args[1] for call in recorder.call_args_list},
                              {self.device.return_value.__enter__.return_value})
             self.assertEqual(self.dest.stat().st_mode & 0o777, 0o700)
@@ -258,13 +292,13 @@ class RigTests(unittest.TestCase):
                 remaining -= n
                 rig.time.sleep(0.001)
         with patch("builtins.input", side_effect=["MUTED", "TAKE 1", "TAKE 2"]):
-            rig.collect(self.args, self.root, rig.session.SCENES[:2], take)
+            self.collect(self.root, rig.session.SCENES[:2], take)
         info = json.loads((self.root / "session.json").read_text())
         self.assertEqual(info["mode"], "driven")
         self.assertIs(info["control_bridge_started"], True)
         frame = info["control_playback_frame"]
         self.assertGreater(frame, 1200)  # includes the entire callback that observed playback
-        self.assertGreaterEqual(30 * self.args.rate - frame, 4480)
+        self.assertGreaterEqual(30 * self.args.rate - frame - info["route_calibration"]["upper_bound_frames"], 4480)
         self.assertEqual([x["bridge_started"] for x in info["trials"].values()], [True, False])
         self.assertEqual(info["trials"].keys(), {p.name for p in (self.root / "trials").iterdir()})
 
@@ -278,7 +312,7 @@ class RigTests(unittest.TestCase):
                        "open(sys.argv[-1] + '/marked', 'x').close()\n"
                        "assert len(reader.read(2*(n-k))) == 2*(n-k)\nos.write(1,b'B')\n"
                        "assert header() == 0\nos.write(1,b'D')\n")
-        for future_frames in (0, 4480):  # entirely buffered vs. exactly 280 ms still to acquire
+        for future_frames in (0, 4639, 4640):  # bound of 160 plus exactly 4480 frames still needed
             directory = self.root / str(future_frames)
             directory.mkdir()
             alsa = self.mock_alsa()
@@ -306,13 +340,14 @@ class RigTests(unittest.TestCase):
             alsa.snd_pcm_avail.side_effect = available
             with (self.subTest(future_frames=future_frames), patch.object(stereo_pcm, "library", return_value=alsa),
                   stereo_pcm.endpoint("hw:2,0", self.args.rate) as take, patch("builtins.input", return_value="MUTED")):
-                if future_frames:
-                    rig.collect(self.args, directory, [], take)
+                if future_frames == 4640:
+                    self.collect(directory, [], take)
                     info = json.loads((directory / "session.json").read_text())
                     self.assertEqual(info["control_playback_frame"], frames - future_frames)
+                    self.assertEqual(info["route_calibration"], json.loads(self.args.route_calibration.read_text()))
                 else:
                     with self.assertRaisesRegex(ValueError, "captured tail after playback"):
-                        rig.collect(self.args, directory, [], take)
+                        self.collect(directory, [], take)
                     self.assertNotIn("Unmute", self.console.getvalue())
                     self.assertFalse((directory / "session.json").exists())
             with wave.open(str(directory / "muted-control.wav")) as wav:
@@ -350,7 +385,7 @@ class RigTests(unittest.TestCase):
                            f"os.write(1,{outcome!r})\nreader.read()\n")
             with (self.subTest(outcome=outcome), patch("builtins.input", side_effect=["MUTED"]) as prompt,
                   patch.object(rig.os, "write", side_effect=fragment), self.assertRaisesRegex(ValueError, reason)):
-                rig.collect(self.args, directory, rig.session.SCENES, take)
+                self.collect(directory, rig.session.SCENES, take)
             prompt.assert_called_once()
             self.assertNotIn("Unmute", self.console.getvalue())
             with wave.open(str(directory / "muted-control.wav")) as wav:
@@ -380,7 +415,7 @@ class RigTests(unittest.TestCase):
               patch.object(rig, "record", return_value=("control", rig.BridgeOutcome(True, 1200))),
               patch.object(rig.session, "checked_capture"), patch.object(rig.session, "check_control"),
               self.assertRaisesRegex(ValueError, "missing responder status")):
-            rig.collect(self.args, self.root, [], MagicMock())
+            self.collect(self.root, [], MagicMock())
         self.assertFalse((self.root / "session.json").exists())
 
     def mock_alsa(self):
@@ -390,6 +425,53 @@ class RigTests(unittest.TestCase):
                      "hw_params", "prepare", "drop"):
             getattr(alsa, "snd_pcm_" + name).return_value = 0
         return alsa
+
+    def test_controller_lookup_checks_open_pcm_direct_link_device_number_and_serial(self):
+        identity = "/dev/snd/by-id/usb-Rig_SN01-00"
+        data = b"E:ID_BUS=usb\nE:ID_SERIAL=Rig_SN01\nE:ID_SERIAL_SHORT=SN01\nE:ID_USB_INTERFACE_NUM=00\n"
+        char = stereo_pcm.stat.S_IFCHR
+        dev = os.makedev(116, 32)
+        for edits, reason in (
+            ({}, None),
+            ({"identity": "/dev/snd/by-path/usb-SN01"}, "capture_controller"),
+            ({"identity": identity + "/../../controlC2"}, "capture_controller"),
+            ({"parent": "/dev/snd/by-path"}, "not a direct link"),
+            ({"link": "../by-path/usb-SN01"}, "not a direct link"),
+            ({"link": "../controlC3"}, "not a direct link"),
+            ({"card": 3}, "opened PCM"),
+            ({"number": 1}, "opened PCM"),
+            ({"mode": stereo_pcm.stat.S_IFREG}, "character device"),
+            ({"dev": dev + 1}, "character device"),
+            ({"data": b""}, "USB serial"),
+            ({"data": data.replace(b"E:ID_SERIAL_SHORT=SN01\n", b"")}, "USB serial"),
+            ({"data": data.replace(b"SN01", b"SN02")}, "USB serial"),
+        ):
+            alsa = self.mock_alsa()
+            alsa.snd_pcm_info_malloc.return_value = alsa.snd_pcm_info.return_value = 0
+            alsa.snd_pcm_info_get_card.return_value = edits.get("card", 2)
+            alsa.snd_pcm_info_get_device.return_value = edits.get("number", 0)
+            node = argparse.Namespace(st_mode=char, st_rdev=dev)
+            target = argparse.Namespace(st_mode=edits.get("mode", char), st_rdev=edits.get("dev", dev))
+
+            def udev(path, mode):
+                self.assertEqual(path, Path("/run/udev/data/c116:32"))
+                alsa.snd_pcm_open.assert_called_once()
+                alsa.snd_pcm_hw_params_malloc.assert_not_called()
+                return io.BytesIO(edits.get("data", data))
+
+            with (self.subTest(edits=edits), patch.object(stereo_pcm, "library", return_value=alsa),
+                  patch.object(os.path, "realpath", return_value=edits.get("parent", "/dev/snd/by-id")),
+                  patch.object(os, "readlink", return_value=edits.get("link", "../controlC2")),
+                  patch.object(Path, "lstat", return_value=node), patch.object(Path, "stat", return_value=target),
+                  patch.object(Path, "open", autospec=True, side_effect=udev)):
+                expected = self.assertRaisesRegex(ValueError, reason) if reason else contextlib.nullcontext()
+                with expected, stereo_pcm.endpoint("hw:2,0", 16000, edits.get("identity", identity)):
+                    self.assertIsNone(reason)
+                alsa.snd_pcm_close.assert_called_once()
+                alsa.snd_pcm_prepare.assert_not_called()
+                alsa.snd_pcm_readi.assert_not_called()
+                if reason:
+                    alsa.snd_pcm_hw_params_malloc.assert_not_called()
 
     def test_incompatible_rate_rejected_before_capture_and_loss_never_reopens(self):
         alsa = self.mock_alsa()

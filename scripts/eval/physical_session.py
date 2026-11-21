@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 import wave
+from stereo_pcm import controller_id
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import measure_ttfa as acoustic
@@ -37,6 +38,22 @@ def checked_capture(path, threshold, digest):
     return capture
 
 
+def route_bound(info):
+    cal = info.get("route_calibration")
+    if not isinstance(cal, dict) or not isinstance(cal.get("reference"), str) or not cal["reference"].strip():
+        raise ValueError("driven recording requires a route calibration reference")
+    controller_id(cal.get("capture_controller"))
+    for key in ("capture_device", "speaker", "route", "gains"):
+        if not isinstance(cal.get(key), str) or not cal[key].strip() or cal[key] != info.get(key):
+            raise ValueError(f"route calibration differs from acquisition {key}")
+    if type(cal.get("sample_rate_hz")) is not int or cal["sample_rate_hz"] != info["sample_rate_hz"]:
+        raise ValueError("route calibration differs from acquisition sample_rate_hz")
+    bound = cal.get("upper_bound_frames")
+    if type(bound) is not int or not 0 < bound < 30 * info["sample_rate_hz"]:
+        raise ValueError("route calibration requires a positive integer upper_bound_frames within the control")
+    return bound
+
+
 def check_control(control, info):
     if control.any_output or (control.frames - control.last_input_end) * 1000 < acoustic.P99_LIMIT_MS * control.rate:
         raise ValueError("muted control exceeds threshold or lacks post-stimulus tail")
@@ -47,10 +64,17 @@ def check_control(control, info):
         frame = info.get("control_playback_frame")
         if type(frame) is not int or not 0 < frame <= control.frames:
             raise ValueError("driven muted control requires a live control_playback_frame")
-        if (control.frames - frame) * 1000 < acoustic.P99_LIMIT_MS * control.rate:
+        cutoff = frame + route_bound(info)
+        if info.get("verified_capture_controller") != info["route_calibration"]["capture_controller"]:
+            raise ValueError("verified capture controller differs from route calibration")
+        if (control.frames - cutoff) * 1000 < acoustic.P99_LIMIT_MS * control.rate:
             raise ValueError("muted control lacks 280 ms of captured tail after playback")
     elif "control_playback_frame" in info:
         raise ValueError("passive recording cannot declare control_playback_frame")
+    elif "route_calibration" in info:
+        raise ValueError("passive recording cannot declare route_calibration")
+    elif "verified_capture_controller" in info:
+        raise ValueError("passive recording cannot declare verified_capture_controller")
 
 
 def bridge_started(label, key, mode):

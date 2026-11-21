@@ -54,8 +54,16 @@ class PhysicalInventoryTests(unittest.TestCase):
             label["scene"] = "control"
         self.assertTrue(all(v["max_ttfa_ms"] is None for v in self.measure()["noisy_scenes"].values()))
 
+    def driven_control(self):
+        self.info.update(mode="driven", control_bridge_started=True, control_playback_frame=3360,
+                         capture_device="hw:2,0", speaker="alsa:hw:CARD=Test,DEV=1",
+                         verified_capture_controller="/dev/snd/by-id/usb-Rig_SN01-00")
+        route = {key: self.info[key] for key in ("capture_device", "speaker", "gains", "route", "sample_rate_hz")}
+        self.info["route_calibration"] = dict(route, upper_bound_frames=160, reference="unit-test fixture only",
+                                              capture_controller=self.info["verified_capture_controller"])
+
     def test_driven_misses_even_with_speaker_noise_and_started_bridge_without_sound(self):
-        self.info.update(mode="driven", control_bridge_started=True, control_playback_frame=3520)  # exactly 280 ms left
+        self.driven_control()  # exactly 280 ms left after the calibrated bound
         for label in self.info["trials"].values():
             label["bridge_started"] = True
         self.assertTrue(self.measure()["task_10_2"]["passed"])
@@ -74,17 +82,19 @@ class PhysicalInventoryTests(unittest.TestCase):
         del self.info["mode"]
         with self.assertRaisesRegex(ValueError, "recording mode"):
             self.measure()
-        self.info.update(mode="driven", control_bridge_started=False)
+        self.driven_control()
+        self.info["control_bridge_started"] = False
         with self.assertRaisesRegex(ValueError, "control did not start"):
             self.measure()
         self.info["control_bridge_started"] = True
+        del self.info["control_playback_frame"]
         with self.assertRaisesRegex(ValueError, "live control_playback_frame"):
             self.measure()  # an old driven manifest with just the terminal outcome
-        for frame in (None, True, 0, -1, 1.5, "3520", 8001, 3521):
+        for frame in (None, True, 0, -1, 1.5, "3360", 8001, 3361):
             self.info["control_playback_frame"] = frame
             with self.subTest(frame=frame), self.assertRaisesRegex(ValueError, "live control_playback_frame|captured tail"):
                 self.measure()
-        self.info["control_playback_frame"] = 3520
+        self.info["control_playback_frame"] = 3360
         for wrong in (None, 0, 1, "false"):
             if wrong is not None:
                 self.info["trials"]["0.wav"]["bridge_started"] = wrong
@@ -97,8 +107,41 @@ class PhysicalInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "passive recording cannot declare control_playback_frame"):
             self.measure()
         del self.info["control_playback_frame"]
+        with self.assertRaisesRegex(ValueError, "passive recording cannot declare route_calibration"):
+            self.measure()
+        del self.info["route_calibration"]
+        del self.info["verified_capture_controller"]
         with self.assertRaisesRegex(ValueError, "passive recording cannot declare"):
             self.measure()
+
+    def test_controller_evidence_is_required_and_must_match_offline(self):
+        self.driven_control()
+        cal = self.info["route_calibration"]
+        del cal["capture_controller"]
+        with self.assertRaisesRegex(ValueError, "capture_controller"):
+            self.measure()
+        cal["capture_controller"] = "/dev/snd/by-path/usb-port"
+        self.info["verified_capture_controller"] = cal["capture_controller"]
+        with self.assertRaisesRegex(ValueError, "capture_controller"):
+            self.measure()
+        cal["capture_controller"] = "/dev/snd/by-id/usb-Rig_SN01-00"
+        for observed in (None, "/dev/snd/by-id/usb-Rig_SN02-00"):
+            self.info["verified_capture_controller"] = observed
+            with self.assertRaisesRegex(ValueError, "verified capture controller"):
+                self.measure()
+
+    def test_driven_control_requires_same_route_positive_calibrated_bound(self):
+        self.driven_control()
+        cal = self.info.pop("route_calibration")
+        with self.assertRaisesRegex(ValueError, "route calibration reference"):
+            self.measure()
+        for field, invalid in (("reference", [None, " "]), ("upper_bound_frames", [None, False, 0, -1, 1.5, "160"]),
+                               ("sample_rate_hz", [8000, 16000.0]), ("speaker", ["other"]), ("capture_device", ["hw:0,0"]),
+                               ("route", ["other"]), ("gains", ["other"])):
+            for value in invalid:
+                self.info["route_calibration"] = dict(cal, **{field: value})
+                with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, "route calibration"):
+                    self.measure()
 
     def test_any_missing_response_duplicate_rate_change_or_partial_batch_invalidates_result(self):
         path = self.root / "trials/0.wav"
