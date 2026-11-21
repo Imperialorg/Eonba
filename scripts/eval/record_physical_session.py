@@ -221,7 +221,7 @@ def collect(args, directory, turns, take):
         session.check_control(session.checked_capture(control, args.threshold, control_hash), started)
         info = {"origin": "authorized-single-clock-physical", "route": args.route, "gains": args.gains,
                 "mode": "driven" if args.responder else "passive", "threshold_pcm": args.threshold,
-                "control_pcm_sha256": control_hash, "trials": {}}
+                "sample_rate_hz": args.rate, "control_pcm_sha256": control_hash, "trials": {}}
         if args.responder:
             info["control_bridge_started"] = started
         print("Unmute the speaker. Keep the same clock, channel routing, gains and threshold.")

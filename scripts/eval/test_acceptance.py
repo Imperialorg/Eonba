@@ -23,7 +23,7 @@ class PhysicalInventoryTests(unittest.TestCase):
         (self.root / "trials").mkdir()
         self.samples = {}
         self.info = {"origin": "authorized-single-clock-physical", "route": "unit-test", "mode": "passive",
-                     "gains": "unit-test", "threshold_pcm": 500, "trials": {}}
+                     "gains": "unit-test", "threshold_pcm": 500, "sample_rate_hz": 16000, "trials": {}}
         self.add("muted-control.wav", None)
         for i in range(100):
             self.add(f"{i}.wav", physical.SCENES[i % 3])
@@ -132,6 +132,19 @@ class PhysicalInventoryTests(unittest.TestCase):
             self.measure()
         with self.assertRaisesRegex(ValueError, "duplicate manifest key"):
             json.loads('{"trials": {}, "trials": {}}', object_pairs_hook=physical.distinct_keys)
+
+    def test_consistent_wav_headers_do_not_override_the_acquisition_clock(self):
+        # PCM digests do not cover the sample rate in a WAV header.
+        self.samples = {p: replace(s, rate=8000) for p, s in self.samples.items()}
+        with self.assertRaisesRegex(ValueError, "control rate differs"):
+            self.measure()
+        for rate in (None, True, 7999, 192001, "8000"):
+            with self.subTest(rate=rate), self.assertRaisesRegex(ValueError, "sample_rate_hz"):
+                if rate is None:
+                    del self.info["sample_rate_hz"]
+                else:
+                    self.info["sample_rate_hz"] = rate
+                self.measure()
 
     def test_standalone_device_gate_distinguishes_pass_failure_and_invalid_evidence(self):
         path = self.root / "trials/0.wav"

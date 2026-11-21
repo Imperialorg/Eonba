@@ -72,7 +72,12 @@ def measure(directory):
     threshold = info.get("threshold_pcm")
     if type(threshold) is not int:
         raise ValueError("integer calibrated threshold required")
+    rate = info.get("sample_rate_hz")
+    if type(rate) is not int or not 8000 <= rate <= 192000:
+        raise ValueError("acquisition sample_rate_hz in the range 8000..192000 required")
     control = checked_capture(directory / "muted-control.wav", threshold, info.get("control_pcm_sha256"))
+    if control.rate != rate:
+        raise ValueError("muted control rate differs from acquisition sample_rate_hz")
     check_control(control, bridge_started(info, "control_bridge_started", mode))
 
     trials = directory / "trials"

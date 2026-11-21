@@ -77,6 +77,7 @@ class RigTests(unittest.TestCase):
             rig.acquire(self.args)
             manifest = json.loads((self.dest / "session.json").read_bytes())
             self.assertEqual(manifest["mode"], "passive")
+            self.assertEqual(manifest["sample_rate_hz"], 16000)
             self.assertNotIn("control_bridge_started", manifest)
             expected = ["control", *rig.session.SCENES]
             self.assertEqual(manifest["trials"], {

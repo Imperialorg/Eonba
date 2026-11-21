@@ -202,6 +202,7 @@ Use `muted-control.wav`, a `trials/` directory containing only the original ster
 | `origin` | Literal `authorized-single-clock-physical` |
 | `mode` | `passive` (external device under test) or `driven` (local responder). An older undeclared mode is not assumed passive. |
 | `route`, `gains` | Nonempty descriptions of the common clock/device/route and fixed gains |
+| `sample_rate_hz` | Integer capture rate from the rig configuration. PCM hashes do not cover WAV headers. For older manifests supply the rate from the original acquisition record, not from the WAVs being tested. Without that record the timing is unverified. |
 | `threshold_pcm` | Integer RMS level calibrated above both channels' noise floors across the included scenes |
 | `control_pcm_sha256` | SHA-256 of the interleaved little-endian PCM **data**, not the WAV header |
 | `control_bridge_started` | Driven only: boolean outcome for the muted control. It must exercise a bridge while the acoustic pickup stays below threshold. |
