@@ -12,6 +12,7 @@ import struct
 import subprocess
 import sys
 import time
+from typing import NamedTuple
 import wave
 
 import physical_session as session
@@ -37,7 +38,7 @@ def record(path, take, rate, seconds, threshold):
         with wave.open(output, "wb") as wav:
             wav.setparams((2, 2, rate, 0, "NONE", "not compressed"))
 
-            def receive(stereo):
+            def receive(stereo, _available=None):
                 nonlocal quiet
                 wav.writeframesraw(stereo)
                 if len(prefix) < needed:
@@ -46,7 +47,7 @@ def record(path, take, rate, seconds, threshold):
                         quiet = True
                         print("Apply stimulus now.", flush=True)
 
-            started = take(seconds, receive)
+            outcome = take(seconds, receive)
     digest = hashlib.sha256()
     frames = rate * seconds
     with wave.open(str(path), "rb") as wav:
@@ -62,7 +63,7 @@ def record(path, take, rate, seconds, threshold):
             frames -= count
     if not quiet:
         raise ValueError("recording lacks a quiet lead-in; original retained")
-    return digest.hexdigest(), started
+    return digest.hexdigest(), outcome
 
 
 class ReferencePipe:
@@ -101,6 +102,11 @@ class ReferencePipe:
             self.flush()
 
 
+class BridgeOutcome(NamedTuple):
+    started: bool
+    playback_frame: int | None  # high-water mark including frames already queued in ALSA
+
+
 @contextmanager
 def responding_take(args, take):
     """One speaker handle through the control and all turns. No replacement worker."""
@@ -108,14 +114,22 @@ def responding_take(args, take):
     with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0) as worker:
         fd = worker.stdin.fileno()
         os.set_blocking(fd, False)
+        out = worker.stdout.fileno()
+        os.set_blocking(out, False)
 
         def status(timeout, allowed):
             if not select.select([worker.stdout], [], [], timeout)[0]:
                 raise TimeoutError("responder did not acknowledge take")
-            value = os.read(worker.stdout.fileno(), 1)
+            value = os.read(out, 1)
             if not value or value not in allowed:
                 raise ValueError("invalid or missing responder status")
             return value
+
+        def poll_status():
+            try:
+                return os.read(out, 1)
+            except BlockingIOError:
+                return None
 
         try:
             def run(seconds, write):
@@ -123,20 +137,34 @@ def responding_take(args, take):
                 pipe = ReferencePipe(fd, args.rate)  # 500 ms of mono i16 at the selected rate
                 pipe.offer(struct.pack("<I", frames))
                 pipe.finish()
-                status(90, b"R")
+                status(90, b"2")  # old R/B/N workers cannot attest to live playback
                 received = 0
+                playback_frame = None
                 fault = None
 
-                def receive(stereo):
-                    nonlocal fault, received
+                def receive(stereo, available=None):
+                    nonlocal fault, received, playback_frame
                     write(stereo)
-                    received += len(stereo)
                     if fault is None:
                         try:
-                            if len(stereo) % 4 or received > 4 * frames:
+                            n = len(stereo) // 4
+                            if len(stereo) % 4 or n == 0 or received + n > frames:
                                 raise OSError("unexpected capture frame count")
+                            # Poll before offering this block: no terminal outcome is legal yet.
+                            value = poll_status()
+                            if value is not None:
+                                if value != b"P" or playback_frame is not None or not received:
+                                    raise ValueError("unexpected live responder status")
+                                if available is None:
+                                    raise ValueError("no live capture availability for playback marker")
+                                queued = available()
+                                if type(queued) is not int or queued < 0:
+                                    raise ValueError("invalid capture availability")
+                                # Exclude this read AND all frames the ADC has already acquired.
+                                playback_frame = received + n + queued
+                            received += n
                             pipe.offer(memoryview(stereo).cast("h")[::2].tobytes())
-                        except OSError as error:
+                        except (OSError, ValueError) as error:
                             # Stop playback but finish writing this original stereo WAV.
                             worker.kill()
                             fault = error
@@ -144,10 +172,16 @@ def responding_take(args, take):
                 take(seconds, receive)
                 if fault is not None:
                     raise fault
-                if received != 4 * frames:
+                if received != frames:
                     raise ValueError("short reference take; original retained")
                 pipe.finish()
-                return status(10, b"BN") == b"B"
+                # A P first received during drain still needs B, but is not a live observation.
+                played = playback_frame is not None or status(10, b"PN") == b"P"
+                if played:
+                    status(10, b"B")
+                if poll_status() is not None:
+                    raise ValueError("unexpected responder status after take")
+                return BridgeOutcome(played, playback_frame)
 
             yield run
             # The worker checks the held stream one last time before a manifest is published.
@@ -155,7 +189,7 @@ def responding_take(args, take):
             end.offer(bytes(4))
             end.finish()
             status(5, b"D")
-            if worker.wait(timeout=5) != 0:
+            if worker.wait(timeout=5) != 0 or os.read(out, 1) != b"":
                 raise ValueError("responder session failed; originals retained")
         except subprocess.TimeoutExpired as error:
             raise TimeoutError("responder did not stop") from error
@@ -217,13 +251,14 @@ def collect(args, directory, turns, take):
     if input("Mute the speaker, prepare the included stimuli and type MUTED to record the 30 s control: ") != "MUTED":
         raise ValueError("control cancelled")
     with responding_take(args, take) if args.responder else nullcontext(take) as capture:
-        control_hash, started = record(control, capture, args.rate, 30, args.threshold)
-        session.check_control(session.checked_capture(control, args.threshold, control_hash), started)
+        control_hash, outcome = record(control, capture, args.rate, 30, args.threshold)
         info = {"origin": "authorized-single-clock-physical", "route": args.route, "gains": args.gains,
                 "mode": "driven" if args.responder else "passive", "threshold_pcm": args.threshold,
                 "sample_rate_hz": args.rate, "control_pcm_sha256": control_hash, "trials": {}}
         if args.responder:
-            info["control_bridge_started"] = started
+            info["control_bridge_started"] = outcome.started
+            info["control_playback_frame"] = outcome.playback_frame
+        session.check_control(session.checked_capture(control, args.threshold, control_hash), info)
         print("Unmute the speaker. Keep the same clock, channel routing, gains and threshold.")
         seen = {control_hash}
         for i, scene in enumerate(turns, 1):
@@ -231,7 +266,7 @@ def collect(args, directory, turns, take):
             if input(f"Turn {i}/{len(turns)}, {scene}. Type {token} to record {args.seconds} s: ") != token:
                 raise ValueError("turn cancelled")
             name = f"turn-{i:03d}.wav"
-            digest, started = record(trials / name, capture, args.rate, args.seconds, args.threshold)
+            digest, outcome = record(trials / name, capture, args.rate, args.seconds, args.threshold)
             # Validate the recorded stimulus, never condition inclusion on the latency or a reply.
             session.checked_capture(trials / name, args.threshold, digest)
             if digest in seen:
@@ -239,7 +274,7 @@ def collect(args, directory, turns, take):
             seen.add(digest)
             label = {"scene": scene, "pcm_sha256": digest}
             if args.responder:
-                label["bridge_started"] = started
+                label["bridge_started"] = outcome.started
             info["trials"][name] = label
     # Do not select trials by outcome. Even a turn with no speaker response is in the inventory.
     pending = directory / "session.json.partial"

@@ -22,6 +22,7 @@ def library():
         "hw_params": (c.c_int, ptr, ptr),
         "prepare": (c.c_int, ptr),
         "readi": (c.c_long, ptr, ptr, c.c_ulong),
+        "avail": (c.c_long, ptr),
         "wait": (c.c_int, ptr, c.c_int),
         "drop": (c.c_int, ptr),
     }
@@ -56,6 +57,10 @@ def endpoint(device, rate):
         finally:
             alsa.snd_pcm_hw_params_free(params)
 
+        def available():
+            # Sync the hardware pointer, without waiting for any new samples.
+            return check(alsa.snd_pcm_avail(pcm))
+
         def take(seconds, write):
             check(alsa.snd_pcm_prepare(pcm))
             try:
@@ -72,7 +77,7 @@ def endpoint(device, rate):
                         continue
                     if not 0 < check(n) <= requested:
                         raise OSError("invalid PCM read size")
-                    write(buf.raw[:4 * n])
+                    write(buf.raw[:4 * n], available)
                     remaining -= n
             finally:
                 # No recovery, draining, or automatic restart after loss or overrun.

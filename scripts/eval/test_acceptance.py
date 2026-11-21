@@ -55,7 +55,7 @@ class PhysicalInventoryTests(unittest.TestCase):
         self.assertTrue(all(v["max_ttfa_ms"] is None for v in self.measure()["noisy_scenes"].values()))
 
     def test_driven_misses_even_with_speaker_noise_and_started_bridge_without_sound(self):
-        self.info.update(mode="driven", control_bridge_started=True)
+        self.info.update(mode="driven", control_bridge_started=True, control_playback_frame=3520)  # exactly 280 ms left
         for label in self.info["trials"].values():
             label["bridge_started"] = True
         self.assertTrue(self.measure()["task_10_2"]["passed"])
@@ -78,6 +78,13 @@ class PhysicalInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "control did not start"):
             self.measure()
         self.info["control_bridge_started"] = True
+        with self.assertRaisesRegex(ValueError, "live control_playback_frame"):
+            self.measure()  # an old driven manifest with just the terminal outcome
+        for frame in (None, True, 0, -1, 1.5, "3520", 8001, 3521):
+            self.info["control_playback_frame"] = frame
+            with self.subTest(frame=frame), self.assertRaisesRegex(ValueError, "live control_playback_frame|captured tail"):
+                self.measure()
+        self.info["control_playback_frame"] = 3520
         for wrong in (None, 0, 1, "false"):
             if wrong is not None:
                 self.info["trials"]["0.wav"]["bridge_started"] = wrong
@@ -87,6 +94,9 @@ class PhysicalInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "passive recording cannot declare"):
             self.measure()
         del self.info["control_bridge_started"]
+        with self.assertRaisesRegex(ValueError, "passive recording cannot declare control_playback_frame"):
+            self.measure()
+        del self.info["control_playback_frame"]
         with self.assertRaisesRegex(ValueError, "passive recording cannot declare"):
             self.measure()
 

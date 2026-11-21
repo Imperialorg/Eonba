@@ -37,11 +37,20 @@ def checked_capture(path, threshold, digest):
     return capture
 
 
-def check_control(control, started=None):
+def check_control(control, info):
     if control.any_output or (control.frames - control.last_input_end) * 1000 < acoustic.P99_LIMIT_MS * control.rate:
         raise ValueError("muted control exceeds threshold or lacks post-stimulus tail")
+    started = bridge_started(info, "control_bridge_started", info["mode"])
     if started is False:
         raise ValueError("driven muted control did not start a bridge")
+    if started is True:
+        frame = info.get("control_playback_frame")
+        if type(frame) is not int or not 0 < frame <= control.frames:
+            raise ValueError("driven muted control requires a live control_playback_frame")
+        if (control.frames - frame) * 1000 < acoustic.P99_LIMIT_MS * control.rate:
+            raise ValueError("muted control lacks 280 ms of captured tail after playback")
+    elif "control_playback_frame" in info:
+        raise ValueError("passive recording cannot declare control_playback_frame")
 
 
 def bridge_started(label, key, mode):
@@ -81,7 +90,7 @@ def measure(directory):
     control = checked_capture(directory / "muted-control.wav", threshold, info.get("control_pcm_sha256"))
     if control.rate != rate:
         raise ValueError("muted control rate differs from acquisition sample_rate_hz")
-    check_control(control, bridge_started(info, "control_bridge_started", mode))
+    check_control(control, info)
 
     trials = directory / "trials"
     if trials.is_symlink() or not trials.is_dir():

@@ -26,56 +26,82 @@ fn reply(
     vad: SileroVad,
     asr: &mut ZipformerAsr,
     ready: impl FnOnce() -> Result<()>,
-    mut start: impl FnMut(Bridge) -> Result<()>,
-) -> Result<bool> {
+) -> Result<Option<Bridge>> {
     let mut endpoint = VadEndpoint::new(vad);
-    let mut stream = Some(asr.start_utterance()?);
+    let mut stream = asr.start_utterance()?;
     let mut partial = String::new();
     let (mut tx, rx) = pcm_ring(1 << 14);
     let mut frames = CaptureFrames::<VAD_FRAME_SAMPLES>::new(rx, rate)?;
     let mut input = io::BufReader::new(input);
-    let mut started = false;
     let mut bytes = [0; 512];
     ready()?;
     loop {
         // Arbitrarily fragmented pipe reads may split an i16.
         let mut n = input.read(&mut bytes)?;
         if n == 0 {
-            return Ok(started);
+            return Ok(None);
         }
         if n % 2 != 0 {
             input.read_exact(&mut bytes[n..=n])?;
             n += 1;
         }
-        if stream.is_some() {
-            let samples = bytes[..n].as_chunks::<2>().0;
-            let mut pcm = [0.; 256];
-            for (dst, pair) in pcm.iter_mut().zip(samples) {
-                *dst = f32::from(i16::from_le_bytes(*pair)) / 32768.;
+        let samples = bytes[..n].as_chunks::<2>().0;
+        let mut pcm = [0.; 256];
+        for (dst, pair) in pcm.iter_mut().zip(samples) {
+            *dst = f32::from(i16::from_le_bytes(*pair)) / 32768.;
+        }
+        if tx.push_slice(&pcm[..samples.len()]) != samples.len() {
+            return Err("discontinuous input".into());
+        }
+        while let Some(frame) = frames.try_read()? {
+            if let Some(update) = stream.push(&frame)? {
+                partial = update.text;
             }
-            if tx.push_slice(&pcm[..samples.len()]) != samples.len() {
-                return Err("discontinuous input".into());
-            }
-            while let Some(frame) = frames.try_read()? {
-                let decoder = stream.as_mut().unwrap();
-                if let Some(update) = decoder.push(&frame)? {
-                    partial = update.text;
+            if endpoint.push(&frame, &partial)?.is_some() {
+                let text = stream.finish()?;
+                if text.trim().is_empty() {
+                    return Ok(None);
                 }
-                if endpoint.push(&frame, &partial)?.is_some() {
-                    let text = stream.take().unwrap().finish()?;
-                    if !text.trim().is_empty() {
-                        start(match IntentPreview::from_partial(&text) {
-                            Some(IntentPreview::Question) => Bridge::Report,
-                            Some(IntentPreview::Request) => Bridge::Proposal,
-                            _ => Bridge::Notice,
-                        })?;
-                        started = true;
-                    }
-                    break;
-                }
+                return Ok(Some(match IntentPreview::from_partial(&text) {
+                    Some(IntentPreview::Question) => Bridge::Report,
+                    Some(IntentPreview::Request) => Bridge::Proposal,
+                    _ => Bridge::Notice,
+                }));
             }
         }
     }
+}
+
+// Protocol v2: ready '2', then either 'P' (whole prefix consumed by the selected
+// output callback) and terminal 'B', or just terminal 'N'. Keep reading the
+// bounded take during playback; never wait for the renderer in the audio callback.
+fn finish_take(
+    pcm: &mut dyn Read,
+    output: &mut dyn Write,
+    prefix_end: Option<u64>,
+    mut rendered: impl FnMut() -> Result<u64>,
+) -> Result<bool> {
+    let mut pending = prefix_end;
+    let mut observe = || -> Result<bool> {
+        let count = rendered()?;
+        if pending.is_some_and(|end| count >= end) {
+            status(output, b'P')?;
+            pending = None;
+        }
+        Ok(pending.is_none())
+    };
+    let mut block = [0; 8192];
+    while pcm.read(&mut block)? != 0 {
+        observe()?;
+    }
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !observe()? {
+        if Instant::now() >= deadline {
+            return Err("selected speaker stopped consuming PCM".into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Ok(prefix_end.is_some())
 }
 
 // u32 little-endian frame count, exactly that many mono i16 samples. Zero ends the
@@ -175,31 +201,21 @@ fn main() -> Result<()> {
         &mut io::stdout().lock(),
         rate,
         |pcm, output| {
-            let started = reply(
-                pcm,
-                rate,
-                SileroVad::load(&vad)?,
-                &mut asr,
-                || {
-                    healthy()?;
-                    status(output, b'R')
-                },
-                |bridge| {
-                    healthy()?;
-                    submitted += start_prefix(&mut tx, &gate, &cache, bridge)? as u64;
-                    Ok(())
-                },
-            )?;
-            let deadline = Instant::now() + Duration::from_secs(3);
-            while device.counters.frames.load(Acquire) < submitted {
+            let bridge = reply(&mut *pcm, rate, SileroVad::load(&vad)?, &mut asr, || {
                 healthy()?;
-                if Instant::now() >= deadline {
-                    return Err("selected speaker stopped consuming PCM".into());
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            healthy()?;
-            Ok(started)
+                status(output, b'2')
+            })?;
+            let prefix_end = if let Some(bridge) = bridge {
+                healthy()?;
+                submitted += start_prefix(&mut tx, &gate, &cache, bridge)? as u64;
+                Some(submitted)
+            } else {
+                None
+            };
+            finish_take(pcm, output, prefix_end, || {
+                healthy()?;
+                Ok(device.counters.frames.load(Acquire))
+            })
         },
     )?;
     healthy()?;
@@ -215,13 +231,34 @@ mod tests {
         for mut data in [&[2, 0, 0, 0, 1, 0][..], &[0, 1], &u32::MAX.to_le_bytes()] {
             let mut replies = Vec::new();
             let failed = serve(&mut data, &mut replies, 16000, |pcm, output| {
-                status(output, b'R')?;
+                status(output, b'2')?;
                 io::copy(pcm, &mut io::sink())?;
                 Ok(false)
             });
             assert!(failed.is_err());
-            assert!(replies.is_empty() || replies == b"R");
+            assert!(replies.is_empty() || replies == b"2");
         }
+    }
+
+    #[test]
+    fn marker_waits_for_this_prefix_and_is_sent_before_terminal_outcome() -> Result<()> {
+        let payload = [0u8; 16384]; // two drain reads and one EOF observation
+        let mut replies = Vec::new();
+        let mut counts = [17, 18, 19].into_iter();
+        let rendered = || Ok(counts.next().unwrap());
+        let started = finish_take(&mut &payload[..], &mut replies, Some(18), rendered)?;
+        assert!(started);
+        assert_eq!(replies, b"P");
+        // Lose the driver on the last (EOF) check: only a complete render observed
+        // during input drain can already have emitted P, but neither may emit B.
+        for (last_live, expected) in [(17, &b""[..]), (18, b"P")] {
+            replies.clear();
+            let mut counts = [Ok(17), Ok(last_live), Err("lost output".into())].into_iter();
+            let rendered = || counts.next().unwrap();
+            assert!(finish_take(&mut &payload[..], &mut replies, Some(18), rendered).is_err());
+            assert_eq!(replies, expected);
+        }
+        Ok(())
     }
 
     // Explicit native model test. The output ring here is not a physical latency measurement.
@@ -257,31 +294,31 @@ mod tests {
         let (mut tx, mut rx) = pcm_ring(1 << 19);
         let gate = CommitmentGate::new(1, BargeIn::new());
         serve(&mut &input[..], &mut replies, 16000, |pcm, output| {
-            let started = reply(
-                pcm,
+            let bridge = reply(
+                &mut *pcm,
                 16000,
                 SileroVad::load(models.join("vad/silero_vad.onnx"))?,
                 &mut asr,
-                || status(output, b'R'),
-                |bridge| {
-                    start_prefix(&mut tx, &gate, &cache, bridge)?;
-                    Ok(())
-                },
+                || status(output, b'2'),
             )?;
+            let prefix_end = bridge
+                .map(|b| start_prefix(&mut tx, &gate, &cache, b))
+                .transpose()?;
             let mut block = vec![0.; rx.available()];
-            rx.pop_slice(&mut block);
-            assert_eq!(block.iter().any(|s| s.abs() > 0.01), started);
-            Ok(started)
+            let rendered = rx.pop_slice(&mut block);
+            assert_eq!(block.iter().any(|s| s.abs() > 0.01), prefix_end.is_some());
+            finish_take(pcm, output, prefix_end.map(|n| n as u64), || {
+                Ok(rendered as u64)
+            })
         })?;
-        assert_eq!(replies, b"RBRNRNRB");
+        assert_eq!(replies, b"2PB2N2N2PB");
         assert!(
             reply(
                 &[1u8][..],
                 44100,
                 SileroVad::load(models.join("vad/silero_vad.onnx"))?,
                 &mut asr,
-                || Ok(()),
-                |_| panic!("must not render a truncated sample")
+                || Ok(())
             )
             .is_err()
         );

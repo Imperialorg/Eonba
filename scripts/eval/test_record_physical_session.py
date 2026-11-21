@@ -57,11 +57,12 @@ class RigTests(unittest.TestCase):
             self.device.assert_not_called()
 
     def test_responder_startup_failure_never_starts_capture(self):
-        self.responder("header()\nos.write(1, b'!')\n")
         take = MagicMock()
-        with (self.assertRaisesRegex(ValueError, "responder status"),
-              rig.responding_take(self.args, take) as capture):
-            capture(1, lambda _: self.fail("unexpected PCM"))
+        for ready in (b"!", b"R"):  # including the previous, marker-less protocol
+            self.responder(f"header()\nos.write(1, {ready!r})\n")
+            with (self.subTest(ready=ready), self.assertRaisesRegex(ValueError, "responder status"),
+                  rig.responding_take(self.args, take) as capture):
+                capture(1, lambda _: self.fail("unexpected PCM"))
         take.assert_not_called()
 
     def test_preserve_every_take_and_never_overwrite_a_session(self):
@@ -79,6 +80,7 @@ class RigTests(unittest.TestCase):
             self.assertEqual(manifest["mode"], "passive")
             self.assertEqual(manifest["sample_rate_hz"], 16000)
             self.assertNotIn("control_bridge_started", manifest)
+            self.assertNotIn("control_playback_frame", manifest)
             expected = ["control", *rig.session.SCENES]
             self.assertEqual(manifest["trials"], {
                 name: {"pcm_sha256": hashlib.sha256(name.encode()).hexdigest(), "scene": expected[i // 25]}
@@ -171,8 +173,8 @@ class RigTests(unittest.TestCase):
 
     def test_one_worker_exact_reference_after_short_writes_and_eagain_on_successive_takes(self):
         self.args.rate = 16000
-        self.responder("for left, result in [(1,b'B'), (2,b'N')]:\n"
-                       "    n = header()\n    os.write(1,b'R')\n"
+        self.responder("for left, result in [(1,b'PB'), (2,b'N')]:\n"
+                       "    n = header()\n    os.write(1,b'2')\n"
                        "    assert reader.read(n*2) == bytes([left,0])*n\n    os.write(1,result)\n"
                        "assert header() == 0\nos.write(1,b'D')\n")
         real_write = os.write
@@ -195,7 +197,7 @@ class RigTests(unittest.TestCase):
         with patch.object(rig.os, "write", side_effect=fragment), rig.responding_take(self.args, take) as capture:
             for i, expected in ((1, True), (2, False)):
                 saved = bytearray()
-                self.assertIs(capture(1, saved.extend), expected)
+                self.assertEqual(capture(1, saved.extend), rig.BridgeOutcome(expected, None))
                 self.assertEqual(saved, bytes([i, 0, 0xab, 0xcd]) * 16000)
         self.assertGreater(attempts, 100)
         self.args.speaker = "default"
@@ -210,7 +212,7 @@ class RigTests(unittest.TestCase):
                 save(pcm[i:i + 4096])
 
         for failure in ("overflow", "death"):
-            self.responder("header()\nos.write(1, b'R')\n" +
+            self.responder("header()\nos.write(1, b'2')\n" +
                            ("reader.read()\n" if failure == "overflow" else "os._exit(1)\n"))
             path = self.root / f"{failure}.wav"
             real_write = os.write
@@ -228,13 +230,19 @@ class RigTests(unittest.TestCase):
                 self.assertEqual(wav.readframes(16000), pcm)
 
     def test_driven_inventory_uses_control_and_each_exact_take_even_for_misses(self):
-        self.responder("for result in b'BBN':\n"
-                       "    n = header()\n    os.write(1, b'R')\n    assert len(reader.read(2*n)) == 2*n\n"
-                       "    os.write(1, bytes([result]))\nassert header() == 0\nos.write(1,b'D')\n")
+        self.responder("for result in (b'B', b'PB', b'N'):\n"
+                       "    n = header()\n    os.write(1, b'2')\n"
+                       "    if result == b'B':\n"
+                       "        assert len(reader.read(2400)) == 2400\n        n -= 1200\n"
+                       "        os.write(1, b'P')\n"
+                       "    assert len(reader.read(2*n)) == 2*n\n"
+                       "    os.write(1, result)\nassert header() == 0\nos.write(1,b'D')\n")
         # Slow the fixture producer only outside capture callbacks, like the hardware sample clock.
         index = 0
-        def take(seconds, save):
+        def take(seconds, write):
             nonlocal index
+            def save(block):
+                write(block, lambda: 0)
             index += 1
             prior = self.console.getvalue().count("Apply stimulus")
             self.assertEqual(prior, index - 1)
@@ -254,45 +262,137 @@ class RigTests(unittest.TestCase):
         info = json.loads((self.root / "session.json").read_text())
         self.assertEqual(info["mode"], "driven")
         self.assertIs(info["control_bridge_started"], True)
+        frame = info["control_playback_frame"]
+        self.assertGreater(frame, 1200)  # includes the entire callback that observed playback
+        self.assertGreaterEqual(30 * self.args.rate - frame, 4480)
         self.assertEqual([x["bridge_started"] for x in info["trials"].values()], [True, False])
         self.assertEqual(info["trials"].keys(), {p.name for p in (self.root / "trials").iterdir()})
 
-    def test_driven_control_without_playback_stops_before_unmute(self):
-        self.responder("n = header()\nos.write(1,b'R')\nassert len(reader.read(2*n)) == 2*n\nos.write(1,b'N')\n")
+    def test_control_tail_starts_beyond_the_adc_backlog_at_live_marker(self):
+        frames = self.args.rate * 30
+        marker_after = (frames // 1024 - 7) * 1024
+        pcm = bytes(4 * 800) + struct.pack("<hh", 1000, 0) * 400 + bytes(4 * (frames - 1200))
+        flag = self.root / "marked"
+        self.responder(f"n = header()\nos.write(1,b'2')\nk = {marker_after}\n"
+                       "assert len(reader.read(2*k)) == 2*k\nos.write(1,b'P')\n"
+                       "open(sys.argv[-1] + '/marked', 'x').close()\n"
+                       "assert len(reader.read(2*(n-k))) == 2*(n-k)\nos.write(1,b'B')\n"
+                       "assert header() == 0\nos.write(1,b'D')\n")
+        for future_frames in (0, 4480):  # entirely buffered vs. exactly 280 ms still to acquire
+            directory = self.root / str(future_frames)
+            directory.mkdir()
+            alsa = self.mock_alsa()
+            pos = 0
+
+            def read(_, buf, requested):
+                nonlocal pos
+                if pos == marker_after:
+                    # The test device delivers its next read only once P is ready.
+                    deadline = rig.time.monotonic() + 2
+                    while not flag.exists():
+                        self.assertLess(rig.time.monotonic(), deadline)
+                        rig.time.sleep(0.001)
+                end = pos + requested
+                stereo_pcm.c.memmove(buf, pcm[4 * pos:4 * end], 4 * requested)
+                pos = end
+                rig.time.sleep(0.001)
+                return requested
+
+            def available(_):
+                self.assertEqual(pos, marker_after + 1024)
+                return frames - pos - future_frames
+
+            alsa.snd_pcm_readi.side_effect = read
+            alsa.snd_pcm_avail.side_effect = available
+            with (self.subTest(future_frames=future_frames), patch.object(stereo_pcm, "library", return_value=alsa),
+                  stereo_pcm.endpoint("hw:2,0", self.args.rate) as take, patch("builtins.input", return_value="MUTED")):
+                if future_frames:
+                    rig.collect(self.args, directory, [], take)
+                    info = json.loads((directory / "session.json").read_text())
+                    self.assertEqual(info["control_playback_frame"], frames - future_frames)
+                else:
+                    with self.assertRaisesRegex(ValueError, "captured tail after playback"):
+                        rig.collect(self.args, directory, [], take)
+                    self.assertNotIn("Unmute", self.console.getvalue())
+                    self.assertFalse((directory / "session.json").exists())
+            with wave.open(str(directory / "muted-control.wav")) as wav:
+                self.assertEqual(wav.readframes(frames), pcm)
+            alsa.snd_pcm_avail.assert_called_once()
+            flag.unlink()
+
+    def test_absent_or_post_capture_playback_stops_before_unmute(self):
+        stalled = False
+        real_write = os.write
+
+        def fragment(fd, data):
+            if stalled:
+                raise BlockingIOError()
+            return real_write(fd, data)
+
         def take(seconds, save):
+            nonlocal stalled
             self.assertEqual(seconds, 30)
             save(bytes(4 * 800))
             save(struct.pack("<hh", 1000, 0) * 400)
             remaining = 16000 * seconds - 1200
             while remaining:
                 n = min(1024, remaining)
+                stalled = n == remaining  # final reference block cannot reach the worker until drain
                 save(bytes(4 * n))
                 remaining -= n
                 rig.time.sleep(0.001)
-        with (patch("builtins.input", side_effect=["MUTED"]) as prompt,
-              self.assertRaisesRegex(ValueError, "control did not start a bridge")):
-            rig.collect(self.args, self.root, rig.session.SCENES, take)
-        prompt.assert_called_once()
-        self.assertNotIn("Unmute", self.console.getvalue())
-        self.assertTrue((self.root / "muted-control.wav").is_file())
-        self.assertEqual(list((self.root / "trials").iterdir()), [])
-        self.assertFalse((self.root / "session.json").exists())
+            stalled = False
+
+        for outcome, reason in ((b"N", "control did not start a bridge"), (b"PB", "live control_playback_frame")):
+            directory = self.root / outcome.decode()
+            directory.mkdir()
+            self.responder("n = header()\nos.write(1,b'2')\nassert len(reader.read(2*n)) == 2*n\n"
+                           f"os.write(1,{outcome!r})\nreader.read()\n")
+            with (self.subTest(outcome=outcome), patch("builtins.input", side_effect=["MUTED"]) as prompt,
+                  patch.object(rig.os, "write", side_effect=fragment), self.assertRaisesRegex(ValueError, reason)):
+                rig.collect(self.args, directory, rig.session.SCENES, take)
+            prompt.assert_called_once()
+            self.assertNotIn("Unmute", self.console.getvalue())
+            with wave.open(str(directory / "muted-control.wav")) as wav:
+                self.assertEqual(wav.getnframes(), 30 * self.args.rate)
+            self.assertEqual(list((directory / "trials").iterdir()), [])
+            self.assertFalse((directory / "session.json").exists())
+
+    def test_malformed_markers_or_terminal_outcomes_fail_closed(self):
+        pcm = bytes(4 * self.args.rate)
+        for outcome in (b"B", b"PPB", b"PN", b"P", b"D", b"NB", b"PBP"):
+            self.responder("n = header()\nos.write(1,b'2')\nassert len(reader.read(2*n)) == 2*n\n"
+                           f"os.write(1,{outcome!r})\n")
+            def take(seconds, save):
+                for i in range(0, len(pcm), 4096):
+                    save(pcm[i:i + 4096])
+                    rig.time.sleep(0.001)
+            path = self.root / f"{outcome.decode()}.wav"
+            with (self.subTest(outcome=outcome), self.assertRaisesRegex(ValueError, "responder status"),
+                  rig.responding_take(self.args, take) as capture):
+                rig.record(path, capture, self.args.rate, 1, 500)
+            with wave.open(str(path)) as wav:
+                self.assertEqual(wav.readframes(self.args.rate), pcm)
 
     def test_loss_before_final_stream_check_cannot_publish(self):
         self.responder("assert header() == 0\n")  # exits zero without checking the held route
         with (patch("builtins.input", return_value="MUTED"),
-              patch.object(rig, "record", return_value=("control", True)),
+              patch.object(rig, "record", return_value=("control", rig.BridgeOutcome(True, 1200))),
               patch.object(rig.session, "checked_capture"), patch.object(rig.session, "check_control"),
               self.assertRaisesRegex(ValueError, "missing responder status")):
             rig.collect(self.args, self.root, [], MagicMock())
         self.assertFalse((self.root / "session.json").exists())
 
-    def test_incompatible_rate_rejected_before_capture_and_loss_never_reopens(self):
+    def mock_alsa(self):
         alsa = MagicMock()
         for name in ("open", "close", "hw_params_malloc", "hw_params_any", "hw_params_set_access",
                      "hw_params_set_format", "hw_params_set_channels", "hw_params_set_rate",
                      "hw_params", "prepare", "drop"):
             getattr(alsa, "snd_pcm_" + name).return_value = 0
+        return alsa
+
+    def test_incompatible_rate_rejected_before_capture_and_loss_never_reopens(self):
+        alsa = self.mock_alsa()
         with patch.object(stereo_pcm, "library", return_value=alsa):
             alsa.snd_pcm_hw_params_set_rate.return_value = -22
             with self.assertRaises(OSError), stereo_pcm.endpoint("hw:2,0", 96000):
