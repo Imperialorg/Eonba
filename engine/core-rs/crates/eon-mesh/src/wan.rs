@@ -31,6 +31,9 @@ const ALPN: &[u8] = b"eon/mesh/wan-qos/1";
 const STREAM_TIMEOUT: Duration = Duration::from_secs(30);
 const RECEIVED: u8 = 1;
 const MAX_AUDIO: usize = 1150;
+// Includes noq's per-datagram bookkeeping. Fits a maximum wire chunk but
+// not two ordinary 20 ms frames (640 PCM bytes each).
+const AUDIO_RECV_WINDOW: usize = 1200;
 
 fn transport_error(error: impl std::fmt::Display) -> EonError {
     EonError::OperationFailed {
@@ -152,6 +155,7 @@ impl WanEndpoint {
             // Only Class 0 uses DATAGRAM. Let new audio displace unsent audio
             // under pressure instead of replaying a large FIFO after an outage.
             .datagram_send_buffer_size(MAX_AUDIO)
+            .datagram_receive_buffer_size(Some(AUDIO_RECV_WINDOW))
             .build();
         timeout(wait, async {
             let ep = builder
@@ -288,6 +292,8 @@ impl WanEndpoint {
         Ok(())
     }
 
+    /// Read in arrival order. If the reader stalls, older unread datagrams
+    /// are evicted to make room. This is a byte budget, not an age check.
     pub async fn recv_audio(&self) -> EonResult<AudioPcmChunk> {
         let bytes = self.conn.read_datagram().await.map_err(transport_error)?;
         if bytes.len() > MAX_AUDIO {

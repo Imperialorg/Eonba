@@ -190,6 +190,14 @@ async fn iroh_and_qos_tests_pinned_relay_carries_all_four_lanes_on_one_connectio
     Ok(())
 }
 
+fn voice_frame(seq: u8, pcm_bytes: usize) -> AudioPcmChunk {
+    AudioPcmChunk {
+        sequence_number: i64::from(seq),
+        pcm_data: vec![seq; pcm_bytes],
+        ..Default::default()
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn iroh_and_qos_tests_voice_burst_replaces_unsent_audio() -> EonResult<()> {
     let (a, b) = (SecretKey::generate(), SecretKey::generate());
@@ -198,11 +206,6 @@ async fn iroh_and_qos_tests_voice_burst_replaces_unsent_audio() -> EonResult<()>
     let (left, right) = tokio::try_join!(endpoint(a, bid, &url), endpoint(b, aid, &url))?;
 
     for (tx, rx) in [(&left, &right), (&right, &left)] {
-        let frame = |seq: u8| AudioPcmChunk {
-            sequence_number: i64::from(seq),
-            pcm_data: vec![seq; 640], // 20 ms of 16 kHz mono PCM16
-            ..Default::default()
-        };
         let sent = || {
             tx.paths()
                 .iter()
@@ -213,22 +216,57 @@ async fn iroh_and_qos_tests_voice_burst_replaces_unsent_audio() -> EonResult<()>
         // No await in this burst: the same-thread QUIC driver cannot drain
         // the sender between frames.
         for seq in 1..=8 {
-            tx.send_audio(&frame(seq))?;
+            tx.send_audio(&voice_frame(seq, 640))?;
         }
         let latest = timeout(WAIT, rx.recv_audio()).await.unwrap()?;
         assert_eq!(latest.sequence_number, 8);
         assert_eq!(sent() - before, 1, "stale datagrams left the sender");
 
         // A maximum-size legal chunk must still fit, even with PCM already queued.
-        tx.send_audio(&frame(9))?;
-        let full = AudioPcmChunk {
-            pcm_data: vec![42; 1144],
-            ..frame(128)
-        };
+        tx.send_audio(&voice_frame(9, 640))?;
+        let full = voice_frame(128, 1144);
         assert_eq!(full.encoded_len(), 1150);
         tx.send_audio(&full)?;
         assert!(timeout(WAIT, rx.recv_audio()).await.unwrap()? == full);
         assert_eq!(sent() - before, 2);
+    }
+    tokio::join!(left.close(), right.close());
+    relay.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test]
+async fn iroh_and_qos_tests_slow_reader_drops_old_audio_after_arrival() -> EonResult<()> {
+    let (a, b) = (SecretKey::generate(), SecretKey::generate());
+    let (aid, bid) = (a.public(), b.public());
+    let (relay, url) = relay(&[&a, &b]).await;
+    let (left, right) = tokio::try_join!(endpoint(a, bid, &url), endpoint(b, aid, &url))?;
+
+    for (tx, rx) in [(&left, &right), (&right, &left)] {
+        let received = || {
+            rx.paths()
+                .iter()
+                .map(|p| p.stats().frame_rx.datagram)
+                .sum::<u64>()
+        };
+        for latest in [voice_frame(2, 640), voice_frame(128, 1144)] {
+            // Prove both frames reached QUIC before reading either. Otherwise
+            // sender eviction or network loss could make an unbounded reader pass.
+            for frame in [&voice_frame(1, 640), &latest] {
+                let before = received();
+                tx.send_audio(frame)?;
+                timeout(WAIT, async {
+                    while received() == before {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("datagram did not arrive");
+            }
+            let frame = timeout(WAIT, rx.recv_audio()).await.unwrap()?;
+            assert_eq!(frame.sequence_number, latest.sequence_number);
+            assert!(frame == latest);
+        }
     }
     tokio::join!(left.close(), right.close());
     relay.shutdown().await.unwrap();
