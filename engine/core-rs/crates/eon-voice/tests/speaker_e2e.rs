@@ -15,6 +15,8 @@ mod kokoro_release;
 #[cfg(target_os = "linux")]
 #[path = "speaker/kokoro_stop.rs"]
 mod kokoro_stop;
+#[path = "speaker/switch.rs"]
+mod switch;
 #[cfg(target_os = "linux")]
 #[path = "common/private_monitor.rs"]
 mod private_monitor;
