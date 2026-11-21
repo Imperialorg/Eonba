@@ -272,6 +272,25 @@ fn start_playback(consumer: PcmConsumer, barge: BargeIn, reference: Option<PcmPr
     let device = cpal::default_host()
         .default_output_device()
         .ok_or_else(|| device_err("playback.device", "no default output device"))?;
+    start_on(&device, consumer, barge, reference)
+}
+
+/// Play on the operator-selected endpoint. A disconnected device is not replaced by the default.
+pub fn play_selected_output(id: &cpal::DeviceId, consumer: PcmConsumer, barge: BargeIn) -> EonResult<PlaybackHandle> {
+    let device = cpal::host_from_id(id.host())
+        .map_err(|e| device_err("playback.host", e))?
+        .device_by_id(id)
+        .filter(|device| device.id().ok().as_ref() == Some(id))
+        .ok_or_else(|| device_err("playback.device", "selected output is unavailable"))?;
+    start_on(&device, consumer, barge, None)
+}
+
+fn start_on(
+    device: &cpal::Device,
+    consumer: PcmConsumer,
+    barge: BargeIn,
+    reference: Option<PcmProducer>,
+) -> EonResult<PlaybackHandle> {
     let config = device
         .default_output_config()
         .map_err(|e| device_err("playback.config", e))?;
@@ -289,8 +308,8 @@ fn start_playback(consumer: PcmConsumer, barge: BargeIn, reference: Option<PcmPr
             barge: barge.clone(),
         };
         let stream = match config.sample_format() {
-            SampleFormat::F32 => build_playback::<f32>(&device, &config, owner, Arc::clone(&counters), barge.clone())?,
-            SampleFormat::I16 => build_playback::<i16>(&device, &config, owner, Arc::clone(&counters), barge.clone())?,
+            SampleFormat::F32 => build_playback::<f32>(device, &config, owner, Arc::clone(&counters), barge.clone())?,
+            SampleFormat::I16 => build_playback::<i16>(device, &config, owner, Arc::clone(&counters), barge.clone())?,
             other => {
                 return Err(device_err(
                     "playback.format",

@@ -182,7 +182,16 @@ python3 scripts/eval/record_physical_session.py /absolute/private/session \
   --gains 'measured fixed gains' --threshold CALIBRATED_PCM_LEVEL --noisy
 ```
 
-Replace the example device and threshold with the actual hardware number and calibration. On little-endian Linux, the recorder opens one ALSA hardware endpoint after terminal confirmation. It requires the exact stereo format and rate, stops capture between takes, and never reopens a disconnected device. Exercise all included stimuli with the speaker muted for the 30-second control. Unmute, acknowledge each numbered turn, then apply its stimulus **after** recording begins. `--noisy` schedules 25 turns per scene including clean; without it all 100 are clean. For the noisy groups, supply the corresponding 0 dB mixtures on the input, not the speaker pickup. No raw audio is uploaded. An overrun, missing stimulus, duplicate recording or interruption leaves the original files but no completed manifest. A timing miss stays in the inventory. The recorder does not start EON, select the stimulus, attest the wiring or produce a passing verdict; run the evaluator on the completed directory.
+Replace the example device and threshold with the actual hardware number and calibration. On little-endian Linux, the recorder opens one ALSA hardware endpoint after terminal confirmation. It requires the exact stereo format and rate, stops capture between takes, and never reopens a disconnected device. Exercise all included stimuli with the speaker muted for the 30-second control. Unmute, acknowledge each numbered turn, then apply its stimulus **after** recording begins. `--noisy` schedules 25 turns per scene including clean; without it all 100 are clean. For the noisy groups, supply the corresponding 0 dB mixtures on the input, not the speaker pickup. No raw audio is uploaded. An overrun, missing stimulus, duplicate recording or interruption leaves the original files but no completed manifest. A timing miss stays in the inventory.
+
+To drive EON from that same live input, build `cargo build --locked --release -p eon-voice --bin eon-rig-turn` in the Rust workspace. Provide the locked Silero VAD, English Zipformer, `kokoro-v1.0-release-int8` and `af_heart` assets, ONNX Runtime and `espeak-ng`. Add these recorder options, substituting the canonical ALSA hardware output ID and your own trusted paths:
+
+```sh
+--responder /absolute/path/to/eon-rig-turn \
+--speaker alsa:hw:CARD=SpeakerName,DEV=0 --models /absolute/path/to/perception/models
+```
+
+After each confirmation the responder warms its models and opens **only** the named speaker. At “Recording now” the recorder streams only the physical left channel to EON. The right pickup is saved, never fed into recognition. Silero endpoints the turn using live Zipformer partials; a nonempty final selects one boot-cached Kokoro prefix. It does not run an action, open a second microphone, or log the transcript. With no responder options the recorder is passive, for use with a separate device under test. The responder does not shorten the normal semantic silence tiers (300/800/1150 ms) to meet the benchmark; these are a real constraint on this path. Verify acoustic timing on the retained recordings, not from a rendered prefix or a fixture.
 
 Use `muted-control.wav`, a `trials/` directory containing only the original stereo PCM16 WAVs (one independent end-to-end turn per file), and `session.json` with these fields:
 

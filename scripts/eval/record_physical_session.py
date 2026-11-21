@@ -6,7 +6,10 @@ import json
 import os
 from pathlib import Path
 import re
+import select
+import subprocess
 import sys
+import time
 import wave
 
 import physical_session as session
@@ -34,6 +37,52 @@ def record(path, take, rate, seconds):
     return digest.hexdigest()
 
 
+def responding_take(args, take):
+    """Warm one local responder per acknowledged take. Never forward the speaker pickup."""
+    def run(seconds, write):
+        command = [str(args.responder), "--live-reference", str(args.rate), args.speaker, str(args.models)]
+        with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0) as worker:
+            try:
+                ready = b""
+                deadline = time.monotonic() + 90
+                while ready != b"READY\n":
+                    wait = max(0, deadline - time.monotonic())
+                    if not select.select([worker.stdout], [], [], wait)[0]:
+                        raise TimeoutError("responder did not warm")
+                    part = os.read(worker.stdout.fileno(), 6 - len(ready))
+                    ready += part
+                    if not part or not b"READY\n".startswith(ready):
+                        raise ValueError("invalid responder startup")
+                os.set_blocking(worker.stdin.fileno(), False)
+                fault = None
+
+                def receive(stereo):
+                    nonlocal fault
+                    write(stereo)
+                    if fault is None:
+                        left = memoryview(stereo).cast("h")[::2].tobytes()
+                        try:
+                            if os.write(worker.stdin.fileno(), left) != len(left):
+                                raise OSError("partial reference transfer")
+                        except OSError as error:
+                            # Keep the complete original take even if the DUT stops reading.
+                            fault = error
+
+                print("Responder ready. Recording now.", flush=True)
+                take(seconds, receive)
+                worker.stdin.close()
+                if fault is not None:
+                    raise OSError("responder lost input; capture retained") from fault
+                if worker.wait(timeout=5) != 0:
+                    raise ValueError("responder failed; capture retained")
+            except subprocess.TimeoutExpired as error:
+                raise TimeoutError("responder did not stop") from error
+            finally:
+                if worker.poll() is None:
+                    worker.kill()
+    return run
+
+
 def acquire(args):
     if sys.platform != "linux" or sys.byteorder != "little":
         raise ValueError("supported acquisition hosts are little-endian Linux")
@@ -41,6 +90,11 @@ def acquire(args):
         raise ValueError("operator terminal required; no unattended recording")
     if not re.fullmatch(r"hw:[0-9]{1,3},[0-9]{1,3}", args.device):
         raise ValueError("select one dedicated hardware capture PCM as hw:CARD_NUMBER,DEVICE_NUMBER")
+    if args.responder or args.speaker or args.models:
+        if not (args.responder and args.responder.is_absolute() and args.models and args.models.is_absolute()
+                and re.fullmatch(r"alsa:hw:CARD=[A-Za-z0-9_-]+,DEV=[0-9]{1,3}", args.speaker or "")):
+            raise ValueError("select an absolute local responder, model directory and explicit ALSA hardware speaker")
+        print(f"The local responder {args.responder} will receive the LEFT channel only, and play on {args.speaker}.")
     if not args.route.strip() or not args.gains.strip() or not 1 <= args.threshold <= 32767:
         raise ValueError("provide the common route, fixed gains and calibrated threshold")
     if not args.directory.is_absolute():
@@ -67,7 +121,7 @@ def acquire(args):
         fd = os.open(args.directory.name, os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
         try:
             with endpoint(args.device, args.rate) as take:
-                collect(args, Path(f"/proc/self/fd/{fd}"), turns, take)
+                collect(args, Path(f"/proc/self/fd/{fd}"), turns, responding_take(args, take) if args.responder else take)
         finally:
             os.close(fd)
     finally:
@@ -117,6 +171,9 @@ def main(argv=None):
     cli.add_argument("--rate", type=int, choices=(16000, 44100, 48000, 96000), default=48000)
     cli.add_argument("--seconds", type=int, choices=range(2, 31), default=5, metavar="2..30")
     cli.add_argument("--noisy", action="store_true", help="25 turns each of control, babble, traffic and TV")
+    cli.add_argument("--responder", type=Path, help="absolute path to your trusted local eon-rig-turn executable")
+    cli.add_argument("--models", type=Path, help="digest-verified local model directory for --responder")
+    cli.add_argument("--speaker", help="dedicated responder output ID: alsa:hw:CARD=NAME,DEV=N")
     args = cli.parse_args(argv)
     try:
         acquire(args)

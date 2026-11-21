@@ -29,6 +29,10 @@ webrtc-audio-processing-config = { version = "2.1", optional = true }
 cc = { version = "1", optional = true }
 sha2 = { version = "0.10", optional = true }
 
+[[bin]]
+name = "eon-rig-turn"
+required-features = ["native"]
+
 [[test]]
 name = "sherpa_e2e"
 required-features = ["sherpa-onnx"]

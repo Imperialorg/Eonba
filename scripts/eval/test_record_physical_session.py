@@ -22,7 +22,8 @@ class RigTests(unittest.TestCase):
         self.root = Path(temp.name)
         self.dest = self.root / "takes"
         self.args = argparse.Namespace(directory=self.dest, route="unit test", gains="fixed",
-                                       threshold=500, device="hw:2,0", rate=16000, seconds=2, noisy=True)
+                                       threshold=500, device="hw:2,0", rate=16000, seconds=2, noisy=True,
+                                       responder=None, speaker=None, models=None)
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
         self.device = self.enterContext(patch.object(rig, "endpoint"))
 
@@ -43,6 +44,17 @@ class RigTests(unittest.TestCase):
             self.assertFalse(self.dest.exists())
             recorder.assert_not_called()
             self.device.assert_not_called()
+
+    def test_responder_startup_failure_never_starts_capture(self):
+        self.args.responder = self.root / "test-worker"
+        self.args.speaker = "alsa:hw:CARD=Test,DEV=1"
+        self.args.models = self.root
+        self.args.responder.write_text("#!/bin/sh\nprintf BAD\n")
+        self.args.responder.chmod(0o700)
+        take = MagicMock()
+        with self.assertRaisesRegex(ValueError, "invalid responder startup"):
+            rig.responding_take(self.args, take)(1, lambda _: self.fail("unexpected PCM"))
+        take.assert_not_called()
 
     def test_preserve_every_take_and_never_overwrite_a_session(self):
         def fake(path, *args):
@@ -117,6 +129,22 @@ class RigTests(unittest.TestCase):
         self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
         with self.assertRaisesRegex(ValueError, "clock and frame count"):
             rig.record(self.root / "mismatch.wav", write, rate, 2)
+
+    def test_responder_gets_only_the_reference_and_capture_retains_both_channels(self):
+        self.args.responder = self.root / "test-worker"
+        self.args.speaker = "alsa:hw:CARD=Test,DEV=1"
+        self.args.models = self.root
+        self.args.responder.write_text("#!/usr/bin/env python3\nimport sys\nprint('READY', flush=True)\n"
+                                       "assert sys.stdin.buffer.read() == b'\\x01\\x02\\x03\\x04'\n")
+        self.args.responder.chmod(0o700)
+        stereo = b"\x01\x02\xab\xcd\x03\x04\xed\xfe"
+        got = []
+        rig.responding_take(self.args, lambda seconds, save: save(stereo))(1, got.append)
+        self.assertEqual(got, [stereo])
+        self.args.speaker = "default"
+        with patch.object(rig.sys.stdin, "isatty", return_value=True), self.assertRaisesRegex(ValueError, "speaker"):
+            rig.acquire(self.args)
+        self.device.assert_not_called()
 
     def test_incompatible_rate_rejected_before_capture_and_loss_never_reopens(self):
         alsa = MagicMock()
