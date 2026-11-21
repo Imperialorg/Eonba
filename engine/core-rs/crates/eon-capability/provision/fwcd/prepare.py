@@ -48,6 +48,22 @@ s = cut(s, "                add(ComponentRegistrar.", "                addJvmCla
 s = cut(s, "                if (scriptsConfig.enabled)", "            },\n            configFiles")
 s = cut(s, "        // hacky way", "        val project = environment.project")
 s = replace(s, "        scripts = ScriptDefinitionProvider.getInstance(project)!! as CliScriptDefinitionProvider", "")
+# KotlinCoreEnvironment.createPackagePartProvider registers each provider in
+# a project-lifetime list. The JVM facade asks for the source module's
+# scope (only snapshot PSI; no binary roots) and its complement (both jars).
+# Never retain either edit-specific scope in the environment.
+s = replace(s, "    fun createContainer(sourcePath:", """
+    private val binaryParts by lazy {
+        environment.createPackagePartProvider(com.intellij.psi.search.GlobalSearchScope.allScope(environment.project))
+    }
+
+    fun createContainer(sourcePath:""")
+s = replace(s, "        val container = TopDownAnalyzerFacadeForJVM.createContainer(",
+            "        val sourceScope = TopDownAnalyzerFacadeForJVM.newModuleSearchScope(environment.project, sourcePath)\n"
+            "        val container = TopDownAnalyzerFacadeForJVM.createContainer(\n"
+            "            sourceModuleSearchScope = sourceScope,")
+s = replace(s, "packagePartProvider = environment::createPackagePartProvider,",
+            "packagePartProvider = { scope -> if (scope === sourceScope) org.jetbrains.kotlin.load.kotlin.PackagePartProvider.Empty else binaryParts },")
 s = cut(s, "        if (kind == CompilationKind.BUILD_SCRIPT)", "        compileLock.withLock",
         "        require(kind == CompilationKind.DEFAULT)\n")
 s = cut(s, "    fun removeGeneratedCode", "    override fun close()",

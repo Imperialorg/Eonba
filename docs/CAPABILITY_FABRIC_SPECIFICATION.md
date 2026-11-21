@@ -292,24 +292,28 @@ CLI: `KotlinLanguageServer`, its text-document service, `SourcePath`, JVM
 analysis, definition, references, hover and diagnostic conversion come from
 fwcd. The fixed entry point accepts only open `.kt` snapshots (16 × 64 KiB),
 with the release stdlib and the vetted JDK's `java.base` classes as data.
+The client rejects an encoded document URI over 4096 bytes before sending
+`didOpen`; the rejection leaves previously opened snapshots usable.
 It does not expose upstream workspace/command RPCs, formatting, decompilation,
 workspace symbols, database indexing, configuration, scripts or build output.
 The stock server's unconditional scratch-directory creation is removed; the
 kernel protections, including the no-exec seal, are unchanged.
 
-Every open, change or close invalidates the module. A diagnostic pull checks
-the requested document version and echoes it for the client to verify. Warm
+Every open, change or close invalidates the module. Its source analysis is
+rebuilt on demand; the compiler reuses one package-part provider for the two
+fixed binary roots without retaining previous edits' source scopes. The
+offline build checks the retained provider count after 32 compilations, and
+the confined gate checks fresh caller diagnostics across 256 callee edits.
+A diagnostic pull checks the requested document version and echoes it for the
+client to verify. Warm
 queries reuse the completed analysis of that exact set of buffers. The fwcd
 gate tests `listOf`, `sum` and `repeat`, overload selection across files,
 cross-buffer invalidation and close/reopen; it measures cold start and edit
 to fresh report separately. On the AMD EPYC 9V45 Linux runner, the 20-sample
-warm p95s were **0.746 ms definition, 1.100 ms references, 0.389 ms hover and
-0.103 ms diagnostics**. Cold launch to first diagnostic took **2.772 s**;
-edit to fresh report took **146.339 ms p95**. The sub-50-ms warm target is
-**not** an edit-latency target. A repeat with the same image took 4.749 s
-to the first diagnostic; warm definition, references, hover and diagnostics
-were 2.066, 2.085, 0.562 and 0.197 ms p95. Edit to fresh report was
-270.489 ms p95.
+warm p95s with the bounded provider were **0.634 ms definition, 1.128 ms
+references, 0.353 ms hover and 0.128 ms diagnostics**. Cold launch to first
+diagnostic took **2.610 s**; edit to fresh report took **123.704 ms p95**.
+The sub-50-ms warm target is **not** an edit-latency target.
 
 ### 3.3 Cyber Defense & Hardening Capabilities (`cyber.defense.*`)
 Automates host security, static taint tracking, and live patching.

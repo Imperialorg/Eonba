@@ -719,6 +719,11 @@ impl LocalLsp {
         let language = self.kind.language(relative_path)?;
         let (text, _) = snapshot(&self.workspace, relative_path)?;
         let uri = virtual_uri(&self.virtual_root, relative_path);
+        // fwcd validates the ASCII wire URI, not the shorter on-disk path.
+        // didOpen is a notification: once sent it cannot be rejected safely.
+        if self.fwcd_snapshots && uri.len() > 4096 {
+            return Err(invalid("encoded fwcd document URI exceeds 4096 bytes"));
+        }
         let version = self.next_version()?;
         let end = Position::document_end(&text);
         if let Some(names) = self.python_names.as_mut() {

@@ -34,6 +34,8 @@ for name in "${extra[@]}"; do
     classpath+=":$name.jar"
     files+=("$name.jar")
 done
+"$jdk/bin/javac" --release 17 -proc:none -cp "$classpath" -d build/tests "$here/fwcd/ProviderLifetimeTest.java"
+"$jdk/bin/java" -Xmx320m -Didea.home.path=/eon-no-idea -cp "build/tests:$classpath" ProviderLifetimeTest >&2
 "$jdk/bin/jlink" --add-modules java.base,java.desktop,java.management,java.logging,jdk.unsupported \
     --strip-debug --no-header-files --no-man-pages --strip-native-commands --output build/jre
 mkdir -p jre/lib/server

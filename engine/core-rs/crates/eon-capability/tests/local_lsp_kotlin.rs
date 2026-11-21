@@ -113,6 +113,36 @@ fn confined_fwcd_snapshots() {
     assert!(server.diagnostics("Quote.kt").is_err());
     server.change("Quote.kt", b).unwrap();
     assert_eq!(server.diagnostics("Quote.kt").unwrap(), errors);
+    // This is a valid filesystem path (< 2 KiB, components < NAME_MAX),
+    // but every '%' needs three bytes on the wire. Reject it locally.
+    let deep = (0..7).map(|_| "%".repeat(200)).collect::<Vec<_>>().join("/");
+    fs::create_dir_all(project.0.join(&deep)).unwrap();
+    let overlong = format!("{deep}/Long.kt");
+    fs::write(project.0.join(&overlong), "val shouldNotEnterSession = 1\n").unwrap();
+    let refused = server.open(&overlong).unwrap_err();
+    assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData);
+    assert!(refused.to_string().contains("encoded fwcd document URI"), "{refused}");
+    assert_eq!(server.diagnostics("Quote.kt").unwrap(), errors);
+
+    // Alternate inferred return types in unsaved edits. Each caller report
+    // must use the current callee, not a stale module or the on-disk source.
+    let edit_start = Instant::now();
+    for i in 0..256 {
+        let body = if i % 2 == 0 {
+            format!("listOf(n, {i}).sum()")
+        } else {
+            format!("\"edit-{i}\" + n")
+        };
+        server.change("Math.kt", &a.replace("listOf(n, n).sum()", &body)).unwrap();
+        let actual = server.diagnostics("Quote.kt").unwrap();
+        if i % 2 == 0 {
+            assert_eq!(actual, errors, "edit {i}");
+        } else {
+            assert!(actual.is_empty(), "edit {i}: {actual:?}");
+        }
+    }
+    eprintln!("256 distinct callee edits + fresh caller reports: {:?}", edit_start.elapsed());
+    assert!(server.hover_type("Quote.kt", at).unwrap().unwrap().contains("twice(n: Int): String"));
     pool.shutdown().unwrap();
     assert_eq!(fs::read_to_string(project.0.join("Quote.kt")).unwrap(), b);
 }
