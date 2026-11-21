@@ -47,6 +47,7 @@ internal object ControlsAssist {
     private val main = Handler(Looper.getMainLooper())
     private var service: EonVoiceInteractionService? = null
     private var displayed: ControlsConsent.Ticket? = null
+    internal val bindingReady get() = service != null
 
     fun ready(owner: EonVoiceInteractionService) {
         consent.reset()

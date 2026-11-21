@@ -112,6 +112,18 @@ class AssistantActivity : Activity() {
         }
         column.addView(roleStatus)
         column.addView(requestRole)
+        if (Build.VERSION.SDK_INT >= 35) {
+            column.addView(Button(this).apply {
+                id = R.id.projection_grant_controls
+                setText(R.string.projection_controls)
+                filterTouchesWhenObscured = true
+                setOnClickListener {
+                    if (resumed && hasWindowFocus()) {
+                        ProjectionGrantActivity.open(this@AssistantActivity)
+                    }
+                }
+            })
+        }
         if (Build.VERSION.SDK_INT >= 31) {
             contextReview = Button(this).apply {
                 id = R.id.assistant_context_review
@@ -205,7 +217,10 @@ class AssistantActivity : Activity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (!hasFocus) resetContextReview()
+        if (Build.VERSION.SDK_INT >= 35) ProjectionGrantActivity.launcherFocus(this, hasFocus)
     }
+
+    internal val projectionForeground get() = resumed && hasWindowFocus() && !isInMultiWindowMode && !isInPictureInPictureMode
 
     private fun updateMicPermissionStatus() {
         micPermissionStatus?.setText(when {

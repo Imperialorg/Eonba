@@ -25,13 +25,20 @@ class InspectionManifestTest {
         val manifest = root("AndroidManifest.xml")
         assertFalse(manifest.elements("application").single().hasAttributeNS(android, "debuggable"))
         assertEquals(setOf("HIDE_OVERLAY_WINDOWS", "RECORD_AUDIO", "SYSTEM_ALERT_WINDOW", "POST_NOTIFICATIONS",
-            "FOREGROUND_SERVICE", "FOREGROUND_SERVICE_SPECIAL_USE", "FOREGROUND_SERVICE_MICROPHONE").map { "android.permission.$it" }.toSet(),
+            "FOREGROUND_SERVICE", "FOREGROUND_SERVICE_SPECIAL_USE", "FOREGROUND_SERVICE_MICROPHONE",
+            "FOREGROUND_SERVICE_MEDIA_PROJECTION").map { "android.permission.$it" }.toSet(),
             manifest.elements("uses-permission").map { it.attr("name") }.toSet())
         val microphone = manifest.elements("uses-feature").single { it.attr("name") == "android.hardware.microphone" }
         assertEquals("false", microphone.attr("required"))
         val services = manifest.elements("service").associateBy { it.attr("name") }
         assertEquals(setOf(".FocusedControlService", ".EonVoiceInteractionService", ".EonVoiceSessionService",
-            ".FloatingHudService"), services.keys)
+            ".FloatingHudService", ".ProjectionGrantService"), services.keys)
+        val grant = services.getValue(".ProjectionGrantService")
+        assertEquals("mediaProjection", grant.attr("foregroundServiceType"))
+        assertEquals("false", grant.attr("exported"))
+        assertEquals("true", grant.attr("stopWithTask"))
+        assertEquals("@bool/projection_grant_supported", grant.attr("enabled"))
+        assertTrue(grant.elements("intent-filter").isEmpty())
         val floating = services.getValue(".FloatingHudService")
         assertEquals("false", floating.attr("exported"))
         assertEquals(setOf("specialUse", "microphone"), floating.attr("foregroundServiceType").split('|').toSet())

@@ -27,6 +27,9 @@ class EonVoiceInteractionService : VoiceInteractionService() {
 
     private fun release() {
         ControlsAssist.release(this)
+        if (android.os.Build.VERSION.SDK_INT >= 35 && owner != null && !ControlsAssist.bindingReady) {
+            ProjectionGrantActivity.bindingEnded()
+        }
         owner?.let(voiceHud::shutdown)
         owner = null
         InspectionAccess.cancel()

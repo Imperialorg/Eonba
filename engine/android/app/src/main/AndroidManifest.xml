@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <application android:name=".FoundationVaultApplication"
         android:label="EON" android:allowBackup="false"
@@ -22,6 +23,12 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+        <activity android:name=".ProjectionGrantActivity" android:exported="false"
+            android:launchMode="singleTask" android:taskAffinity="com.eon.assistant.grant"
+            android:enabled="@bool/projection_grant_supported" />
+        <service android:name=".ProjectionGrantService" android:exported="false"
+            android:enabled="@bool/projection_grant_supported" android:stopWithTask="true"
+            android:foregroundServiceType="mediaProjection" />
         <activity android:name=".InspectionResultActivity" android:exported="false"
             android:excludeFromRecents="true" android:noHistory="true"
             android:taskAffinity="com.eon.assistant.inspection" />
