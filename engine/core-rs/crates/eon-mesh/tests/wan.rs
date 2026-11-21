@@ -15,6 +15,7 @@ use eon_mesh::{
 };
 use iroh::{EndpointId, RelayUrl, SecretKey};
 use iroh_relay::server::{Access, AccessControl, ClientRequest, RelayConfig, Server, ServerConfig};
+use prost::Message;
 use tokio::time::timeout;
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -202,28 +203,32 @@ async fn iroh_and_qos_tests_voice_burst_replaces_unsent_audio() -> EonResult<()>
             pcm_data: vec![seq; 640], // 20 ms of 16 kHz mono PCM16
             ..Default::default()
         };
+        let sent = || {
+            tx.paths()
+                .iter()
+                .map(|p| p.stats().frame_tx.datagram)
+                .sum::<u64>()
+        };
+        let before = sent();
         // No await in this burst: the same-thread QUIC driver cannot drain
-        // the sender between frames. The wire may deliver only the newest.
+        // the sender between frames.
         for seq in 1..=8 {
             tx.send_audio(&frame(seq))?;
         }
-        assert_eq!(
-            timeout(WAIT, rx.recv_audio())
-                .await
-                .unwrap()?
-                .sequence_number,
-            8
-        );
+        let latest = timeout(WAIT, rx.recv_audio()).await.unwrap()?;
+        assert_eq!(latest.sequence_number, 8);
+        assert_eq!(sent() - before, 1, "stale datagrams left the sender");
 
-        // A subsequent send still works; no old PCM may be waiting ahead of it.
+        // A maximum-size legal chunk must still fit, even with PCM already queued.
         tx.send_audio(&frame(9))?;
-        assert_eq!(
-            timeout(WAIT, rx.recv_audio())
-                .await
-                .unwrap()?
-                .sequence_number,
-            9
-        );
+        let full = AudioPcmChunk {
+            pcm_data: vec![42; 1144],
+            ..frame(128)
+        };
+        assert_eq!(full.encoded_len(), 1150);
+        tx.send_audio(&full)?;
+        assert!(timeout(WAIT, rx.recv_audio()).await.unwrap()? == full);
+        assert_eq!(sent() - before, 2);
     }
     tokio::join!(left.close(), right.close());
     relay.shutdown().await.unwrap();
