@@ -17,6 +17,7 @@ COOKIE = 0x2112A442
 HEADER = struct.Struct("!HHI12s")
 MI = struct.pack("!HH", 0x001C, 32)
 PROOF = struct.pack("!HH", 0xC0E5, 16)
+WAIT = struct.pack("!HH", 0xC0E6, 4)
 RFC1918 = tuple(map(ipaddress.IPv4Network, ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")))
 MAX_COUNT = (1 << 64) - 1
 
@@ -92,15 +93,26 @@ class Member:
         require(re.fullmatch("[0-9a-f]{64}", spec["password"]))
         self.user, self.pin = username(spec["user"]), bytes.fromhex(spec["pin"])
         self.key = spec["password"].encode("ascii")
-        self.pending = self.live = None  # (expiry, source, transaction, random return cookie)
+        self.pending = self.live = self.waiter = None
         self.credit, self.last = 8, 0
         self.observed = self.published = 0
 
     def expire(self, now):
-        if self.pending and now >= self.pending[0]:
+        if self.pending and now >= self.pending[0] + 3:
             self.pending = None
         if self.live and now >= self.live[0]:
             self.live = None
+        if self.waiter and now >= self.waiter[0]:
+            self.waiter = None
+
+    def take_reply(self, peer):
+        # A single already-paid response to a return-verified source; consume
+        # before send, even on UDP loss. Only a fresh proof can arm another.
+        _, tx = self.waiter
+        self.waiter = None
+        src = self.live[1]
+        self.published = min(MAX_COUNT, self.published + 1)
+        return src, signed(0x0101, tx, mapped(src) + paired(peer.pin, peer.live[1]), self.key)
 
     def allow(self, now):
         self.credit = min(8, self.credit + 4 * (now - self.last))
@@ -132,49 +144,56 @@ class Publisher:
     def reserved(self, ip):
         return self.net.prefixlen < 31 and ip in (self.net.network_address, self.net.broadcast_address)
 
-    def reply(self, data, source, now):
+    def replies(self, data, source, now):
         for member in self.members:
             member.expire(now)
         ip = ipaddress.IPv4Address(source[0])
         if (ip not in self.net or source[0] == self.listen[0] or not self.lo <= source[1] <= self.hi
                 or self.reserved(ip) or not 112 <= len(data) <= 256):
-            return None
+            return ()
         for i, member in enumerate(self.members):
             if not data[20:].startswith(member.user):
                 continue
             try:
                 tx, attrs = verified(data, 1, member.key)
             except ValueError:
-                return None
+                return ()
             rest = attrs[len(member.user):]
             proof = None
+            wait_ms = 1000  # one bounded receive window for the original proof format
             if rest.startswith(PROOF) and len(rest) >= 20:
                 proof, rest = rest[4:20], rest[20:]
+                if rest.startswith(WAIT) and len(rest) >= 8:
+                    wait_ms, = struct.unpack_from("!I", rest, 4)
+                    if not 0 < wait_ms <= 1000:
+                        return ()
+                    rest = rest[8:]
             # Only zero PADDING is allowed after USERNAME and optional proof.
             if (len(rest) < 4 or rest[:4] != struct.pack("!HH", 0x0026, len(rest)-4)
                     or any(rest[4:]) or len(rest) % 4 or not member.allow(now)):
-                return None
+                return ()
             peer = self.members[1 - i]
             if proof is None:
                 if not member.pending or member.pending[1:3] != (source, tx):
-                    member.pending = (now + 3, source, tx, secrets.token_bytes(16))
+                    member.pending = (now, source, tx, secrets.token_bytes(16))
                 attrs = mapped(source) + PROOF + member.pending[3]
-            else:
-                def matches(record):
-                    return record and record[1:3] == (source, tx) and hmac.compare_digest(record[3], proof)
-                if matches(member.pending):
-                    member.live, member.pending = (now + 5, *member.pending[1:]), None
-                    member.observed = min(MAX_COUNT, member.observed + 1)
-                elif not matches(member.live):
-                    return None
-                if not peer.live or peer.live[1] == source:
-                    return None
-                attrs = mapped(source) + paired(peer.pin, peer.live[1])
-                member.published = min(MAX_COUNT, member.published + 1)
-            # At most one <=112-byte response to this >=112-byte authenticated
-            # request. Destination is always recvfrom's source, never wire data.
-            return signed(0x0101, tx, attrs, member.key)
-        return None
+                return ((source, signed(0x0101, tx, attrs, member.key)),)
+            pending = member.pending
+            if not pending or pending[1:3] != (source, tx) or not hmac.compare_digest(pending[3], proof):
+                return ()
+            member.pending = None
+            # Anchor the grant conservatively to challenge issuance, not echo
+            # arrival: a delayed echo cannot open another full receive window.
+            until = pending[0] + wait_ms / 1000
+            if now >= until:
+                return ()
+            member.live = (now + 5, source)
+            member.waiter = (until, tx)
+            member.observed = min(MAX_COUNT, member.observed + 1)
+            if not peer.live or peer.live[1] == source:
+                return ()
+            return tuple(m.take_reply(p) for m, p in ((member, peer), (peer, member)) if m.waiter)
+        return ()
 
 
 def serve(service):
@@ -197,12 +216,11 @@ def serve(service):
                 for member in service.members:
                     member.expire(time.monotonic())
                 continue
-            response = service.reply(data, source, time.monotonic())
-            if response is not None:
+            for dest, response in service.replies(data, source, time.monotonic()):
                 try:
-                    sock.sendto(response, source)
+                    sock.sendto(response, dest)
                 except OSError:
-                    pass  # UDP route loss; clients can retransmit
+                    pass  # clients can start a fresh authenticated transaction
     for i, m in enumerate(service.members):
         print(f"member={i} confirmed={m.observed} paired_replies={m.published}")
 

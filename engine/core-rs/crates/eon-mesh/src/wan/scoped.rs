@@ -126,15 +126,25 @@ impl WanEndpoint {
         if pinned == secret.public() {
             return Err(invalid("WAN peer must have a distinct key"));
         }
+        // The relay needs time for TLS, QUIC and reciprocal peer registration,
+        // including a lost first dial. Spend at most a quarter on optional UDP.
+        let discovery_end = Instant::now() + (wait / 4).min(Duration::from_millis(1750));
         timeout(wait, async {
             let mut builder = relay_builder(QuicTransportConfig::builder()).ca_tls_config(
                 iroh::tls::CaTlsConfig::custom_roots([config.relay_root_der.clone().into()]),
             );
             let mut dst = EndpointAddr::new(pinned).with_relay_url(config.relay.clone());
             let mut custom = None;
-            if let Ok(socket) = UdpSocket::bind(config.bind).await
-                && let Some((own, peer)) = binding::discover(&socket, &config, pinned).await?
-            {
+            let candidate = tokio::time::timeout_at(discovery_end, async {
+                let Ok(socket) = UdpSocket::bind(config.bind).await else {
+                    return Ok(None);
+                };
+                let mapping = binding::discover(&socket, &config, pinned, discovery_end).await?;
+                Ok::<_, EonError>(mapping.map(|pair| (socket, pair)))
+            })
+            .await
+            .unwrap_or(Ok(None))?;
+            if let Some((socket, (own, peer))) = candidate {
                 config.admit(own, peer)?;
                 // Connected UDP: the kernel also enforces the sole validated
                 // destination/source; no peer wire address reaches send_to.

@@ -10,6 +10,7 @@ const INTEGRITY: [u8; 4] = [0, 0x1c, 0, 32];
 // IPv4/port (network order), two zero padding bytes. Both attributes precede MI.
 const PAIRED: u16 = 0xc0e4;
 const PROOF: [u8; 4] = [0xc0, 0xe5, 0, 16];
+const WAIT_MS: [u8; 4] = [0xc0, 0xe6, 0, 4];
 type Mapping = (SocketAddrV4, SocketAddrV4);
 
 #[derive(Debug, PartialEq, Eq)]
@@ -18,7 +19,7 @@ enum Answer {
     Pair(Mapping),
 }
 
-fn request(user: &[u8], tx: &[u8; 12], key: &hmac::Key, proof: Option<[u8; 16]>) -> Vec<u8> {
+fn request(user: &[u8], tx: &[u8; 12], key: &hmac::Key, proof: Option<([u8; 16], u32)>) -> Vec<u8> {
     let padded = user.len().next_multiple_of(4);
     let mut msg = vec![0, 1];
     msg.extend_from_slice(&[0; 2]);
@@ -27,9 +28,11 @@ fn request(user: &[u8], tx: &[u8; 12], key: &hmac::Key, proof: Option<[u8; 16]>)
     msg.extend_from_slice(&[0, 6, 0, user.len() as u8]);
     msg.extend_from_slice(user);
     msg.resize(24 + padded, 0);
-    if let Some(token) = proof {
+    if let Some((token, wait_ms)) = proof {
         msg.extend_from_slice(&PROOF);
         msg.extend_from_slice(&token);
+        msg.extend_from_slice(&WAIT_MS);
+        msg.extend_from_slice(&wait_ms.to_be_bytes());
     }
     // RFC 5780 PADDING keeps even the 112-byte pair response within the
     // request's wire budget. The publisher never accepts an alternate target.
@@ -97,20 +100,27 @@ pub(super) async fn discover(
     socket: &UdpSocket,
     cfg: &PrivateWanConfig,
     pin: EndpointId,
+    discovery_end: Instant,
 ) -> EonResult<Option<Mapping>> {
-    let mut tx = [0; 12];
-    SystemRandom::new()
-        .fill(&mut tx)
-        .map_err(|_| transport_error("STUN randomness unavailable"))?;
     let key = hmac::Key::new(hmac::HMAC_SHA256, &cfg.stun_password);
-    let mut proof = None;
-    let mut req = request(cfg.stun_username.as_bytes(), &tx, &key, proof);
     let mut buf = [0; 257];
     for ms in [250, 500, 1000] {
+        let now = Instant::now();
+        if now >= discovery_end {
+            break;
+        }
+        let deadline = discovery_end.min(now + Duration::from_millis(ms));
+        // A confirmed request pays for at most one pair reply. Recover from
+        // packet loss with a fresh transaction/proof, never a replay credit.
+        let mut tx = [0; 12];
+        SystemRandom::new()
+            .fill(&mut tx)
+            .map_err(|_| transport_error("STUN randomness unavailable"))?;
+        let mut proved = false;
+        let req = request(cfg.stun_username.as_bytes(), &tx, &key, None);
         if socket.send_to(&req, cfg.stun).await.is_err() {
             return Ok(None);
         }
-        let deadline = Instant::now() + Duration::from_millis(ms);
         while let Ok(Ok((n, source))) =
             tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await
         {
@@ -119,9 +129,20 @@ pub(super) async fn discover(
             {
                 match answer {
                     Answer::Pair(mapping) => return Ok(Some(mapping)),
-                    Answer::Challenge(token) if proof.is_none() => {
-                        proof = Some(token);
-                        req = request(cfg.stun_username.as_bytes(), &tx, &key, proof);
+                    Answer::Challenge(token) if !proved => {
+                        let wait_ms = deadline
+                            .saturating_duration_since(Instant::now())
+                            .as_millis() as u32;
+                        if wait_ms == 0 {
+                            break;
+                        }
+                        proved = true;
+                        let req = request(
+                            cfg.stun_username.as_bytes(),
+                            &tx,
+                            &key,
+                            Some((token, wait_ms)),
+                        );
                         if socket.send_to(&req, cfg.stun).await.is_err() {
                             return Ok(None);
                         }

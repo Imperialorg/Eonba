@@ -18,48 +18,92 @@ class PublisherTests(unittest.TestCase):
         self.pub = stun.Publisher(self.cfg)
         self.src = [("10.77.0.2", 41770), ("10.77.0.3", 41771)]
 
-    def packet(self, i, tx, token=None):
+    def packet(self, i, tx, token=None, wait_ms=1000):
         m = self.pub.members[i]
-        attrs = m.user + (stun.PROOF + token if token is not None else b"")
+        attrs = m.user
+        if token is not None:
+            attrs += stun.PROOF + token + stun.WAIT + struct.pack("!I", wait_ms)
         n = max(0, 112 - (56 + len(attrs) + 4))
         return stun.signed(1, tx, attrs + struct.pack("!HH", 0x26, n) + bytes(n), m.key)
 
     def challenge(self, i, tx, now):
         m = self.pub.members[i]
-        reply = self.pub.reply(self.packet(i, tx), self.src[i], now)
+        ((dest, reply),) = self.pub.replies(self.packet(i, tx), self.src[i], now)
+        self.assertEqual(dest, self.src[i])
         _, attrs = stun.verified(reply, 0x0101, m.key, tx)
         self.assertEqual(attrs[:16], stun.mapped(self.src[i]) + stun.PROOF)
         return attrs[16:]
 
     def test_return_proof_bound_to_source_identity_and_lifetime(self):
-        tx = secrets.token_bytes(12)
+        tx, txb = secrets.token_bytes(12), secrets.token_bytes(12)
         ca = self.challenge(0, tx, 0)
-        cb = self.challenge(1, tx, 0)
+        cb = self.challenge(1, txb, 0.1)
         a = self.packet(0, tx, ca)
-        b = self.packet(1, tx, cb)
+        b = self.packet(1, txb, cb)
         for invalid, source in [(a, self.src[1]), (b, self.src[0]),
-                                (self.packet(1, tx, ca), self.src[1]),
+                                (self.packet(1, txb, ca), self.src[1]),
                                 (self.packet(0, bytes(12), ca), self.src[0])]:
-            self.assertIsNone(self.pub.reply(invalid, source, 0))
-        self.assertIsNone(self.pub.reply(a, self.src[0], 1))  # peer not yet proven
-        reply = self.pub.reply(b, self.src[1], 2)
-        self.assertEqual(stun.verified(reply, 0x0101, self.pub.members[1].key, tx)[1],
-                         stun.mapped(self.src[1]) + stun.paired(self.pub.members[0].pin, self.src[0]))
-        self.assertLessEqual(len(reply), len(b))
-        self.assertIsNotNone(self.pub.reply(a, self.src[0], 5))
-        self.assertIsNone(self.pub.reply(a, self.src[0], 6))  # retries don't renew
+            self.assertFalse(self.pub.replies(invalid, source, 0.11))
+        self.assertFalse(self.pub.replies(a, self.src[0], 0.12))  # paid, waiting
+        self.assertFalse(self.pub.replies(a, self.src[0], 0.13))  # no second credit
+        replies = dict(self.pub.replies(b, self.src[1], 0.999))
+        self.assertEqual(set(replies), set(self.src))
+        for i, tid in enumerate((tx, txb)):
+            reply = replies[self.src[i]]
+            self.assertEqual(stun.verified(reply, 0x0101, self.pub.members[i].key, tid)[1],
+                             stun.mapped(self.src[i]) + stun.paired(self.pub.members[1-i].pin, self.src[1-i]))
+            self.assertLessEqual(len(reply), len((a, b)[i]))
+        for i, replay in enumerate((a, b)):
+            self.assertFalse(self.pub.replies(replay, self.src[i], 1))
+            self.assertFalse(self.pub.replies(replay, self.src[1-i], 1))
+        self.assertFalse(self.pub.replies(a, self.src[0], 6))
         self.assertNotEqual(ca, self.challenge(0, tx, 7))
-        self.assertIsNone(self.pub.reply(a, self.src[0], 7))
+        self.assertFalse(self.pub.replies(a, self.src[0], 7))
         a2 = self.packet(0, tx, self.challenge(0, tx, 8))
-        self.assertIsNone(self.pub.reply(a2, self.src[0], 10))  # challenge expired
+        self.assertFalse(self.pub.replies(a2, self.src[0], 10))  # challenge expired
         self.assertEqual([m.observed for m in self.pub.members], [1, 1])
+        self.assertEqual([m.published for m in self.pub.members], [1, 1])
+
+    def test_expired_superseded_or_consumed_waiters_are_not_destinations(self):
+        tx, other = bytes(12), bytes(range(12))
+        ca = self.challenge(0, tx, 0)
+        for ms in (0, 1001):
+            self.assertFalse(self.pub.replies(self.packet(0, tx, ca, ms), self.src[0], 0))
+        a = self.packet(0, tx, ca, 80)
+        self.assertFalse(self.pub.replies(a, self.src[0], 0.001))
+        self.assertFalse(self.pub.replies(a, self.src[0], 0.079))  # cannot extend
+        b = self.packet(1, other, self.challenge(1, other, 0.080))
+        self.assertEqual([d for d, _ in self.pub.replies(b, self.src[1], 0.081)], [self.src[1]])
+        # A fresh transaction recovers a lost reply. Not another packet to B.
+        original, self.src[0] = self.src[0], ("10.77.0.4", 41772)
+        fresh = self.packet(0, other, self.challenge(0, other, 0.1))
+        self.assertEqual([d for d, _ in self.pub.replies(fresh, self.src[0], 0.11)], [self.src[0]])
+        self.assertFalse(self.pub.replies(a, original, 0.12))
+        self.assertFalse(self.pub.replies(b, self.src[1], 0.12))
+        late = self.packet(1, tx, self.challenge(1, tx, 1), 80)
+        self.assertFalse(self.pub.replies(late, self.src[1], 1.09))
+        self.assertEqual([m.published for m in self.pub.members], [1, 1])
+
+    def test_replace_unanswered_request_only_after_new_source_proof(self):
+        tx, new = bytes(12), bytes(range(12))
+        old_src = self.src[0]
+        old = self.packet(0, tx, self.challenge(0, tx, 0))
+        self.assertFalse(self.pub.replies(old, old_src, 0.001))
+        self.src[0] = ("10.77.0.4", 41772)
+        newer = self.packet(0, new, self.challenge(0, new, 0.01))
+        self.assertFalse(self.pub.replies(newer, self.src[0], 0.02))
+        b = self.packet(1, tx, self.challenge(1, tx, 0.03))
+        replies = dict(self.pub.replies(b, self.src[1], 0.04))
+        self.assertEqual(set(replies), set(self.src))
+        stun.verified(replies[self.src[0]], 0x0101, self.pub.members[0].key, new)
+        self.assertFalse(self.pub.replies(old, old_src, 0.05))
 
     def test_limit_no_reply_to_unsigned_public_outside_or_wrong_port(self):
         tx = bytes(range(12))
         req = self.packet(0, tx)
         for src in [("203.0.113.1", 41770), ("10.77.0.0", 41770), ("10.77.0.7", 41770),
                     ("10.77.0.1", 41770), ("10.77.0.2", 22)]:
-            self.assertIsNone(self.pub.reply(req, src, 0))
+            self.assertFalse(self.pub.replies(req, src, 0))
         m = self.pub.members[0]
         padding = req[20 + len(m.user):-36]
         for bad in (req[:-1], req + b"\0", req[:-1] + bytes([req[-1] ^ 1]),
@@ -67,12 +111,14 @@ class PublisherTests(unittest.TestCase):
                     stun.signed(1, tx, stun.username("unknown") + padding, m.key),
                     stun.signed(1, tx, m.user + stun.mapped(self.src[1]) + padding, m.key),
                     stun.signed(1, tx, m.user + padding[:-1] + b"\x01", m.key)):
-            self.assertIsNone(self.pub.reply(bad, self.src[0], 0))
+            self.assertFalse(self.pub.replies(bad, self.src[0], 0))
         for _ in range(8):
-            self.assertLessEqual(len(self.pub.reply(req, self.src[0], 0)), len(req))
-        self.assertIsNone(self.pub.reply(req, self.src[0], 0.24))
-        self.assertIsNotNone(self.pub.reply(req, self.src[0], 0.25))
-        self.assertIsNotNone(self.pub.reply(self.packet(1, tx), self.src[1], 0))
+            ((dest, reply),) = self.pub.replies(req, self.src[0], 0)
+            self.assertEqual(dest, self.src[0])
+            self.assertLessEqual(len(reply), len(req))
+        self.assertFalse(self.pub.replies(req, self.src[0], 0.24))
+        self.assertTrue(self.pub.replies(req, self.src[0], 0.25))
+        self.assertTrue(self.pub.replies(self.packet(1, tx), self.src[1], 0.25))
         self.assertTrue(all(m.live is None for m in self.pub.members))
 
     def test_private_literal_policy_and_file_permissions(self):

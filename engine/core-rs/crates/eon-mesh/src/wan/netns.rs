@@ -393,6 +393,9 @@ async fn peer(side: &str) -> EonResult<()> {
             ),
             "accepted or dialed the publisher's out-of-scope negative control"
         );
+        if side == "b" {
+            wait("open-second-member").await;
+        }
         let ep = WanEndpoint::open_private(me.clone(), peer, config()?, rate, WAIT).await?;
         assert!(
             ep.endpoint.bound_sockets().is_empty(),
@@ -531,8 +534,20 @@ async fn peer(side: &str) -> EonResult<()> {
         only.close().await;
         mark(&format!("scoped-closed-{side}"));
         wait(&format!("scoped-closed-{other}")).await;
-        // The private publisher has exited. A new open must still rendezvous.
-        let fallback = WanEndpoint::open_private(me, peer, config()?, rate, WAIT).await?;
+        // Silent Binding, healthy relay: shorter than the full STUN retry
+        // schedule. Neither the QUIC timers nor the outer deadline are changed.
+        let short = Duration::from_millis(1500);
+        let mut silent = config()?;
+        silent.stun.set_port(3480);
+        let start = Instant::now();
+        let fallback = WanEndpoint::open_private(me, peer, silent, rate, short).await?;
+        let elapsed = start.elapsed();
+        println!(
+            "STUN silent side={side} budget_ms=1500 relay_open_us={}",
+            elapsed.as_micros()
+        );
+        assert!(elapsed < short);
+        assert_eq!(fallback.peer_id(), peer);
         assert!(fallback.paths().iter().all(|p| p.remote_addr().is_relay()));
         batch(&fallback, side, 6).await?;
         mark(&format!("relay-only-complete-{side}"));

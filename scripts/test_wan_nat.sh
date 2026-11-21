@@ -259,6 +259,7 @@ PY
     for outer in 2 3; do
         inside "$relay" iptables -I OUTPUT -p udp --sport 3478 -d "10.77.0.$outer" -j DROP
     done
+    inside "$relay" iptables -A INPUT -s 10.77.0.2 -p udp --sport 41770 --dport 3478
 fi
 role "$relay" relay
 await_marker ready
@@ -270,13 +271,25 @@ if [[ $discovery == stun ]]; then
     wait "${jobs[0]}"
     jobs=("${jobs[@]:1}")
     await_marker publisher.pid
-    observed() {
-        inside "$relay" iptables -nvxL OUTPUT | awk '/spt:3478/ && $1 > 0 {n++} END{exit n != 2}'
+    await_packets() {
+        local chain=$1 pattern=$2 min=$3
+        for ((i=0; i<80; i++)); do
+            if inside "$relay" iptables -nvxL "$chain" | awk -v p="$pattern" -v n="$min" \
+                '$0 ~ p && $1 >= n {found=1} END{exit !found}'; then return 0; fi
+            sleep .01
+        done
+        echo "no evidence of $min packets for $pattern" >&2; return 1
     }
-    for ((i=0; i<50; i++)); do observed && break; sleep .01; done
-    observed
     udp_cookie() { inside "$1" ss -HOaune "src $2" | awk '{for(i=1;i<=NF;i++) if ($i ~ /^sk:/) print $i}'; }
-    a_cookie=$(udp_cookie "$a" 192.168.1.2) b_cookie=$(udp_cookie "$b" 192.168.2.2)
+    # A cannot prove either of its first two requests. Start B only after
+    # A's final request AND its proof reach the publisher (no more retries).
+    await_packets OUTPUT '10[.]77[.]0[.]2 .*spt:3478' 2
+    a_cookie=$(udp_cookie "$a" 192.168.1.2)
+    inside "$relay" iptables -D OUTPUT -p udp --sport 3478 -d 10.77.0.2 -j DROP
+    await_packets INPUT 'spt:41770 dpt:3478' 4
+    touch open-second-member
+    await_packets OUTPUT '10[.]77[.]0[.]3 .*spt:3478' 1
+    b_cookie=$(udp_cookie "$b" 192.168.2.2)
     [[ $a_cookie =~ ^sk:[[:xdigit:]]+$ && $b_cookie =~ ^sk:[[:xdigit:]]+$ ]]
 else
     await_marker bootstrap-proven-a
@@ -287,9 +300,7 @@ ipn "$na" route del blackhole 10.77.0.3/32
 ipn "$nb" route del blackhole 10.77.0.2/32
 touch route-open
 if [[ $discovery == stun ]]; then
-    for outer in 2 3; do
-        inside "$relay" iptables -D OUTPUT -p udp --sport 3478 -d "10.77.0.$outer" -j DROP
-    done
+    inside "$relay" iptables -D OUTPUT -p udp --sport 3478 -d 10.77.0.3 -j DROP
 fi
 direct=0
 await_marker direct-proven && direct=1
@@ -313,7 +324,12 @@ if [[ $discovery == stun ]]; then
     wait "${jobs[0]}"
     jobs=("${jobs[@]:1}")
     cat stun.log
-    [[ $(grep -cE '^member=[01] confirmed=1 paired_replies=[1-9][0-9]*$' stun.log) == 2 ]]
+    [[ $(grep -cE '^member=[01] confirmed=1 paired_replies=1$' stun.log) == 2 ]]
+    # Fresh destination port: the fixture's single-port SNAT must not collide
+    # with the previous Binding flow's conntrack entry. Silent, never ICMP.
+    for outer in 2 3; do
+        inside "$relay" iptables -I INPUT -s "10.77.0.$outer" -d 10.77.0.1 -p udp --dport 3480 -j DROP
+    done
 fi
 standby_cookie() {
     inside "$a" ss -HOetn state established src 172.30.84.2 dst "10.77.0.1:$1" |
@@ -348,5 +364,14 @@ if [[ $cut_mode == interface-loss ]]; then
 fi
 for pid in "${jobs[@]}"; do wait "$pid"; done
 jobs=()
+if [[ $discovery == stun ]]; then
+    inside "$relay" iptables -nvxL INPUT >silent.log
+    for outer in 2 3; do
+        if [[ $cut_mode == interface-loss && $outer == 2 ]]; then continue; fi
+        count=$(awk -v src="10.77.0.$outer" '$3=="DROP" && $8==src && /dpt:3480/{print $1}' silent.log)
+        [[ $count =~ ^[1-9][0-9]*$ ]]
+        echo "silent Binding from 10.77.0.$outer: packets=$count" >>routes.log
+    done
+fi
 grep -hE '^(QAD|STUN|witness|stream|relay )' a.log b.log relay.log
 python3 -I "$report" "$strict" "$profile" "$cut_mode" "$media" "$discovery" | tee summary.log
