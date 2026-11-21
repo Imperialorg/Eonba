@@ -3,12 +3,17 @@ use serde_json::json;
 use tree_sitter::Parser;
 
 // § marks the compiler's location; these snippets are only parsed, never run.
-fn repair(marked: &str, code: &str, message: &str) -> Option<String> {
+fn proposal(marked: &str, code: &str, message: &str) -> Option<String> {
     let (left, right) = marked.split_once('§').unwrap();
     let source = format!("{left}{right}");
     let diag = json!({"code": code, "offset": left.len(), "message": message});
     let (rule, revision) = propose("kotlin", &source, &diag)?;
     assert_eq!(rule, code);
+    Some(revision)
+}
+
+fn repair(marked: &str, code: &str, message: &str) -> Option<String> {
+    let revision = proposal(marked, code, message)?;
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_kotlin_ng::LANGUAGE.into())
@@ -163,6 +168,63 @@ fn supertype_requires_a_unique_open_class_with_an_implicit_empty_constructor() {
         format!("{src}\nfun incomplete("),
     ] {
         assert!(repair(&bad, code, "").is_none(), "{bad}");
+    }
+}
+
+#[test]
+fn compact_supertype_preserves_original_bytes_on_both_sides_of_the_edit() {
+    let base = "// 🧭 }\r\nopen class Hull { val label = \"a }\"\t}\r\n";
+    let derived = "class Yacht : /* { */ §Hull { fun weigh() { } }\r\n";
+    for src in [format!("{base}{derived}"), format!("{derived}{base}")] {
+        assert_eq!(
+            proposal(&src, "SUPERTYPE_NOT_INITIALIZED", "").unwrap(),
+            src.replace("§Hull", "Hull()")
+        );
+    }
+}
+
+#[test]
+fn a_compact_brace_is_not_evidence_of_a_superclass_or_a_safe_constructor() {
+    let src = "open class Lens { val radius = 3 }\nclass Prime : §Lens { fun d() = 2 }\n";
+    let code = "SUPERTYPE_NOT_INITIALIZED";
+    for bad in [
+        src.replace("§Lens", "L§ens"),
+        src.replace("§Lens", "§Lens()"),
+        src.replace("§Lens", "§Lens, Other"),
+        src.replace("class Prime", "interface Prime"),
+        src.replace("val radius = 3", "constructor(i: Int)"),
+        src.replace("fun d() = 2", "constructor() : super()"),
+        format!("{src}typealias Lens = String\n"),
+    ] {
+        assert!(proposal(&bad, code, "").is_none(), "{bad}");
+    }
+    assert!(proposal(src, "UNRESOLVED_REFERENCE", "").is_none());
+    // Even a supported rule with a matching target gets no general recovery.
+    assert!(
+        proposal(
+            "class Lens { val radius = 3 }\nconst val LIMIT = §read()\n",
+            "CONST_VAL_WITH_NON_CONST_INITIALIZER",
+            "",
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn virtual_member_terminators_do_not_hide_other_syntax_errors() {
+    let src = "open class Tool { val id = 0 }\nclass Saw : §Tool { val n = 1 }\n";
+    for bad in [
+        src.replace("id = 0 }", "id = 0 // }"),
+        src.replace("id = 0 }", "id = \"}"),
+        src.replace("id = 0 }", "id = 0 + }"),
+        src.replace("n = 1 }", "n = 1 val m = 2 }"),
+        format!("{src}fun unfinished("),
+        format!("{src}}}"),
+    ] {
+        assert!(
+            proposal(&bad, "SUPERTYPE_NOT_INITIALIZED", "").is_none(),
+            "{bad}"
+        );
     }
 }
 

@@ -90,7 +90,8 @@ fn rust(source: &str, diag: &Value) -> Option<(String, String)> {
 
 /// Propose at most one localized repair for the leading diagnostic. Rust
 /// consumes one rustc JSON diagnostic. TS and Kotlin consume a compiler code,
-/// UTF-8 byte offset and message. Never return an unparseable revision.
+/// UTF-8 byte offset and message. Require a full parse of the revision;
+/// Kotlin's checked layout view preserves the original byte offsets.
 pub fn propose(dialect: &str, source: &str, diagnostic: &Value) -> Option<(String, String)> {
     if source.is_empty() || source.len() > 8192 {
         return None;
@@ -100,15 +101,12 @@ pub fn propose(dialect: &str, source: &str, diagnostic: &Value) -> Option<(Strin
         "kotlin" => {
             let mut parser = Parser::new();
             parser.set_language(&tree_sitter_kotlin_ng::LANGUAGE.into()).ok()?;
-            let tree = parser.parse(source, None)?;
-            let root = tree.root_node();
-            if root.has_error() {
-                return None;
-            }
-            let edit = kotlin::edit(root, source, diagnostic)?;
-            let result = apply(source, vec![edit])?;
             let code = diagnostic["code"].as_str()?;
-            (!parser.parse(&result, None)?.root_node().has_error()).then(|| (code.to_owned(), result))
+            let tree = kotlin::parse(&mut parser, source, code)?;
+            let edit = kotlin::edit(tree.root_node(), source, diagnostic)?;
+            let result = apply(source, vec![edit])?;
+            kotlin::parse(&mut parser, &result, code)?;
+            Some((code.to_owned(), result))
         }
         "typescript" => {
             let mut parser = Parser::new();

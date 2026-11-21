@@ -228,13 +228,13 @@ The only selector is `--language rust|kotlin|python|typescript`. `scripts/eval/r
 
 | Partition (tested tools) | Diagnostic / edit selection | Passed in one edit | Passed within loop |
 |---|---|---:|---:|
-| Rust (rustc 1.99.1, edition 2021 subjects) | rustc JSON spans and suggestions; tree-sitter validates the revision | 16/17 | 16/17 |
-| Kotlin (kotlinc-jvm 2.4.21, JDK 17) | Match the K2 diagnostic to the Kotlin tree at its UTF-8 byte position; check the declaration or use site and reparse the proposed edit | 9/10 | 9/10 |
+| Rust (rustc 1.100.0, edition 2021 subjects) | rustc JSON spans and suggestions; tree-sitter validates the revision | 16/17 | 16/17 |
+| Kotlin (kotlinc-jvm 2.4.21, JDK 17) | Match the K2 diagnostic to the Kotlin tree at its UTF-8 byte position; check the declaration or use site and reparse the proposed edit | 10/10 | 10/10 |
 | Python (CPython 3.12.3) | Semantic lint on the standard-library AST; localized edits | 12/12 | 12/12 |
 | TypeScript (tsc 7.0.2, Node 24.22.1) | Strict ES2022 `.ts` diagnostics and TypeScript tree-sitter nodes; not JS/TSX | 10/11 | 11/11 |
-| **Total** | | **47/50 (94%)** | **48/50 (96%)** |
+| **Total** | | **48/50 (96%)** | **49/50 (98%)** |
 
-The previous Kotlin token rules passed 10/10. The structural adapter abstains on the compact superclass fixture: the pinned grammar does not produce an error-free tree for that source. It does not fall back to text substitution. Both the subjects and the independent behavior checks are unchanged.
+For the compact superclass fixture, the structural adapter uses a virtual newline in an existing whitespace gap to obtain an error-free parse without moving any byte offsets. It requires the `SUPERTYPE_NOT_INITIALIZED` diagnostic at the exact superclass identifier and inserts only `()` in the original source. Neither the subjects nor the independent behavior checks changed.
 
 The Kotlin refusal tests also cover cases where a proposed edit parses but is not justified: a primitive-array receiver without the replacement method, a constructor parameter that would duplicate a property, and a setter parameter named `Regex`. These regressions are separate from the 50-case corpus.
 

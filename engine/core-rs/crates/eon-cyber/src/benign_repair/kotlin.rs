@@ -2,7 +2,7 @@
 
 use super::Edit;
 use serde_json::Value;
-use tree_sitter::Node;
+use tree_sitter::{Node, Parser, Tree};
 
 const PRIMITIVES: [&str; 8] = [
     "Boolean", "Byte", "Short", "Int", "Long", "Float", "Double", "Char",
@@ -46,6 +46,68 @@ fn descendants(root: Node<'_>) -> impl Iterator<Item = Node<'_>> {
         stack.extend(n.named_children(&mut n.walk()));
         Some(n)
     })
+}
+
+// Only an existing horizontal gap after a complete member; never split a
+// token, comment or literal, or create a closing brace missing in the source.
+fn space_before_close(close: Node<'_>, bytes: &[u8]) -> Option<usize> {
+    if close.kind() != "}" || bytes.get(close.byte_range())? != b"}" {
+        return None;
+    }
+    let member = close.prev_sibling()?;
+    if !member.is_named() || member.is_extra() || member.has_error() {
+        return None;
+    }
+    // In particular, never terminate a line comment at the end of a member.
+    let mut tail = member;
+    while let Some(i) = tail.child_count().checked_sub(1) {
+        tail = tail.child(i)?;
+    }
+    let gap = bytes.get(member.end_byte()..close.start_byte())?;
+    (!tail.is_extra() && !gap.is_empty() && gap.iter().all(|b| matches!(b, b' ' | b'\t')))
+        .then(|| close.start_byte() - 1)
+}
+
+pub(super) fn parse(parser: &mut Parser, src: &str, code: &str) -> Option<Tree> {
+    let bytes = src.as_bytes();
+    let mut tree = parser.parse(bytes, None)?;
+    if !tree.root_node().has_error() {
+        return Some(tree);
+    }
+    if code != "SUPERTYPE_NOT_INITIALIZED" {
+        return None;
+    }
+    // kotlin-ng requires a member terminator even immediately before `}`.
+    // Recovery may hide later classes. Probe one concrete brace per pass;
+    // an error tree suggests a location but never authorizes a repair.
+    let mut view = bytes.to_vec();
+    let mut sites = Vec::new();
+    for _ in 0..8 {
+        let at = descendants(tree.root_node())
+            .filter(|n| n.has_error() && (n.is_error() || n.kind() == "class_body"))
+            .find_map(|n| {
+                n.children(&mut n.walk())
+                    .find_map(|c| space_before_close(c, &view))
+            })?;
+        view[at] = b'\n'; // one ASCII byte for one: all byte ranges map identically
+        sites.push(at);
+        tree = parser.parse(&view, None)?;
+        let root = tree.root_node();
+        if !root.has_error() {
+            // Re-prove *every* probe in the full clean tree against the
+            // original bytes: the newline can only separate a member from
+            // the end of its class body, where Kotlin needs no terminator.
+            let checked = sites.iter().all(|&i| {
+                root.descendant_for_byte_range(i + 1, i + 2)
+                    .is_some_and(|c| {
+                        parent(c, "class_body").is_some_and(|body| body.end_byte() == c.end_byte())
+                            && space_before_close(c, bytes) == Some(i)
+                    })
+            });
+            return checked.then_some(tree);
+        }
+    }
+    None
 }
 
 fn declaration_name(n: Node<'_>) -> Option<Node<'_>> {
@@ -201,24 +263,29 @@ impl<'t, 's> Subject<'t, 's> {
         let name = self.simple_type(ty)?;
         let spec = parent(ty, "delegation_specifier")?;
         shape(spec, ["user_type"])?;
-        let derived = parent(parent(spec, "delegation_specifiers")?, "class_declaration")?;
+        let specs = parent(spec, "delegation_specifiers")?;
+        shape(specs, ["delegation_specifier"])?;
+        let derived = parent(specs, "class_declaration")?;
         let base = self.resolve(self.root, name, "class_declaration")?;
-        if derived == base || derived.parent()? != self.root || base.parent()? != self.root {
+        if derived == base || child(base, "primary_constructor").is_some() {
             return None;
         }
-        child(base, "class")?;
+        for class in [derived, base] {
+            child(class, "class")?;
+            if class.parent()? != self.root
+                || child(class, "enum_class_body").is_some()
+                || child(class, "class_body").is_some_and(|body| {
+                    body.named_children(&mut body.walk())
+                        .any(|n| n.kind() == "secondary_constructor")
+                })
+            {
+                return None;
+            }
+        }
         shape(
             child(child(base, "modifiers")?, "inheritance_modifier")?,
             ["open"],
         )?;
-        if child(base, "primary_constructor").is_some()
-            || child(base, "class_body").is_some_and(|body| {
-                body.named_children(&mut body.walk())
-                    .any(|n| n.kind() == "secondary_constructor")
-            })
-        {
-            return None;
-        }
         Some(insert(ty.end_byte(), "()"))
     }
 
