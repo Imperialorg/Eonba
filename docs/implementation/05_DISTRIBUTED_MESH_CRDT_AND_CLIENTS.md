@@ -94,14 +94,18 @@ Run `scripts/test_wan_nat.sh` as the build user on a machine that permits `sudo 
 
 Class 0 sends numbered 640-byte PCM datagrams every 20 ms, even while the reliable streams stall. `cut` spans route impairment through confirmed relay selection and the start of post-cut counter collection. The deadline is **one-way, application send to peer decode, strictly under 5 ms for every attempt during the cut**. A missing datagram misses the deadline. The roles share Linux `CLOCK_MONOTONIC`; echo RTT is measured and reported separately. Percentiles use received samples only; counts include all attempts. The default exit code gates connectivity, not latency. Add `--require-voice-deadline` to gate both. Raw per-sequence logs, stream receipts and packet counters persist in the printed `target/wan-nat-*` directory on success or failure; ephemeral keys are removed.
 
-The WAN sender gives unsent QUIC datagrams a 1,150-byte budget. A new 640-byte PCM chunk displaces an unsent chunk of the same size instead of waiting behind it. Smaller chunks can share the budget. This is not a time limit and does not retract in-flight data or change receiver buffering.
+The WAN sender budgets 1,150 bytes for unsent datagrams. The receiver budgets 1,200 bytes including queue overhead: one maximum-size legal chunk fits, but not two ordinary 640-byte PCM chunks. A slow reader drops the oldest arrivals rather than accumulating a playback backlog. Smaller frames can share either budget. Neither budget checks frame age or sequence order, or retracts in-flight data.
 
-| Cut phase on the same isolated topology | Attempts | Arrived <5 ms | Arrived late | No receipt | One-way p95 among arrivals |
-|---|---:|---:|---:|---:|---:|
-| Before bounding the sender | 754 | 4 | 730 | 20 | 13,864.779 ms |
-| With the bounded sender | 754 | 5 | 0 | 749 | 2.801 ms |
+Run the strict test first with default timing, then add `--short-path-timeout`. Only the direct-capable test endpoints use the shorter profile: 250 ms path keepalive and 1 s default path idle timeout instead of 5 s and 15 s. iroh sets the relay path's idle timeout separately. Neither run signals a network change at the cut. Shorter timers can cost idle traffic and abandon a temporarily slow path; neither public constructor changes its timers.
 
-Both runs migrated without reconnecting and both failed the strict deadline. The lower p95 in the second run describes only five arrivals; it does not mean voice continued through the cut.
+| Cut phase on the same isolated topology | Attempts | Arrived <5 ms | Arrived late | No receipt | One-way p95 among arrivals | Longest peer decode gap overlapping cut |
+|---|---:|---:|---:|---:|---:|---:|
+| Before bounding the sender | 754 | 4 | 730 | 20 | 13,864.779 ms | Not recorded |
+| Bounded sender only | 754 | 5 | 0 | 749 | 2.801 ms | Not recorded |
+| Both queues bounded, default path timing | 755 | 6 | 0 | 749 | 4.435 ms | 15,003.671 ms |
+| Both queues bounded, short path timing | 55 | 5 | 0 | 50 | 1.293 ms | 1,020.920 ms |
+
+All four runs migrated without reconnecting and failed the strict deadline. The short profile reduced the interruption, not the 20 ms send cadence. The gap is measured between consecutive peer decodes, including those bracketing the cut if no frame arrived during it. A low latency percentile for the few frames received is not continuous voice delivery.
 
 ### 2.3 Schema Reconciliation and Clock-Skew-Immune 15ms Spatial Election (`src/spatial.rs`)
 
