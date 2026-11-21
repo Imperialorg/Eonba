@@ -66,4 +66,11 @@ node /home/runner/work/Eonba/Eonba/scripts/eval/paused_locations/desktop.js --ve
 
 The test driver—not the product—opens a fixed workspace, sets a first-hit source breakpoint, starts that one test, and checks `activeStackItem instanceof vscode.DebugStackFrame` for the active session. It drives stock Command Palette and Quick Pick actions. An independent process checks pixels on the private display. Only a zero exit from the desktop command is a pass for both rendered result dialogs.
 
-**Observed on this runner: partial desktop verification.** The active session had a real `DebugStackFrame`, and the display check saw the registered command and the real two-file picker. After the workbench selection and accept actions, the visual check timed out waiting for `src/pre_cognition.rs:22` in the first result dialog. This does not distinguish a selection, rendering or OCR failure. Neither the rendered conditional annotation nor the second, caller-only desktop dialog is verified. The native stdio result above and the editor-model annotation tests are separate, passing checks.
+**Observed on this runner: desktop gate passed.** On the same paused `DebugStackFrame`, the display check read these exact rows from the first result dialog:
+
+```text
+src/endpoint.rs:28 [conditional breakpoint configured]
+src/pre_cognition.rs:22
+```
+
+With only the caller selected, the dialog contained just `src/pre_cognition.rs:22`: no endpoint row and no annotation. The annotation reports the configured first-hit breakpoint, not why the thread stopped. The harness reads the dialog text column rather than the surrounding Call Stack, clicks the rendered **OK** button and verifies that the editor pixels reappear after each dismissal.
