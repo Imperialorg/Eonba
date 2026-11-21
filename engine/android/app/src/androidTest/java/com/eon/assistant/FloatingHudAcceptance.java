@@ -27,6 +27,7 @@ public final class FloatingHudAcceptance extends Instrumentation {
     private int idleWidth;
     private boolean micPhase;
     private int peak;
+    private int liveSamples;
 
     @Override public void onCreate(Bundle args) {
         super.onCreate(args);
@@ -58,6 +59,9 @@ public final class FloatingHudAcceptance extends Instrumentation {
 
     private void await(String checkpoint, Callable<Boolean> condition) throws Exception {
         step = checkpoint;
+        Bundle waiting = new Bundle();
+        waiting.putString("awaiting", checkpoint);
+        sendStatus(1, waiting);
         long end = SystemClock.elapsedRealtime() + 90_000;
         while (SystemClock.elapsedRealtime() < end) {
             FutureTask<Boolean> test = new FutureTask<>(condition);
@@ -80,6 +84,12 @@ public final class FloatingHudAcceptance extends Instrumentation {
         ToneGraph graph = root.findViewById(R.id.floating_meter);
         if (!graph.isShown() || graph.getLevels().isEmpty()) return false;
         int last = graph.getLevels().get(graph.getLevels().size() - 1);
+        liveSamples++;
+        if (liveSamples == 1) {
+            Bundle stats = new Bundle();
+            stats.putInt("firstObservedLiveRms", last);
+            sendStatus(1, stats);
+        }
         return last > 0 && last <= 100 && app.getString(R.string.floating_mic_level, last)
                 .contentEquals(((TextView)root.findViewById(R.id.floating_status)).getText());
     }
@@ -97,11 +107,15 @@ public final class FloatingHudAcceptance extends Instrumentation {
             return peak > 0 && peak <= 100 && app.getString(R.string.floating_mic_done, peak)
                     .contentEquals(((TextView)root.findViewById(R.id.floating_status)).getText());
         });
-        await("mic-live-again", this::liveLevel);
-        await("mic-early-stop", () -> !recording() && !notice() && card() == null &&
+        await("mic-live-again", () -> liveLevel() &&
+                ((ToneGraph)card().findViewById(R.id.floating_meter)).getLevels().size() <= 2);
+        long stopBy = SystemClock.elapsedRealtime() + 4550; // before the sixth second
+        await("mic-early-stop", () -> SystemClock.elapsedRealtime() < stopBy && !recording() && !notice() && card() == null &&
                 app.getSystemService(android.os.PowerManager.class).isInteractive());
-        await("mic-live-third", this::liveLevel);
-        await("mic-screen-off", () -> !recording() && !notice() && card() == null &&
+        await("mic-live-third", () -> liveLevel() &&
+                ((ToneGraph)card().findViewById(R.id.floating_meter)).getLevels().size() <= 2);
+        long lockBy = SystemClock.elapsedRealtime() + 4550;
+        await("mic-screen-off", () -> SystemClock.elapsedRealtime() < lockBy && !recording() && !notice() && card() == null &&
                 !app.getSystemService(android.os.PowerManager.class).isInteractive());
     }
 
