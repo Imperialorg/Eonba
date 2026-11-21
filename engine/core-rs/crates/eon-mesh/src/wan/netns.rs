@@ -90,7 +90,7 @@ async fn relay() {
     wait("fallback-a").await;
     let m = &server.metrics().server;
     let (rx, tx) = (m.bytes_recv.get(), m.bytes_sent.get());
-    mark("counter-ready");
+    fs::write("counter-ready", monotonic_ns().to_string()).unwrap();
     wait("finished").await;
     let (rx, tx) = (m.bytes_recv.get() - rx, m.bytes_sent.get() - tx);
     println!(

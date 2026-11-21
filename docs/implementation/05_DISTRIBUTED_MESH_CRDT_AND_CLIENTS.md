@@ -102,10 +102,10 @@ Run the strict test first with default timing, then add `--short-path-timeout`. 
 |---|---:|---:|---:|---:|---:|---:|
 | Before bounding the sender | 754 | 4 | 730 | 20 | 13,864.779 ms | Not recorded |
 | Bounded sender only | 754 | 5 | 0 | 749 | 2.801 ms | Not recorded |
-| Both queues bounded, default path timing | 755 | 6 | 0 | 749 | 4.435 ms | 15,003.671 ms |
-| Both queues bounded, short path timing | 55 | 5 | 0 | 50 | 1.293 ms | 1,020.920 ms |
+| Both queues bounded, default path timing | 756 | 6 | 1 | 749 | 13.908 ms | 15,013.569 ms |
+| Both queues bounded, short path timing | 54 | 5 | 0 | 49 | 1.747 ms | 1,002.226 ms |
 
-All four runs migrated without reconnecting and failed the strict deadline. The short profile reduced the interruption, not the 20 ms send cadence. The gap is measured between consecutive peer decodes, including those bracketing the cut if no frame arrived during it. A low latency percentile for the few frames received is not continuous voice delivery.
+All four runs migrated without reconnecting and failed the strict deadline. The short profile reduced the interruption, not the 20 ms send cadence. The gap is the longest time between consecutive peer decodes that overlaps the cut. The `cut-start` and `counter-ready` marker timestamps bound the cut, not the next sender ticks. This includes the receipts bracketing a cut with no arrivals. A low latency percentile for the few frames received is not continuous voice delivery.
 
 ### 2.3 Schema Reconciliation and Clock-Skew-Immune 15ms Spatial Election (`src/spatial.rs`)
 

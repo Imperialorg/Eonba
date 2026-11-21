@@ -139,7 +139,7 @@ for router in "$na" "$nb"; do
 done >nat.log
 (( direct ))
 # Impair only the translated peer-to-peer route. QAD and relay remain reachable.
-touch cut-start
+python3 -c 'from pathlib import Path; import time; Path("cut-start").write_text(str(time.monotonic_ns()))'
 ipn "$na" route add blackhole 10.77.0.3/32
 ipn "$nb" route add blackhole 10.77.0.2/32
 touch cut
@@ -179,8 +179,9 @@ for phase in phases:
 cut = [s for s, (p, _) in sends.items() if p == "cut"]
 # Include the surrounding receipts so a wholly missing cut is not reported as
 # a zero-length gap. Use decode order, not sequence order or sender echo RTT.
-begin = min(sends[s][1] for s in cut)
-end = min(t for p, t in sends.values() if p == "fallback")
+begin = int(Path("cut-start").read_text())
+end = int(Path("counter-ready").read_text())
+assert begin < end
 times = sorted(received.values())
 gap = "n/a"
 if times and times[0] <= begin < end <= times[-1]:
