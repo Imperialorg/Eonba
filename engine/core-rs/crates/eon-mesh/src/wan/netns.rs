@@ -292,8 +292,17 @@ async fn peer(side: &str) -> EonResult<()> {
     // No peer socket is handed to connect. QAD reports the *translated* socket;
     // the opposite LAN has no route to this socket's untranslated address.
     let bind = (Ipv4Addr::new(192, 168, host, 2), 41770);
-    let builder = Endpoint::builder(Minimal)
-        .clear_ip_transports()
+    // Both profiles detect the black hole from the transport itself: no
+    // notification at cut, new connection, rerouted frames or replay.
+    let transport = QuicTransportConfig::builder();
+    let transport = match std::env::var("EON_WAN_PATH_PROFILE").unwrap().as_str() {
+        "default" => transport,
+        "short" => transport
+            .default_path_keep_alive_interval(Duration::from_millis(250))
+            .default_path_max_idle_timeout(Duration::from_secs(1)),
+        _ => panic!("unknown path timing profile"),
+    };
+    let builder = relay_builder(transport)
         .bind_addr(bind)
         .unwrap()
         .ca_tls_config(iroh::tls::CaTlsConfig::custom_roots([ca.into()]));

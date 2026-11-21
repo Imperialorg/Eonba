@@ -6,11 +6,14 @@ set -euo pipefail
 umask 077
 [[ $(id -u) != 0 ]] || { echo "run as the unprivileged build user" >&2; exit 2; }
 strict=0
-case "$#:${1:-}" in
-    0:) ;;
-    1:--require-voice-deadline) strict=1 ;;
-    *) echo "usage: $0 [--require-voice-deadline]" >&2; exit 2 ;;
-esac
+profile=default
+for arg in "$@"; do
+    case "$arg" in
+        --require-voice-deadline) strict=1 ;;
+        --short-path-timeout) profile=short ;;
+        *) echo "usage: $0 [--require-voice-deadline] [--short-path-timeout]" >&2; exit 2 ;;
+    esac
+done
 cd "$(dirname "$0")/../engine/core-rs"
 scratch="$PWD/target/wan-nat-$$-$RANDOM"
 mkdir -p target
@@ -103,7 +106,8 @@ role() {
     local inode
     inode=$(stat -Lc %i "/run/netns/$1")
     inside "$1" sudo -n -u "$user" env EON_WAN_ROLE="$2" EON_WAN_PARENT_NS="$parent" EON_WAN_NETNS="$inode" \
-        timeout --kill-after=2s 80s "$exe" --ignored --exact wan::netns::iroh_and_qos_tests_nat_path_change --nocapture \
+        EON_WAN_PATH_PROFILE="$profile" timeout --kill-after=2s 80s "$exe" \
+        --ignored --exact wan::netns::iroh_and_qos_tests_nat_path_change --nocapture \
         >"$2.log" 2>&1 &
     jobs+=("$!")
 }
@@ -142,13 +146,14 @@ touch cut
 for pid in "${jobs[@]}"; do wait "$pid"; done
 jobs=()
 grep -hE '^(QAD|witness|stream|relay )' a.log b.log relay.log
-python3 - "$strict" <<'PY' | tee summary.log
+python3 - "$strict" "$profile" <<'PY' | tee summary.log
 import math
 import re
 import sys
+from itertools import pairwise
 from pathlib import Path
 
-sends, echoes, arrivals = {}, {}, {}
+sends, echoes, received = {}, {}, {}
 for line in Path("a.log").read_text().splitlines():
     if m := re.match(r"send seq=(\d+) t_us=\d+ phase=(\w+) mono_ns=(\d+)", line):
         sends[m[1]] = (m[2], int(m[3]))
@@ -156,20 +161,31 @@ for line in Path("a.log").read_text().splitlines():
         echoes[m[1]] = int(m[2])
 for line in Path("b.log").read_text().splitlines():
     if m := re.match(r"received seq=(\d+) mono_ns=(\d+)", line):
-        assert m[1] not in arrivals
-        arrivals[m[1]] = (int(m[2]) - sends[m[1]][1]) // 1000
+        assert m[1] not in received
+        received[m[1]] = int(m[2])
+arrivals = {s: (t - sends[s][1]) // 1000 for s, t in received.items()}
 assert all(v >= 0 for v in arrivals.values())
 phases = dict.fromkeys(p for p, _ in sends.values())
 assert {"direct", "cut", "fallback"} <= phases.keys(), "missing transition samples"
+print(f"path_timing_profile={sys.argv[2]}")
 for phase in phases:
     seqs = [s for s, (p, _) in sends.items() if p == phase]
     for metric, observed in [("oneway", arrivals), ("echo", echoes)]:
         values = sorted(observed[s] for s in seqs if s in observed)
         print(f"audio phase={phase} metric={metric} attempts={len(seqs)} no_receipt={len(seqs)-len(values)} "
-              f"under_5ms={sum(v < 5000 for v in values)} "
+              f"under_5ms={sum(v < 5000 for v in values)} late={sum(v >= 5000 for v in values)} "
               f"p95_us={values[math.ceil(.95*len(values))-1] if values else 'n/a'} "
               f"max_us={max(values, default='n/a')}")
 cut = [s for s, (p, _) in sends.items() if p == "cut"]
+# Include the surrounding receipts so a wholly missing cut is not reported as
+# a zero-length gap. Use decode order, not sequence order or sender echo RTT.
+begin = min(sends[s][1] for s in cut)
+end = min(t for p, t in sends.values() if p == "fallback")
+times = sorted(received.values())
+gap = "n/a"
+if times and times[0] <= begin < end <= times[-1]:
+    gap = max(b - a for a, b in pairwise(times) if a < end and b > begin) // 1000
+print(f"cut_max_peer_decode_gap_us={gap}")
 met = all(s in arrivals and arrivals[s] < 5000 for s in cut)
 print(f"path_migration=PASS cut_all_audio_delivered_under_5ms={'PASS' if met else 'FAIL'}")
 if int(sys.argv[1]) and not met:

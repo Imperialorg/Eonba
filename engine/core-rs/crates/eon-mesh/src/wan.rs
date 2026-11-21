@@ -18,7 +18,7 @@ use bytes::Bytes;
 use eon_primitives::{EonError, EonResult};
 use iroh::endpoint::{
     Builder, Connection, IncomingAddr, NetReportConfig, PathList, PortmapperConfig,
-    QuicTransportConfig, presets::Minimal,
+    QuicTransportConfig, QuicTransportConfigBuilder, presets::Minimal,
 };
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayConfig, RelayMode, RelayUrl, SecretKey};
 use prost::Message;
@@ -83,6 +83,19 @@ pub struct WanEndpoint {
     budget: Budget,
 }
 
+fn relay_builder(transport: QuicTransportConfigBuilder) -> Builder {
+    let transport = transport
+        .max_concurrent_uni_streams(0u8.into())
+        .max_concurrent_bidi_streams(8u8.into())
+        // Only Class 0 uses DATAGRAM. Prefer new arrivals to stale queued PCM.
+        .datagram_send_buffer_size(MAX_AUDIO)
+        .datagram_receive_buffer_size(Some(AUDIO_RECV_WINDOW))
+        .build();
+    Endpoint::builder(Minimal)
+        .clear_ip_transports()
+        .transport_config(transport)
+}
+
 impl WanEndpoint {
     /// Both peers explicitly call `open` with overlapping `wait` windows.
     /// There is no relay presence before this call; `close` ends the session.
@@ -101,7 +114,7 @@ impl WanEndpoint {
             RelayConfig::new(relay, None),
             bytes_per_sec,
             wait,
-            Endpoint::builder(Minimal).clear_ip_transports(),
+            relay_builder(QuicTransportConfig::builder()),
         )
         .await
     }
@@ -120,8 +133,7 @@ impl WanEndpoint {
         if relay.scheme() != "https" {
             return Err(invalid("private relay trust anchor requires HTTPS"));
         }
-        let builder = Endpoint::builder(Minimal)
-            .clear_ip_transports()
+        let builder = relay_builder(QuicTransportConfig::builder())
             .ca_tls_config(iroh::tls::CaTlsConfig::custom_roots([root_der.into()]));
         Self::open_configured(
             secret,
@@ -149,21 +161,12 @@ impl WanEndpoint {
                 "WAN peer must have a distinct key".into(),
             ));
         }
-        let transport = QuicTransportConfig::builder()
-            .max_concurrent_uni_streams(0u8.into())
-            .max_concurrent_bidi_streams(8u8.into())
-            // Only Class 0 uses DATAGRAM. Let new audio displace unsent audio
-            // under pressure instead of replaying a large FIFO after an outage.
-            .datagram_send_buffer_size(MAX_AUDIO)
-            .datagram_receive_buffer_size(Some(AUDIO_RECV_WINDOW))
-            .build();
         timeout(wait, async {
             let ep = builder
                 .clear_address_lookup()
                 .portmapper_config(PortmapperConfig::Disabled)
                 .net_report_config(NetReportConfig::minimal())
                 .relay_mode(RelayMode::Custom(config.into()))
-                .transport_config(transport)
                 .secret_key(secret)
                 .alpns(vec![ALPN.to_vec()])
                 .bind()
