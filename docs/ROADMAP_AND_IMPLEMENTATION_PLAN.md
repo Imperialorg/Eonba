@@ -282,7 +282,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/transport/iroh_node.rs`, `src/transport/qos_lanes.rs`
   - **Requirements**: `iroh` integration for Ed25519 node addressing, zero-config STUN hole-punching and DERP relay routing across 5G/Wi-Fi roaming. 4-class QUIC QoS prioritization using RFC 9221 datagrams for Class 0 voice/barge-in (< 5ms) and reliable streams for Class 1/2/3. Wire serialization via `proto/eon.proto`.
   - **Unit Tests**: `cargo test -p eon-mesh iroh_and_qos_tests`.
-  - **Verified subset**: One pinned connection carried all four classes and migrated relay → direct → relay across two private NATs. With explicit media duplication, the short-timer interface-loss test delivered all 56 cut frames under 5 ms. With private STUN and default timers, none were lost, but 107/1,276 were late on interface loss and 8/758 on a blackhole. The strict gate did not pass. Production remains relay-only; the namespace test does not establish zero-config production traversal or a physical carrier roam.
+  - **Verified subset**: The opt-in private transport uses the same UDP socket for authenticated STUN and direct QUIC. The original pinned connection carried all four classes through fallback. With default timers and redundant media, the final namespace tests delivered 752/752 blackhole frames and 293/293 interface-loss frames under 5 ms, with no missing receipts or skipped sends. Earlier runs had 35 and one late respectively. Relay-only remains the default. These are private NAT tests, not zero-config traversal on an unprovisioned network or a physical 5G/Wi-Fi roam.
 
 ---
 

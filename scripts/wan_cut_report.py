@@ -21,7 +21,7 @@ def report(directory, strict, profile, mode, media, discovery):
             seq, sender_phase, ns = int(m[1]), m[2], int(m[3])
             assert seq not in sends
             sends[seq], slots[seq] = ns, int(m[4])
-            path_samples.append((ns, m[5].startswith("Some(Ip(")))
+            path_samples.append((ns, m[5].startswith(("Some(Ip(", "Some(Custom("))))
             # Marker-existence phase labels can race a send at either edge.
             phase = ("cut" if begin <= ns < end else "fallback" if ns >= end
                      else "direct" if sender_phase == "cut" else sender_phase)

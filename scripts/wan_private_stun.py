@@ -6,7 +6,6 @@ No alternate server, name resolution, public listener or peer signalling.
 
 import hmac
 import os
-import secrets
 import socket
 import struct
 import sys
@@ -38,8 +37,9 @@ def verified(data, kind, key, expected_id=None):
     return tx, data[HEADER.size:-36]
 
 
-def username(side):
-    return struct.pack("!HH1s3x", 0x0006, 1, side.encode("ascii"))
+def username(user):
+    value = user.encode("ascii")
+    return struct.pack("!HH", 0x0006, len(value)) + value + bytes(-len(value) % 4)
 
 
 def mapped(addr):
@@ -59,41 +59,54 @@ def credential(side):
     return Path(f"keys/stun-{side}.psk").read_bytes().strip()
 
 
+def paired(pin, addr):
+    ip, port = addr
+    return struct.pack("!HH32s4sH2x", 0xC0E4, 38, pin, socket.inet_aton(ip), port)
+
+
 def serve(sock):
     sock.bind(SERVER)
     Path("stun-ready").touch()
-    outstanding = set(CLIENTS)
-    deadline = time.monotonic() + 12
-    while outstanding:
+    pending, rejected = {}, {}
+    deadline = time.monotonic() + 60
+    while len(pending) < len(CLIENTS):
         sock.settimeout(max(0.001, deadline - time.monotonic()))
         data, source = sock.recvfrom(257)
-        side = next((s for s in outstanding if source[0] == CLIENTS[s][1]), None)
+        side = next((s for s in CLIENTS if source[0] == CLIENTS[s][1]), None)
         if side is None:
             continue
         try:
             key = credential(side)
             tx, attr = verified(data, 0x0001, key)
-            if attr != username(side):
+            if attr not in (username(side), username(side + "_reject")):
                 continue
         except ValueError:
             continue
-        sock.sendto(signed(0x0101, tx, mapped(source), key), source)
-        print(f"STUN authenticated Binding side={side} observed={source[0]}:{source[1]}")
-        outstanding.remove(side)
-
-
-def probe(sock, side):
-    sock.bind((CLIENTS[side][0], 41770))
-    sock.connect(SERVER)
-    sock.settimeout(3)
-    key = credential(side)
-    tx = secrets.token_bytes(12)
-    sock.send(signed(0x0001, tx, username(side), key))
-    _, attr = verified(sock.recv(257), 0x0101, key, tx)
-    host, port = decode_mapped(attr)
-    if (host, port) != (CLIENTS[side][1], 41770):
-        raise ValueError("unexpected fixture SNAT mapping")
-    Path(f"stun-mapped-{side}").write_text(f"{host}:{port}")
+        if attr == username(side + "_reject"):
+            # Negative control: authentic response, correct peer pin, routable
+            # private host, but a port outside the configured pool.
+            other = "b" if side == "a" else "a"
+            pin = bytes.fromhex(Path(f"keys/{other}.pub").read_text().strip())
+            attrs = mapped(source) + paired(pin, (CLIENTS[other][1], 41999))
+            sock.sendto(signed(0x0101, tx, attrs, key), source)
+            rejected[side] = tx
+            continue
+        if side not in rejected or rejected[side] == tx:
+            raise ValueError("missing independent negative-control transaction")
+        pending[side] = (source, tx)
+        print(f"STUN authenticated Binding side={side} observed={source[0]}:{source[1]} negative_control=sent")
+    # Only the independent operator service publishes peer addresses. Use
+    # the *observed source*, never an address submitted by a client.
+    Path("stun-observed").touch()
+    while not Path("stun-reply").exists():
+        if time.monotonic() > deadline:
+            raise TimeoutError("missing fixture cookie witness")
+        time.sleep(0.005)
+    for side, (source, tx) in pending.items():
+        other = "b" if side == "a" else "a"
+        pin = bytes.fromhex(Path(f"keys/{other}.pub").read_text().strip())
+        attrs = mapped(source) + paired(pin, pending[other][0])
+        sock.sendto(signed(0x0101, tx, attrs, credential(side)), source)
 
 
 if __name__ == "__main__":
@@ -103,7 +116,5 @@ if __name__ == "__main__":
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         if sys.argv[1:] == ["server"]:
             serve(sock)
-        elif len(sys.argv) == 2 and sys.argv[1] in CLIENTS:
-            probe(sock, sys.argv[1])
         else:
             raise SystemExit("unknown fixture role")

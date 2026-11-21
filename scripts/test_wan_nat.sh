@@ -18,8 +18,8 @@ migration and delivery after fallback, not uninterrupted voice during the cut.
   --short-path-timeout       Use test-only 250 ms path keepalive and 1 s idle timeout.
   --redundant-media          Both pinned peers explicitly duplicate PCM to a separate
                              private HTTPS relay. Reliable traffic stays on the primary.
-  --private-stun             Use authenticated private STUN Binding instead of QAD
-                             to learn each client's own SNAT mapping before QUIC bind.
+  --private-stun             Test the production scoped constructor: paired private
+                             Binding on the QUIC socket, then direct → relay.
   --require-voice-deadline   Also require every cut audio attempt to reach peer decode
                              in <5 ms one-way. Missing or late frames fail the run.
   -h, --help                 Print this help without building or creating namespaces.
@@ -45,6 +45,9 @@ for arg in "$@"; do
         *) echo "unknown option: $arg" >&2; usage >&2; exit 2 ;;
     esac
 done
+if [[ $discovery == stun && $profile != default ]]; then
+    echo "the production scoped constructor uses the default path timers" >&2; exit 2
+fi
 [[ $(id -u) != 0 ]] || { echo "run as the unprivileged build user" >&2; exit 2; }
 cd "$(dirname "$0")/../engine/core-rs"
 stun_helper="$PWD/../../scripts/wan_private_stun.py"
@@ -131,6 +134,17 @@ attach() {
     inside "$router" iptables -A FORWARD -p udp -s "10.77.0.$other" --sport 41770
     inside "$router" iptables -A FORWARD -i inner -o outer -s "192.168.$lan.2" -d 10.77.0.0/29 -j ACCEPT
     inside "$router" iptables -A FORWARD -i outer -o inner -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    if [[ $discovery == stun ]]; then
+        # Count, do not drop. The client must reject before any UDP send,
+        # regardless of whether the kernel could eventually deliver it.
+        inside "$ep" iptables -A OUTPUT -p udp -d "10.77.0.$other" --dport 41999
+        # Translate an ephemeral source port. The clients only know the pool;
+        # they never read a mapped address from a marker or command line.
+        inside "$router" iptables -t nat -A POSTROUTING -p udp --sport 41769 -o outer -s "192.168.$lan.2" -d 10.77.0.1 \
+            -j SNAT --to-source "10.77.0.$outer:41769"
+        inside "$router" iptables -t nat -A POSTROUTING -p udp -o outer -s "192.168.$lan.2" -d 10.77.0.0/29 \
+            -j SNAT --to-source "10.77.0.$outer:41770"
+    fi
     inside "$router" iptables -t nat -A POSTROUTING -o outer -s "192.168.$lan.2" -d 10.77.0.0/29 \
         -j SNAT --to-source "10.77.0.$outer"
     ipn "$ep" addr add "192.168.$lan.2/30" dev wan0
@@ -197,7 +211,7 @@ if [[ $discovery == stun ]]; then
     stun() {
         inside "$1" sudo -n -u "$user" env EON_WAN_PARENT_NS="$parent" \
             EON_WAN_NETNS="$(stat -Lc %i "/run/netns/$1")" \
-            timeout --kill-after=2s 15s python3 -I "$stun_helper" "$2"
+            timeout --kill-after=2s 65s python3 -I "$stun_helper" "$2"
     }
     registering=1
     stun "$relay" server >stun.log 2>&1 &
@@ -205,22 +219,32 @@ if [[ $discovery == stun ]]; then
     registering=0
     (( !interrupted )) || exit 1
     await_marker stun-ready
-    stun "$a" a
-    stun "$b" b
-    wait "${jobs[0]}"
-    jobs=()
-    cat stun.log
 fi
 role "$relay" relay
 await_marker ready
 role "$b" b
 role "$a" a
-await_marker bootstrap-proven-a
-await_marker bootstrap-proven-b
+if [[ $discovery == stun ]]; then
+    # Distinguish this direct-first migration from the QAD relay-first test.
+    # Snapshot each live kernel socket *after* Binding and before publication.
+    await_marker stun-observed
+    udp_cookie() { inside "$1" ss -HOaune "src $2" | awk '{for(i=1;i<=NF;i++) if ($i ~ /^sk:/) print $i}'; }
+    a_cookie=$(udp_cookie "$a" 192.168.1.2) b_cookie=$(udp_cookie "$b" 192.168.2.2)
+    [[ $a_cookie =~ ^sk:[[:xdigit:]]+$ && $b_cookie =~ ^sk:[[:xdigit:]]+$ ]]
+else
+    await_marker bootstrap-proven-a
+    await_marker bootstrap-proven-b
+fi
 touch open-start
 ipn "$na" route del blackhole 10.77.0.3/32
 ipn "$nb" route del blackhole 10.77.0.2/32
 touch route-open
+if [[ $discovery == stun ]]; then
+    touch stun-reply
+    wait "${jobs[0]}"
+    jobs=("${jobs[@]:1}")
+    cat stun.log
+fi
 direct=0
 await_marker direct-proven && direct=1
 for router in "$na" "$nb"; do
@@ -228,6 +252,15 @@ for router in "$na" "$nb"; do
     inside "$router" iptables -t nat -nvxL
 done >nat.log
 (( direct ))
+if [[ $discovery == stun ]]; then
+    [[ $(udp_cookie "$a" 192.168.1.2) == "$a_cookie" && $(udp_cookie "$b" 192.168.2.2) == "$b_cookie" ]]
+    echo "Binding → direct QUIC retained UDP sockets a=$a_cookie b=$b_cookie" >>routes.log
+    for ep in "$a" "$b"; do
+        count=$(inside "$ep" iptables -nvxL OUTPUT | awk '/dpt:41999/{print $1}')
+        [[ $count == 0 ]] || { echo "unexpected packets to rejected candidate: $count" >&2; exit 1; }
+        echo "$ep rejected signed candidate before send: packets=$count" >>routes.log
+    done
+fi
 standby_cookie() {
     inside "$a" ss -HOetn state established src 172.30.84.2 dst "10.77.0.1:$1" |
         awk '{for (i=1; i<=NF; i++) if ($i ~ /^sk:/) print $i}'

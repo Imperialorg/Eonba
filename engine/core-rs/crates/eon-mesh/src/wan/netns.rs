@@ -1,5 +1,5 @@
 //! Linux-only roles for scripts/test_wan_nat.sh. No target arguments. Only the
-//! test binary gets the IP transport: iroh can probe candidates from its peer.
+//! QAD uses test-only native IP; STUN exercises the production custom transport.
 use super::*;
 use crate::sync::Replica;
 use iroh::TransportAddr;
@@ -139,6 +139,10 @@ async fn relay() {
         assert!(m.bytes_recv.get() > 0 && m.bytes_sent.get() > 0);
         media.shutdown().await.unwrap();
     }
+    if private_stun() {
+        wait("relay-only-complete-a").await;
+        wait("relay-only-complete-b").await;
+    }
     server.shutdown().await.unwrap();
 }
 
@@ -211,7 +215,7 @@ async fn measure(ep: &WanEndpoint) -> EonResult<()> {
                     if *phase == "bootstrap" && path.as_ref().is_some_and(TransportAddr::is_relay) && !Path::new("bootstrap-audio").exists() {
                         mark("bootstrap-audio");
                     }
-                    steady[0] |= *phase == "direct" && path.as_ref().is_some_and(TransportAddr::is_ip);
+                    steady[0] |= *phase == "direct" && path.as_ref().is_some_and(is_direct);
                     steady[1] |= *phase == "fallback" && path.as_ref().is_some_and(TransportAddr::is_relay);
                 }
             }
@@ -219,6 +223,10 @@ async fn measure(ep: &WanEndpoint) -> EonResult<()> {
     }
     assert_eq!(steady, [true; 2], "no verified audio echo on both paths");
     Ok(())
+}
+
+fn is_direct(addr: &TransportAddr) -> bool {
+    addr.is_ip() || addr.is_custom()
 }
 
 async fn batch(ep: &WanEndpoint, side: &str, stage: u32) -> EonResult<()> {
@@ -357,82 +365,102 @@ async fn peer(side: &str) -> EonResult<()> {
             .default_path_max_idle_timeout(Duration::from_secs(1)),
         _ => panic!("unknown path timing profile"),
     };
-    let builder = relay_builder(transport)
-        .bind_addr(bind)
-        .unwrap()
-        .ca_tls_config(iroh::tls::CaTlsConfig::custom_roots([ca.clone().into()]));
     let expected = |i| std::net::SocketAddrV4::new(Ipv4Addr::new(10, 77, 0, i), 41770);
-    let (builder, qad, source) = if private_stun() {
-        // The authenticated Binding probe released exactly `bind`. IP/port
-        // reuse alone does not prove reachability: witness() below requires
-        // actual primary payload bytes on the selected translated sockets.
-        let addr = fs::read_to_string(format!("stun-mapped-{side}"))
-            .unwrap()
-            .parse()
-            .unwrap();
-        assert_eq!(addr, std::net::SocketAddr::V4(expected(mapped)));
-        (builder.external_addr(addr), None, "STUN")
-    } else {
-        (builder, Some(RelayQuicConfig::new(7842)), "QAD")
+    let config = || -> EonResult<_> {
+        Ok(PrivateWanConfig {
+            relay: relay.clone(),
+            relay_root_der: ca.clone(),
+            bind: std::net::SocketAddrV4::new(bind.0, 0),
+            stun: std::net::SocketAddrV4::new(IP, 3478),
+            stun_username: side.into(),
+            stun_password: fs::read_to_string(format!("keys/stun-{side}.psk"))
+                .unwrap()
+                .trim()
+                .as_bytes()
+                .to_vec(),
+            candidates: CandidateScope::new(Ipv4Addr::new(10, 77, 0, 0), 29, 41728..=41855)?,
+        })
     };
-    let mut ep = WanEndpoint::open_configured(
-        me,
-        peer,
-        RelayConfig::new(relay.clone(), qad),
-        rate,
-        WAIT,
-        builder,
-    )
-    .await?;
-    assert_eq!(ep.peer_id(), peer);
-    let primary_id = ep.conn.stable_id();
-    if media_enabled() {
-        ep.enable_media_standby(MEDIA_URL.parse().unwrap(), ca, WAIT)
-            .await?;
-    }
-    assert!(ep.endpoint.bound_sockets().contains(&bind.into()));
-    timeout(WAIT, async {
-        loop {
-            if ep
+    let (mut ep, direct) = if private_stun() {
+        let mut reject = config()?;
+        reject.bind.set_port(41769);
+        reject.stun_username.push_str("_reject");
+        assert!(
+            matches!(
+                WanEndpoint::open_private(me.clone(), peer, reject, rate, WAIT).await,
+                Err(EonError::ValidationError(_))
+            ),
+            "accepted or dialed the publisher's out-of-scope negative control"
+        );
+        let ep = WanEndpoint::open_private(me.clone(), peer, config()?, rate, WAIT).await?;
+        assert!(
+            ep.endpoint.bound_sockets().is_empty(),
+            "unrestricted native IP transport!"
+        );
+        (
+            ep,
+            TransportAddr::Custom(super::scoped::udp::address(expected(remote))),
+        )
+    } else {
+        let builder = relay_builder(transport)
+            .bind_addr(bind)
+            .unwrap()
+            .ca_tls_config(iroh::tls::CaTlsConfig::custom_roots([ca.clone().into()]));
+        let ep = WanEndpoint::open_configured(
+            me.clone(),
+            peer,
+            RelayConfig::new(relay.clone(), Some(RelayQuicConfig::new(7842))),
+            rate,
+            WAIT,
+            builder,
+        )
+        .await?;
+        assert!(ep.endpoint.bound_sockets().contains(&bind.into()));
+        timeout(WAIT, async {
+            while !ep
                 .endpoint
                 .addr()
                 .ip_addrs()
                 .any(|a| *a == expected(mapped).into())
             {
-                break;
+                sleep(Duration::from_millis(20)).await;
             }
-            sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("endpoint does not advertise its discovered SNAT mapping");
-    println!(
-        "{source} side={side} bound={bind:?} reflected={} peer={peer}",
-        expected(mapped)
-    );
+        })
+        .await
+        .expect("missing QAD mapping");
+        (ep, TransportAddr::Ip(expected(remote).into()))
+    };
+    assert_eq!(ep.peer_id(), peer);
+    let primary_id = ep.conn.stable_id();
+    if media_enabled() {
+        ep.enable_media_standby(MEDIA_URL.parse().unwrap(), ca.clone(), WAIT)
+            .await?;
+    }
     let app = async {
-        let relay = TransportAddr::Relay(relay);
-        witness(&ep, side, 0, &relay).await?;
-        wait("bootstrap-audio").await;
-        let standby = ep
-            .paths()
-            .iter()
-            .find(|p| p.remote_addr() == &relay)
-            .expect("bootstrap relay path")
-            .id();
+        let relay = TransportAddr::Relay(relay.clone());
+        let relay_path = || {
+            ep.paths()
+                .iter()
+                .find(|p| p.remote_addr() == &relay)
+                .map(|p| p.id())
+        };
+        let mut original = None;
+        if !private_stun() {
+            witness(&ep, side, 0, &relay).await?;
+            wait("bootstrap-audio").await;
+            original = Some(relay_path().expect("bootstrap relay path"));
+            mark(&format!("bootstrap-proven-{side}"));
+            wait("route-open").await;
+            ep.endpoint.network_change().await;
+        }
+        witness(&ep, side, 1, &direct).await?;
+        let standby = original.or_else(relay_path).expect("live relay standby");
         let relay_selected = || {
             ep.paths()
                 .get(standby)
                 .filter(|p| p.remote_addr() == &relay)
                 .map(|p| p.is_selected())
         };
-        mark(&format!("bootstrap-proven-{side}"));
-        wait("route-open").await;
-        // The on-link routers have actually enabled the peer route. Notify
-        // iroh, since routers in separate namespaces don't generate local
-        // interface notifications. No address or synthetic path is injected.
-        ep.endpoint.network_change().await;
-        witness(&ep, side, 1, &TransportAddr::Ip(expected(remote).into())).await?;
         if interface_loss {
             assert_eq!(relay_selected(), Some(false), "no open relay standby");
         }
@@ -471,7 +499,7 @@ async fn peer(side: &str) -> EonResult<()> {
                     chunk = ep.recv_audio_observed() => {
                         let (chunk, via) = chunk?;
                         let received = monotonic_ns();
-                        let direct = ep.paths().iter().any(|p| p.is_selected() && p.remote_addr().is_ip());
+                        let direct = ep.paths().iter().any(|p| p.is_selected() && is_direct(p.remote_addr()));
                         assert_eq!(chunk, audio(usize::try_from(chunk.sequence_number).unwrap()));
                         if via == Arrival::Primary {
                             ep.send_audio(&chunk)?;
@@ -490,6 +518,27 @@ async fn peer(side: &str) -> EonResult<()> {
         mark("b-complete");
     }
     assert_eq!(ep.conn.stable_id(), primary_id);
+    if private_stun() {
+        // After the scored migration, revoke cached direct and standby consent.
+        let only = ep.reconnect(WAIT).await?;
+        assert_eq!(only.conn.alpn(), ALPN);
+        assert!(only.media.is_none() && only.scoped_root.is_none());
+        assert!(only.paths().iter().all(|p| p.remote_addr().is_relay()));
+        batch(&only, side, 5).await?;
+        mark(&format!("reconnected-{side}"));
+        wait(&format!("reconnected-{other}")).await;
+        only.close().await;
+        mark(&format!("scoped-closed-{side}"));
+        wait(&format!("scoped-closed-{other}")).await;
+        // The private publisher has exited. A new open must still rendezvous.
+        let fallback = WanEndpoint::open_private(me, peer, config()?, rate, WAIT).await?;
+        assert!(fallback.paths().iter().all(|p| p.remote_addr().is_relay()));
+        batch(&fallback, side, 6).await?;
+        mark(&format!("relay-only-complete-{side}"));
+        wait(&format!("relay-only-complete-{other}")).await;
+        fallback.close().await;
+        return Ok(());
+    }
     ep.close().await;
     Ok(())
 }

@@ -1,11 +1,12 @@
-//! Opt-in relay-only QUIC for two operator-provisioned identities. No address
-//! publication, peer lookup, direct sockets, hole punching or default relay.
+//! Pinned QUIC for two operator-provisioned identities. Relay-only by default;
+//! scoped UDP requires separate, explicit private-network provisioning.
 //! While open, iroh maintains its connection to the configured relay. The
 //! relay sees endpoint IDs, sizes and timing, not the end-to-end QUIC payload.
 
 mod media;
 #[cfg(all(test, target_os = "linux"))]
 mod netns;
+mod scoped;
 #[cfg(test)]
 mod tests;
 mod wire;
@@ -27,6 +28,7 @@ use tokio::time::{Instant, sleep_until, timeout};
 
 use crate::qos::{BulkPacer, TrafficClass};
 pub use media::AudioCopies;
+pub use scoped::{CandidateScope, PrivateWanConfig};
 pub use wire::{AudioPcmChunk, CrdtDeltaSync, EpochInvalidationEvent, ReliableFrame};
 
 const ALPN: &[u8] = b"eon/mesh/wan-qos/1";
@@ -92,6 +94,9 @@ pub struct WanEndpoint {
     relay: RelayUrl,
     budget: Budget,
     media: Option<media::MediaLane>,
+    // Scoped reconnect destroys the UDP endpoint (including cached paths)
+    // before reopening on only the previously trusted relay.
+    scoped_root: Option<Vec<u8>>,
 }
 
 fn relay_builder(transport: QuicTransportConfigBuilder) -> Builder {
@@ -185,6 +190,7 @@ impl WanEndpoint {
                 relay,
                 budget: Budget::new(bytes_per_sec),
                 media: None,
+                scoped_root: None,
             })
         })
         .await
@@ -207,6 +213,7 @@ impl WanEndpoint {
     /// This is a new QUIC connection, not migration of streams: outstanding
     /// frames are never replayed, and a missing receipt means delivery is unknown.
     /// The bandwidth budget (including existing bulk reservations) is retained.
+    /// After `open_private`, this discards direct consent and returns to relay-only.
     ///
     /// Timeout, error or cancellation ends the session; there is no background retry.
     pub async fn reconnect(mut self, wait: Duration) -> EonResult<Self> {
@@ -214,10 +221,22 @@ impl WanEndpoint {
         self.conn.close(0u8.into(), b"reconnecting");
         let media = self.media.take();
         self.conn = timeout(wait, async {
-            let ((), new_primary) = tokio::join!(
-                Self::drain_media(media),
-                rendezvous(&self.endpoint, pinned, &self.relay, ALPN)
-            );
+            let ((), new_primary) = tokio::join!(Self::drain_media(media), async {
+                if let Some(root) = self.scoped_root.take() {
+                    let secret = self.endpoint.secret_key().clone();
+                    self.endpoint.close().await;
+                    let builder = relay_builder(QuicTransportConfig::builder())
+                        .ca_tls_config(iroh::tls::CaTlsConfig::custom_roots([root.into()]));
+                    self.endpoint = bind(
+                        builder,
+                        secret,
+                        RelayConfig::new(self.relay.clone(), None),
+                        ALPN,
+                    )
+                    .await?;
+                }
+                rendezvous(&self.endpoint, pinned, &self.relay, ALPN).await
+            });
             new_primary
         })
         .await
@@ -264,8 +283,19 @@ async fn rendezvous(
     // iroh 1.4 chooses a listening "home relay" from probe results. Both
     // peers instead register by dialing. Choose the same connection by key order.
     let peer = EndpointAddr::new(pinned).with_relay_url(relay.clone());
+    rendezvous_at(ep, peer, relay, alpn, None).await
+}
+
+async fn rendezvous_at(
+    ep: &Endpoint,
+    peer: EndpointAddr,
+    relay: &RelayUrl,
+    alpn: &[u8],
+    direct: Option<&iroh_base::CustomAddr>,
+) -> EonResult<Connection> {
+    let pinned = peer.id;
     let dial = async { ep.connect(peer, alpn).await.map_err(transport_error) };
-    let (outgoing, incoming) = tokio::try_join!(dial, accept(ep, pinned, relay))?;
+    let (outgoing, incoming) = tokio::try_join!(dial, accept(ep, pinned, relay, direct))?;
     if [&outgoing, &incoming]
         .iter()
         .any(|c| c.remote_id() != pinned || c.alpn() != alpn)
@@ -275,7 +305,12 @@ async fn rendezvous(
     Ok(if ep.id() < pinned { outgoing } else { incoming })
 }
 
-async fn accept(ep: &Endpoint, pinned: EndpointId, relay: &RelayUrl) -> EonResult<Connection> {
+async fn accept(
+    ep: &Endpoint,
+    pinned: EndpointId,
+    relay: &RelayUrl,
+    direct: Option<&iroh_base::CustomAddr>,
+) -> EonResult<Connection> {
     loop {
         let incoming = ep
             .accept()
@@ -283,6 +318,7 @@ async fn accept(ep: &Endpoint, pinned: EndpointId, relay: &RelayUrl) -> EonResul
             .ok_or_else(|| transport_error("endpoint closed"))?;
         if matches!(incoming.remote_addr(), IncomingAddr::Relay { url, endpoint_id }
             if &url == relay && endpoint_id == pinned)
+            || matches!(incoming.remote_addr(), IncomingAddr::Custom(addr) if Some(&addr) == direct)
         {
             // The caller also checks the TLS identity, not just relay metadata.
             return incoming.await.map_err(transport_error);
@@ -367,7 +403,11 @@ impl WanEndpoint {
             } else {
                 self.budget.observe(lane.class());
             }
-            let (mut send, mut recv) = self.conn.open_bi().await.map_err(transport_error)?;
+            let (mut send, mut recv) = if self.scoped_root.is_some() {
+                scoped::admission::open(&self.conn, lane.priority()).await?
+            } else {
+                self.conn.open_bi().await.map_err(transport_error)?
+            };
             send.set_priority(lane.priority())
                 .map_err(transport_error)?;
             send.write_all(&frame.encode(lane, len))
@@ -384,12 +424,18 @@ impl WanEndpoint {
     }
 
     pub async fn recv(&self) -> EonResult<ReliableFrame> {
-        let (mut send, mut recv) = self.conn.accept_bi().await.map_err(transport_error)?;
+        let first = self.conn.accept_bi().await.map_err(transport_error)?;
         timeout(STREAM_TIMEOUT, async {
-            let mut header = [0; wire::HEADER];
-            recv.read_exact(&mut header)
-                .await
-                .map_err(transport_error)?;
+            let (mut send, mut recv, header) = if self.scoped_root.is_some() {
+                scoped::admission::accept(&self.conn, first).await?
+            } else {
+                let (send, mut recv) = first;
+                let mut header = [0; wire::HEADER];
+                recv.read_exact(&mut header)
+                    .await
+                    .map_err(transport_error)?;
+                (send, recv, header)
+            };
             let (lane, len) = wire::parse_header(header)?;
             let payload = recv.read_to_end(len).await.map_err(transport_error)?;
             if payload.len() != len {

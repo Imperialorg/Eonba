@@ -88,7 +88,7 @@ Eon/
 
 #### Private WAN path-change test (Linux)
 
-`WanEndpoint::open_with_relay_root` trusts only the supplied DER CA for the provisioned HTTPS relay. Both public WAN constructors remain **relay-only** and check reciprocal Ed25519 pins. `paths()` reads counters without sending traffic. Pinning a peer does not constrain the IP candidates it can advertise: the direct transport used below is compiled only into the Linux test binary.
+`WanEndpoint::open` and `open_with_relay_root` remain **relay-only** and check reciprocal Ed25519 pins. The latter trusts only the supplied DER CA for the HTTPS relay. `paths()` reads counters without sending traffic. The native iroh IP transport used for the QAD test is **test-only**: a peer pin and iroh's publication filter do not constrain peer-advertised IP candidates. The scoped constructor described below uses a different transport.
 
 Run `scripts/test_wan_nat.sh` as the build user on a machine that permits `sudo ip netns`, veth, bridge, conntrack/SNAT and private UDP/TCP. The script creates five namespaces with no uplink or default route. Two peers bootstrap through one privately certified relay behind independent stateful NATs without port forwarding. The relay also provides iroh 1.4's QUIC address discovery (QAD, **not** RFC STUN). After verifying relay transit the fixture opens the private peer route, notifies iroh of the network change, and verifies a 64 KiB transfer on the translated peer sockets. It then drops only the direct routes. It requires the same connection to carry the four typed classes after returning to the relay, with peer path byte deltas and independent forwarding counters. This is not a physical 5G/Wi-Fi handoff.
 
@@ -113,7 +113,7 @@ Both copies are valid PCM protobufs. A nine-byte fixed64 extension (field 15, fi
 
 Add `--redundant-media` to the original gate. For `--lose-direct-interface`, the script checks both original TLS socket cookies across removal of `wan0`. Selected-path byte deltas, private relay counters, primary-only PCM echoes and Class 1–3 receipts still witness primary migration. Strict accounting uses **send timestamps** in `[cut-start, counter-ready)`, including absent and late decodes; skipped send slots fail. A separate standby witness must be sent **after** impairment installation and decoded before either endpoint shows recovery.
 
-`--private-stun` replaces QAD in the **fixture only**. Both clients perform RFC 8489 Binding against the fixed private UDP origin using fresh transaction IDs, separate short-term credentials and MESSAGE-INTEGRITY-SHA256. Each client verifies its XOR-MAPPED-ADDRESS, releases its local port, and the test QUIC endpoint rebinds that address and advertises its own mapping. This is not shared live-socket STUN or general-purpose NAT discovery. The gate verifies direct payload on the actual translated sockets with no QAD listener or QAD connections.
+The following are historical results. The earlier **fixture-only** STUN client released its local port and rebound it for QUIC. Those runs do not establish live-socket Binding.
 
 | Reviewed private cut run (`--require-voice-deadline` throughout) | Attempts | <5 ms | Late | Missing | Standby first, after installation and before recovery | Strict result |
 |---|---:|---:|---:|---:|---:|---|
@@ -122,7 +122,26 @@ Add `--redundant-media` to the original gate. For `--lose-direct-interface`, the
 | Interface loss, default timers, private STUN, redundant | 1,276 | 1,169 | 107 | 0 | 288 | Fail |
 | Silent blackhole, default timers, private STUN, redundant | 758 | 750 | 8 | 0 | 746 | Fail |
 
-All four runs migrated and skipped zero send slots. These results show improved delivery in this five-namespace topology, **not** a general 5 ms guarantee. Production remains relay-only: the peer pin does not restrict the direct IP candidates iroh may probe. Production direct routing, zero-config STUN and physical 5G/Wi-Fi roaming are not verified.
+All four earlier runs migrated and skipped zero send slots. These are not physical 5G/Wi-Fi handoffs or a general 5 ms guarantee.
+
+**Scoped production opt-in (`WanEndpoint::open_private`).** Provision both peers with reciprocal keys, a literal RFC1918 HTTPS relay and private DER CA, a local IPv4 bind (port `0` is fine), and a literal private Binding origin with a separate random short-term credential per identity. `CandidateScope::new` requires an **operator-owned, dedicated** RFC1918 prefix `/24` through `/32` and a range of at most 256 unprivileged ports. Owning the relay does not establish ownership of an arbitrary subnet. No live peer IP or NAT port is entered by either client. A plain Binding server learns only the client's own mapping; this mode requires an operator service that knows the pair.
+
+The client's RFC 8489 profile uses USERNAME, a fresh 96-bit transaction ID, and MESSAGE-INTEGRITY-SHA256. The operator publisher must authenticate both Binding requests, associate credentials with the provisioned pair, use **observed source sockets**, and expire old observations. In the authenticated Binding success response, send XOR-MAPPED-ADDRESS followed by private comprehension-optional attribute `0xc0e4` (length 38: peer Ed25519 public key, four IPv4 bytes, two big-endian port bytes, then two padding bytes), followed by MESSAGE-INTEGRITY-SHA256. The fixture implements just this one-shot pair transaction, not a deployable service. The client checks the origin, transaction, MAC, pin and both mappings before passing a candidate to iroh. No redirects, names, arbitrary address lists or public service fallback.
+
+The **same bound UDP socket** then connects to exactly the approved peer mapping. It becomes an iroh 1.4.1 `CustomTransport`; `CustomSender` rejects anything other than that one address even if the new address would be in the pool. There is no unrestricted IP sender, QAD, portmapper or address lookup. Only the operator's relay is supplied to rendezvous; QUIC still authenticates the peer key and the scoped ALPN. Discovery failure or an unreachable direct path permits relay-only startup. A bad authenticated pair assertion fails closed. The custom address represents the translated UDP tuple; it is not a public discovery record.
+
+If direct wins establishment, iroh keeps a standby path on the same connection. For scoped Class 1–3 streams the sender first exchanges a one-byte offer/ready handshake. If iroh selects the relay before the offer completes, the sender can discard that **empty** stream and offer once on the same connection; it never replays application data or extends the 30 s receipt timeout. This costs a round trip and does not guarantee delivery of a payload already in flight. `reconnect` discards direct and media consent. A fresh scoped open is needed for new mappings. In particular, iroh's custom transport does **not** automatically re-punch a new translated address after a relay-first startup. Do not equate this scoped direct → relay result with the QAD relay → direct → relay test above.
+
+Run `scripts/test_wan_nat.sh --private-stun --redundant-media --require-voice-deadline`, then repeat with `--lose-direct-interface`. This profile exercises the production constructor with no timing overrides. For each peer the fixture checks the kernel socket cookie from authenticated Binding through direct QUIC delivery, uses a count-only OUTPUT rule to witness **zero** sends to an authentically published out-of-pool port, and checks direct/fallback byte deltas, all reliable receipts, and zero QAD connections. The interface test also checks the independent established primary and media TLS socket cookies. After scoring, it verifies relay-only reconnect and fresh startup with the publisher unavailable.
+
+| Scoped STUN, default timers, redundant media | Cut attempts | <5 ms | Late | Missing | Skipped slots | Max one-way | Longest in-cut Class 1–3 receipt |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Silent blackhole, first scored run | 752 | 717 | 35 | 0 | 0 | 9.504 ms | 14.994 s |
+| Direct interface removed, first scored run | 290 | 289 | 1 | 0 | 0 | 6.595 ms | 5.779 s |
+| Silent blackhole, final verification | 752 | 752 | 0 | 0 | 0 | 3.056 ms | 15.011 s |
+| Direct interface removed, final verification | 293 | 293 | 0 | 0 | 0 | 2.531 ms | 5.782 s |
+
+All four runs migrated on the original connection. **Both final runs passed the original strict gate; the earlier misses show it is not a repeatable latency guarantee.** None of the four lost a cut frame or skipped a send slot. In the final runs the separate media relay delivered 750 and 288 first decodes, respectively, after impairment installation and before primary recovery. The original QAD relay-first regression also migrated in both modes but missed the deadline on 12/755 and 99/1,271 frames, respectively. These measurements cover an isolated Linux topology, not a carrier roam.
 
 ### 2.3 Schema Reconciliation and Clock-Skew-Immune 15ms Spatial Election (`src/spatial.rs`)
 
