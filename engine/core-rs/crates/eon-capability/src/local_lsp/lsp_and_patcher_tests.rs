@@ -36,6 +36,7 @@ impl Fixture {
             rust_task_group: None,
             pyright_group: None,
             vtsls_image: None,
+            kotlin_image: None,
         };
         LocalLsp::spawn(
             &config,
@@ -94,6 +95,13 @@ fn operator_configuration_is_explicit_and_never_uses_a_shell_or_script() {
         assert!(OperatorServer::new(kind, &launcher, &[], timeout).is_err());
     }
     let image = f.0.join("vtsls");
+    let kotlin = f.0.join("kotlin-language-server");
+    fs::copy("/usr/bin/true", &kotlin).unwrap();
+    assert!(OperatorServer::new(ServerKind::Kotlin, &kotlin, &[PathBuf::from("/usr")], timeout).is_err());
+    let unpinned = OperatorServer::new(ServerKind::Kotlin, &kotlin, &[], timeout).unwrap();
+    let err = LocalLsp::start(&unpinned, &f.0).err().unwrap();
+    assert!(err.to_string().contains("pinned image"));
+    assert!(unpinned.with_kotlin_task_group(Path::new("relative"), [0; 32]).is_err());
     fs::copy("/usr/bin/true", &image).unwrap();
     let unpinned = OperatorServer::new(ServerKind::Vtsls, &image, &[], timeout).unwrap();
     let err = LocalLsp::start(&unpinned, &f.0).err().unwrap();
@@ -485,6 +493,7 @@ fn path_scope_and_document_budget_also_apply_to_previews() {
         rust_task_group: None,
         pyright_group: None,
         vtsls_image: None,
+        kotlin_image: None,
     };
     assert!(LocalLsp::start(&config, &f.0).is_err());
     config.executable = PathBuf::from("/operator-only/server");

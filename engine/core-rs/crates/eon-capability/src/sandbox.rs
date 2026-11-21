@@ -32,6 +32,9 @@ mod rust_analyzer;
 ))]
 mod pyright;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", target_pointer_width = "64"))]
+mod kotlin;
+
 #[cfg(not(all(
     target_os = "linux",
     target_arch = "x86_64",
@@ -115,6 +118,15 @@ fn build_ruleset(
         .handle_access(AccessFs::from_all(abi))
         .and_then(|r| r.create())
         .map_err(|e| sandbox_err("ruleset", e))?;
+    if let WorkerIo::Kotlin { digest, workspace, deadline, .. } = io {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", target_pointer_width = "64"))]
+        return kotlin::ruleset(created, program, &policy.read_only, workspace, digest, deadline);
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", target_pointer_width = "64")))]
+        {
+            let _ = (digest, workspace, deadline);
+            return Err(sandbox_err("Kotlin", "unsupported worker ABI"));
+        }
+    }
     for path in &policy.read_only {
         let fd = PathFd::new(path)
             .map_err(|e| sandbox_err("path", format!("{}: {e}", path.display())))?;
@@ -273,6 +285,10 @@ fn worker_filters(io: WorkerIo<'_>) -> EonResult<Vec<BpfProgram>> {
     if io.thread_group().is_some() {
         filters.push(rust_analyzer::thread_filter(&mut rules, arch)?);
     }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", target_pointer_width = "64"))]
+    if matches!(io, WorkerIo::Kotlin { .. }) {
+        kotlin::jvm_filter(&mut rules)?;
+    }
     if io.node_image().is_some() {
         #[cfg(all(
             target_os = "linux",
@@ -333,12 +349,18 @@ pub(crate) enum WorkerIo<'a> {
         group: &'a Path,
         digest: &'a [u8; 32],
     },
+    Kotlin {
+        group: &'a Path,
+        digest: &'a [u8; 32],
+        workspace: &'a Path,
+        deadline: std::time::Instant,
+    },
 }
 
 impl<'a> WorkerIo<'a> {
     fn thread_group(self) -> Option<&'a Path> {
         match self {
-            Self::RustAnalyzer(group) | Self::Pyright { group, .. } | Self::Vtsls { group, .. } => {
+            Self::RustAnalyzer(group) | Self::Pyright { group, .. } | Self::Vtsls { group, .. } | Self::Kotlin { group, .. } => {
                 Some(group)
             }
             _ => None,
@@ -378,6 +400,7 @@ pub(crate) fn confine_command(
         WorkerIo::StdioProtocol
         | WorkerIo::RustAnalyzer(_)
         | WorkerIo::Pyright { .. }
+        | WorkerIo::Kotlin { .. }
         | WorkerIo::Vtsls { .. } => {
             command.stdin(Stdio::piped()).stderr(Stdio::null())
         }
@@ -385,6 +408,11 @@ pub(crate) fn confine_command(
     if let Some(group) = io.thread_group() {
         rust_analyzer::prepare(command, group)
             .map_err(|e| sandbox_err("threaded LSP limits", e))?;
+    }
+    if let WorkerIo::Kotlin { .. } = io {
+        let install = Path::new(command.get_program()).parent()
+            .ok_or_else(|| sandbox_err("Kotlin", "missing installation directory"))?.to_owned();
+        command.current_dir(install).env("MALLOC_ARENA_MAX", "1");
     }
     if io.node_image().is_some() {
         // This worker performs no TLS. Do not read the host OpenSSL config.

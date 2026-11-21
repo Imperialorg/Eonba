@@ -6,6 +6,8 @@
 //! it receives file contents exclusively through the stdio overlay.
 //! The pinned vtsls image runs its TypeScript server in-process. Its inferred
 //! project contains only open snapshots and the embedded TypeScript library.
+//! Kotlin uses a fixed common-language compiler frontend on in-memory `.kt`
+//! sources and compiler built-ins only, not fwcd, Gradle or JVM project analysis.
 //! Servers requiring a disk-backed project or unsupported capabilities may decline queries.
 //! The native policy is for trusted workers, not arbitrary binaries. Deadlines bound
 //! protocol I/O, not kernel/filesystem latency or the worker's CPU and memory use.
@@ -80,7 +82,7 @@ impl ServerKind {
             (Self::RustAnalyzer, Some("rs")) => Ok("rust"),
             (Self::Clangd, Some("c" | "h")) => Ok("c"),
             (Self::Clangd, Some("cc" | "cpp" | "cxx" | "hpp")) => Ok("cpp"),
-            (Self::Kotlin, Some("kt" | "kts")) => Ok("kotlin"),
+            (Self::Kotlin, Some("kt")) => Ok("kotlin"),
             (Self::Pyright, Some("py" | "pyi")) => Ok("python"),
             (Self::Vtsls, Some("ts")) => Ok("typescript"),
             (Self::Vtsls, Some("js")) => Ok("javascript"),
@@ -119,12 +121,16 @@ pub struct OperatorServer {
     rust_task_group: Option<PathBuf>,
     pyright_group: Option<pyright::Provision>,
     vtsls_image: Option<(PathBuf, [u8; 32])>,
+    kotlin_image: Option<(PathBuf, [u8; 32])>,
 }
 
 impl OperatorServer {
     pub fn new(kind: ServerKind, executable: &Path, runtime: &[PathBuf], deadline: Duration) -> io::Result<Self> {
         if kind == ServerKind::RustAnalyzer {
             crate::sandbox::check_rust_analyzer_abi()?;
+        }
+        if kind == ServerKind::Kotlin && !runtime.is_empty() {
+            return Err(invalid("Kotlin does not accept an external runtime"));
         }
         if !executable.is_absolute() || runtime.len() > 24 || deadline.is_zero() || deadline > Duration::from_secs(30) {
             return Err(invalid("invalid server configuration"));
@@ -145,7 +151,14 @@ impl OperatorServer {
         // accept native ELF programs, never shebangs or executable project text.
         use std::io::Read;
         let mut magic = [0; 4];
-        std::fs::File::open(&executable)?.read_exact(&mut magic)?;
+        if kind == ServerKind::Kotlin {
+            // Don't block on a FIFO substituted before the final image grant.
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+                .open(&executable)?.read_exact(&mut magic)?;
+        } else {
+            std::fs::File::open(&executable)?.read_exact(&mut magic)?;
+        }
         if &magic != b"\x7fELF" {
             return Err(invalid("server must be a native executable"));
         }
@@ -166,6 +179,7 @@ impl OperatorServer {
             rust_task_group: None,
             pyright_group: None,
             vtsls_image: None,
+            kotlin_image: None,
         })
     }
 
@@ -205,6 +219,17 @@ impl OperatorServer {
             return Err(invalid("expected absolute vtsls task group"));
         }
         self.vtsls_image = Some((group.to_owned(), image_sha256));
+        Ok(self)
+    }
+
+    /// Opt in to the fixed-entrypoint Kotlin common compiler frontend. Pin the
+    /// complete provisioned image (not just its JNI launcher); no extra classpath.
+    pub fn with_kotlin_task_group(mut self, group: &Path, image_sha256: [u8; 32]) -> io::Result<Self> {
+        crate::sandbox::check_rust_analyzer_abi()?;
+        if self.kind != ServerKind::Kotlin || !group.is_absolute() {
+            return Err(invalid("expected absolute Kotlin task group"));
+        }
+        self.kotlin_image = Some((group.to_owned(), image_sha256));
         Ok(self)
     }
 }
@@ -420,6 +445,9 @@ impl LocalLsp {
         if config.kind == ServerKind::Vtsls && config.vtsls_image.is_none() {
             return Err(invalid("vtsls requires its pinned image and bounded task group"));
         }
+        if config.kind == ServerKind::Kotlin && config.kotlin_image.is_none() {
+            return Err(invalid("Kotlin requires its pinned image and bounded task group"));
+        }
         Self::spawn(config, workspace_root, config.kind.args())
     }
 
@@ -469,6 +497,8 @@ impl LocalLsp {
             WorkerIo::Pyright { group: &p.group, names: Path::new(&virtual_root), stubs: &stubs, digest: &p.image_sha256 }
         } else if let Some((group, digest)) = &config.vtsls_image {
             WorkerIo::Vtsls { group, digest }
+        } else if let Some((group, digest)) = &config.kotlin_image {
+            WorkerIo::Kotlin { group, digest, workspace: &root, deadline: Instant::now() + config.deadline }
         } else {
             WorkerIo::StdioProtocol
         };
@@ -539,6 +569,9 @@ impl LocalLsp {
         client.capabilities = Capabilities::parse(&init["capabilities"])?;
         if config.vtsls_image.is_some() {
             require(matches!(client.capabilities.diagnostics, Diagnostics::Pull { .. }), "expected vtsls pull diagnostics")?;
+        }
+        if config.kotlin_image.is_some() {
+            require(matches!(client.capabilities.diagnostics, Diagnostics::Pull { .. }), "expected Kotlin pull diagnostics")?;
         }
         // The pinned SEA installs this request handler unconditionally. Select
         // it in the fixed operator profile: early version-matched pushes can

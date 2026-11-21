@@ -212,6 +212,65 @@ uses the absolute `EON_TEST_VTSLS` path and `EON_TEST_VTSLS_SHA256` to run
 both the kernel-denial and semantic gates. A successful warm diagnostic
 query does not imply a sub-50-ms cold start or Kotlin support.
 
+#### Provisioning the confined Kotlin LSP
+
+This is a **Kotlin compiler frontend**, not fwcd Kotlin Language Server,
+Gradle or a JVM project build. `ServerKind::Kotlin` analyzes explicitly opened
+`.kt` buffers as one Kotlin common 1.9 module using the compiler's built-ins.
+There is no project classpath: `Int`, `List` and declarations in other open
+buffers can resolve, but stdlib functions such as `listOf`, Java/Android APIs
+and project dependencies cannot. Diagnostics are labeled accordingly.
+
+From `engine/core-rs`, on x86-64 glibc Linux, use vetted **Temurin
+17.0.21+9** and **Kotlin 2.4.21** distributions and a C compiler. Provision
+offline in a new operator-controlled directory outside the project:
+
+```bash
+bash crates/eon-capability/provision/build-kotlin.sh "$JDK" "$KOTLIN_HOME" "$NEW_INSTALL"
+```
+
+The script verifies the Kotlin input JARs, links a private Java runtime and
+prints one SHA-256 pin covering the JNI launcher, worker, compiler JARs and
+runtime files. Store the pin independently; do not recalculate an expected
+digest at launch. Configure `OperatorServer::new(ServerKind::Kotlin, launcher,
+&[], deadline)` and `with_kotlin_task_group(group, pin)`. Supply an immutable
+local installation, including protected ancestor directories, and an operator
+cgroup v2 with `pids.max <= 24`. A missing pin, changed file or unsupported
+host fails closed. Verification caps bytes hashed (192 MiB total) and checks
+the deadline between reads; this cannot interrupt a blocked kernel filesystem
+operation.
+
+The worker receives only stdio snapshots, not a mount of the project or home.
+Landlock grants individual pinned image files and the glibc loader/libraries;
+there are no directory grants. The threaded profile caps address space at
+2 GiB, CPU at 60 s and open descriptors at 64. Only Kotlin adds the read-only
+self `RLIMIT_NOFILE` query and the ability to stack a stricter seccomp filter:
+the launcher denies further exec before starting a thread or loading HotSpot.
+Sockets **and socketpair** remain denied. No shell, script host, plugin loader,
+compiler backend or project build is started. This is not a private mount/PID
+namespace: read denials protect file contents, not all filesystem metadata.
+
+Definitions, explicit named references, plaintext hover and pull diagnostics
+use compiler bindings. Opening, changing or closing any file invalidates the
+module's analysis. Operator-function reference searches (including implicit
+indexing) are rejected rather than returning a partial list. `workspace/symbol`
+does case-insensitive subsequence matching on named PSI declarations in open
+files only, up to 256 matches. Oversized reports fail the request, not the session.
+
+With a delegated systemd user pids controller, reproduce both kernel-denial
+and semantic gates:
+
+```bash
+EON_TEST_KOTLIN="$NEW_INSTALL/kotlin-language-server" \
+EON_TEST_KOTLIN_SHA256="$APPROVED_PIN" bash crates/eon-capability/provision/test-kotlin.sh
+```
+
+The two-file gate enforces **warm definition p95 <30 ms** and **warm diagnostic
+p95 <50 ms** (20 samples each). Launch-to-first-diagnostic includes image
+verification. Edit-to-fresh-diagnostic is measured separately and does not
+reuse an earlier diagnostic report. These are fixture measurements, not a
+latency guarantee for arbitrary sources.
+
 ### 3.3 Cyber Defense & Hardening Capabilities (`cyber.defense.*`)
 Automates host security, static taint tracking, and live patching.
 - `cyber.defense.ast_taint`: Traces untrusted user inputs to dangerous execution sinks across source code.
