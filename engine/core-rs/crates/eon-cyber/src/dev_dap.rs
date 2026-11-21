@@ -12,13 +12,13 @@ pub enum Fixture {
     Jvm,
 }
 
-/// C's lifetime counters and the JVM's live instance counts measure different
-/// things. An adapter that only observed the stack must not report zero objects.
+/// Allocation/free totals, retained Python markers and JVM instance counts
+/// measure different things. Do not compare them as heap sizes.
 #[derive(Debug, Eq, PartialEq)]
 pub enum HeapObservation {
     AllocationCounters(owned_dap::AllocationCounters),
+    PythonMarkers(owned_debugpy::MarkerCounters),
     LiveInstances(owned_jvm::HeapCounts),
-    NotSampled,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -44,10 +44,13 @@ pub fn inspect(fixture: Fixture) -> Result<Observation, Error> {
                 heap: HeapObservation::AllocationCounters(obs.counters),
             })
         }
-        Fixture::Python(visit) => Ok(Observation {
-            frames: owned_debugpy::inspect_counting_fixture(visit).map_err(Error::Dap)?,
-            heap: HeapObservation::NotSampled,
-        }),
+        Fixture::Python(visit) => {
+            let obs = owned_debugpy::observe_counting_fixture(visit).map_err(Error::Dap)?;
+            Ok(Observation {
+                frames: obs.frames,
+                heap: HeapObservation::PythonMarkers(obs.counters),
+            })
+        }
         Fixture::Jvm => {
             let obs = owned_jvm::observe_fixture().map_err(Error::Jvm)?;
             Ok(Observation {

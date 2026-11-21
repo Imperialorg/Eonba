@@ -146,10 +146,10 @@ Automates developer tasks, builds, tests, persistent interactive debugging, and 
 **Implemented debugger boundary:** `eon_cyber::dev_dap::inspect` is a host API
 on x86-64 Linux, not a remote debugger service. It selects a compiled-in
 fixture and breakpoint, never a PID, user program or expression. The native
-fixture reports its own allocation/free counts. OpenJDK reports live instance
-counts through JDI over private JDWP pipes; JDWP is not DAP. An adapter that
-only observes a stack reports `NotSampled` rather than a zero heap count. The
-general attach, stepping and evaluation operations above are not exported.
+fixture reports its own allocation/free counts. The Python fixture reports
+allocated and retained markers, not interpreter heap size. OpenJDK reports
+live instance counts through JDI over private JDWP pipes; JDWP is not DAP.
+The general attach, stepping and evaluation operations above are not exported.
 
 #### Provisioning the confined Rust LSP
 

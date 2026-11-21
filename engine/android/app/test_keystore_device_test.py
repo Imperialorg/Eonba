@@ -9,7 +9,8 @@ import unittest
 from unittest.mock import patch
 
 from keystore_device_test import (MIC_PHASES, TARGET, TEST, check_packages, check_result, parse_args,
-                                  require_preconfigured_apk, require_setup_complete, require_stock_emulator, run)
+                                  require_closed_context, require_preconfigured_apk, require_setup_complete,
+                                  require_stock_emulator, run)
 
 
 class InstrumentationResults(unittest.TestCase):
@@ -105,6 +106,13 @@ class DeviceModes(unittest.TestCase):
         self.assertIsNone(parse_args(["--serial", "emulator-5556"]).preconfigured_context_serial)
         self.assertFalse(manual.context_denied)
         self.assertTrue(parse_args(["--preconfigured-context-serial", "emulator-5556", "--context-denied"]).context_denied)
+
+    def test_metadata_observer_requires_both_platform_collection_bits_disabled(self):
+        require_closed_context(lambda *args: "  mDisabledShowContext=3\n")
+        for field in ("", "mDisabledShowContext=2", "mDisabledShowContext=1",
+                      "mDisabledShowContext=0", "mDisabledShowContext=3\nmDisabledShowContext=0"):
+            with self.subTest(field=field), self.assertRaises(SystemExit):
+                require_closed_context(lambda *args: field)
 
     def test_workflow_observes_only_its_own_result_and_preserves_operator_target(self):
         manual = parse_args(["--preconfigured-workflow-serial", "emulator-5556"])

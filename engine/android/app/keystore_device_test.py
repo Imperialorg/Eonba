@@ -118,6 +118,13 @@ def require_setup_complete(adb):
             raise SystemExit("Finish device and current user setup in Android before testing a selected session.")
 
 
+def require_closed_context(adb):
+    # Stock AVD only. Filter at the device: never transfer show arguments or other assistant data.
+    field = adb("shell", "dumpsys voiceinteraction | grep -E '^ *mDisabledShowContext=' || :").strip()
+    if field != "mDisabledShowContext=3":
+        raise SystemExit("Android did not confirm both assist structure and screenshot are disabled.")
+
+
 def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, stock_assistant=False, preconfigured_allowed=False,
         preconfigured_hud=False, preconfigured_workflow=False, mic_phase=None, preconfigured_context=False,
         context_denied=False):
@@ -132,6 +139,8 @@ def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, stock_assi
         output = adb("shell", "am", "instrument", "-w", "-r", *args, f"{TEST}/{TARGET}.{component}",
                      timeout=timeout)
         check_result(output, key, expected)
+        if component == "ControlsAssistAcceptance":
+            require_closed_context(adb)
         name = expected.removeprefix("PASS-") if key == "keystore" else f"{key}={expected}"
         print(f"PASS: {name}", flush=True)
 
@@ -152,6 +161,8 @@ def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, stock_assi
 
         if preconfigured:
             require_preconfigured_apk(adb)
+            if preconfigured_context:
+                require_closed_context(adb)
             install(TEST, test_apk)
             if preconfigured_context:
                 print("On EON controls with CPU timing OFF, review sharing the setting, pause, confirm and dismiss. "

@@ -5,7 +5,9 @@
 ))]
 
 use eon_cyber::dev_dap::{Adapter, Fixture, HeapObservation, Visit, inspect};
-use eon_cyber::{owned_dap::AllocationCounters, owned_jvm::HeapCounts};
+use eon_cyber::{
+    owned_dap::AllocationCounters, owned_debugpy::MarkerCounters, owned_jvm::HeapCounts,
+};
 
 fn check(fixture: Fixture, expected_names: [&str; 3], expected_heap: HeapObservation) {
     let obs = inspect(fixture).unwrap_or_else(|e| panic!("{fixture:?}: {e:?}"));
@@ -29,11 +31,14 @@ fn native_fixture_reports_allocation_counters() {
 
 #[test]
 #[ignore = "requires pinned debugpy and private unprivileged namespaces"]
-fn python_fixture_reports_stack_only() {
+fn python_fixture_reports_retained_markers() {
     check(
         Fixture::Python(Visit::Second),
         ["count", "second", "main"],
-        HeapObservation::NotSampled,
+        HeapObservation::PythonMarkers(MarkerCounters {
+            allocations: 2,
+            live: 1,
+        }),
     );
 }
 
