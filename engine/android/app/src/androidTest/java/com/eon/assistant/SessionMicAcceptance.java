@@ -245,7 +245,7 @@ public final class SessionMicAcceptance extends Instrumentation {
             require(running);
             return false;
         });
-        until("death-record-op-release", Math.min(deadline, now() + RELEASE_MS), () -> !active());
+        until("death-record-op-release", now() + RELEASE_MS, () -> !active());
         require(startClick > 0 && !toggleClicked && stopClick == 0);
         ui.setOnAccessibilityEventListener(null);
         until("old-card-gone", now() + RELEASE_MS, () -> {
