@@ -69,7 +69,7 @@ class LatencyTests(unittest.TestCase):
         (trial.parent / "session.json").write_text("{}")
         with contextlib.redirect_stderr(io.StringIO()) as errors:
             self.assertEqual(main([str(trials), "--threshold", "500"]), 2)
-        self.assertIn("--physical-session", errors.getvalue())
+        self.assertIn("physical_session.py", errors.getvalue())
 
     def test_muted_control_detects_bleed_short_tail_and_mismatched_clocks(self):
         trial = self.fixture()

@@ -110,7 +110,8 @@ def main(argv=None) -> int:
         trials = args.captures.resolve()
         if trials.name == "trials" and (
                 (trials.parent / "session.json").exists() or (trials.parent / "muted-control.wav").exists()):
-            raise ValueError("rig session: use the --physical-session validator; WAVs alone omit responder outcomes")
+            raise ValueError("rig session: run scripts/eval/physical_session.py on the session directory; "
+                             "WAVs alone omit responder outcomes")
         control = None
         if args.muted_control is not None:
             if not args.muted_control.is_file():

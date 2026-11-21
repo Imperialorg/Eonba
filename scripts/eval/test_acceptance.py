@@ -133,6 +133,24 @@ class PhysicalInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate manifest key"):
             json.loads('{"trials": {}, "trials": {}}', object_pairs_hook=physical.distinct_keys)
 
+    def test_standalone_device_gate_distinguishes_pass_failure_and_invalid_evidence(self):
+        path = self.root / "trials/0.wav"
+        def check(exit_code):
+            (self.root / "session.json").write_text(json.dumps(self.info))
+            with (patch.object(physical.acoustic, "_analyze", side_effect=lambda p, _: self.samples[p]),
+                  contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err):
+                self.assertEqual(physical.main([str(self.root)]), exit_code)
+            if exit_code == 2:
+                self.assertIn("Invalid physical session", err.getvalue())
+                self.assertEqual(out.getvalue(), "")
+                return None
+            return json.loads(out.getvalue())["task_10_2"]
+        self.assertTrue(check(0)["passed"])
+        self.samples[path] = replace(self.samples[path], first_output_end=None)
+        self.assertEqual(check(1)["misses"], {"0.wav": "no sustained speaker response"})
+        del self.info["trials"]["0.wav"]
+        check(2)
+
 
 class AcceptanceTests(unittest.TestCase):
     def test_filtered_renamed_ignored_or_nonzero_kernel_run_is_not_accepted(self):

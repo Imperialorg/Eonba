@@ -256,6 +256,27 @@ class RigTests(unittest.TestCase):
         self.assertEqual([x["bridge_started"] for x in info["trials"].values()], [True, False])
         self.assertEqual(info["trials"].keys(), {p.name for p in (self.root / "trials").iterdir()})
 
+    def test_driven_control_without_playback_stops_before_unmute(self):
+        self.responder("n = header()\nos.write(1,b'R')\nassert len(reader.read(2*n)) == 2*n\nos.write(1,b'N')\n")
+        def take(seconds, save):
+            self.assertEqual(seconds, 30)
+            save(bytes(4 * 800))
+            save(struct.pack("<hh", 1000, 0) * 400)
+            remaining = 16000 * seconds - 1200
+            while remaining:
+                n = min(1024, remaining)
+                save(bytes(4 * n))
+                remaining -= n
+                rig.time.sleep(0.001)
+        with (patch("builtins.input", side_effect=["MUTED"]) as prompt,
+              self.assertRaisesRegex(ValueError, "control did not start a bridge")):
+            rig.collect(self.args, self.root, rig.session.SCENES, take)
+        prompt.assert_called_once()
+        self.assertNotIn("Unmute", self.console.getvalue())
+        self.assertTrue((self.root / "muted-control.wav").is_file())
+        self.assertEqual(list((self.root / "trials").iterdir()), [])
+        self.assertFalse((self.root / "session.json").exists())
+
     def test_loss_before_final_stream_check_cannot_publish(self):
         self.responder("assert header() == 0\n")  # exits zero without checking the held route
         with (patch("builtins.input", return_value="MUTED"),

@@ -1,5 +1,6 @@
 """Read a declared physical session, never audio devices. See verification Manual 06 §3.3."""
 
+import argparse
 import hashlib
 import json
 from pathlib import Path
@@ -36,9 +37,11 @@ def checked_capture(path, threshold, digest):
     return capture
 
 
-def check_control(control):
+def check_control(control, started=None):
     if control.any_output or (control.frames - control.last_input_end) * 1000 < acoustic.P99_LIMIT_MS * control.rate:
         raise ValueError("muted control exceeds threshold or lacks post-stimulus tail")
+    if started is False:
+        raise ValueError("driven muted control did not start a bridge")
 
 
 def bridge_started(label, key, mode):
@@ -70,9 +73,7 @@ def measure(directory):
     if type(threshold) is not int:
         raise ValueError("integer calibrated threshold required")
     control = checked_capture(directory / "muted-control.wav", threshold, info.get("control_pcm_sha256"))
-    check_control(control)
-    if bridge_started(info, "control_bridge_started", mode) is False:
-        raise ValueError("driven muted control did not start a bridge")
+    check_control(control, bridge_started(info, "control_bridge_started", mode))
 
     trials = directory / "trials"
     if trials.is_symlink() or not trials.is_dir():
@@ -121,3 +122,19 @@ def measure(directory):
         "manifest_sha256": hashlib.sha256(raw).hexdigest(),
         "muted_control_checked": True, "task_10_2": device, "noisy_scenes": noisy,
     }
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Verify an original physical session against the Task 10.2 TTFA gate.")
+    parser.add_argument("session", type=Path, help="directory with session.json, muted-control.wav and trials/")
+    try:
+        evidence = measure(parser.parse_args(argv).session)
+    except INPUT_ERRORS as error:
+        print(f"Invalid physical session: {error}", file=sys.stderr)
+        return 2
+    print(json.dumps(evidence, indent=2))
+    return 0 if evidence["task_10_2"]["passed"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

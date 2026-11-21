@@ -218,7 +218,7 @@ def collect(args, directory, turns, take):
         raise ValueError("control cancelled")
     with responding_take(args, take) if args.responder else nullcontext(take) as capture:
         control_hash, started = record(control, capture, args.rate, 30, args.threshold)
-        session.check_control(session.checked_capture(control, args.threshold, control_hash))
+        session.check_control(session.checked_capture(control, args.threshold, control_hash), started)
         info = {"origin": "authorized-single-clock-physical", "route": args.route, "gains": args.gains,
                 "mode": "driven" if args.responder else "passive", "threshold_pcm": args.threshold,
                 "control_pcm_sha256": control_hash, "trials": {}}
