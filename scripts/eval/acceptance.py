@@ -34,7 +34,7 @@ def measured(passed):
 
 def kernel_checks():
     command = ["cargo", "test", "--offline", "--locked", "-j2", "-p", "eon-kernel",
-               "--test", "eval_harness", "--", "--format", "pretty"]
+               "--test", "eval_components", "--", "--format", "pretty"]
     with private_workspace() as scratch:
         run = subprocess.run(command, cwd=noisy_duplex.ROOT / "engine/core-rs", text=True,
                              stdout=subprocess.PIPE,

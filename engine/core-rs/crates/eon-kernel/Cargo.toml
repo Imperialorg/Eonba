@@ -28,7 +28,14 @@ name = "dynamic_dag_tests"
 required-features = ["host"]
 
 [[test]]
+name = "eval_components"
+required-features = ["host"]
+
+[[test]]
 name = "eval_harness"
+# Physical recordings and the provisioned native toolchains are explicit opt-ins.
+# `cargo test --test eval_harness` still selects this target by name.
+test = false
 required-features = ["host"]
 
 [[test]]

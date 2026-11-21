@@ -112,6 +112,8 @@ class AcceptanceTests(unittest.TestCase):
                   patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], code, text)) as child):
                 self.assertEqual(tuple(g["status"] for g in bench.kernel_checks()), expected)
                 self.assertNotIn("--ignored", child.call_args.args[0])
+                command = child.call_args.args[0]
+                self.assertEqual(command[command.index("--test") + 1], "eval_components")
 
     def test_missing_physical_input_is_not_a_software_timing_or_historical_score(self):
         checked = {"status": "passed"}
