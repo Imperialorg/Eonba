@@ -4,7 +4,9 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 
 fn owner(authority: &IdentityAuthority) -> ProcessOwner {
@@ -33,6 +35,7 @@ fn dimensions(master: &fs::File) -> (u16, u16) {
     (size.ws_row, size.ws_col)
 }
 
+#[cfg(target_os = "linux")]
 pub(super) fn assert_child_image(proc: &Path, split: &str, classic: &str) {
     let expected = match fs::symlink_metadata(split) {
         Err(e) if e.kind() == ErrorKind::NotFound => fs::symlink_metadata(classic).unwrap(),
@@ -73,11 +76,11 @@ fn devpts_peer_is_operator_only_before_first_unlock() {
     // SAFETY: query ioctls write a single integer each for the pinned master.
     unsafe {
         assert_eq!(
-            libc::ioctl(master.as_raw_fd(), libc::TIOCGPTLCK, &mut locked),
+            libc::ioctl(master.as_raw_fd(), native::TIOCGPTLCK, &mut locked),
             0
         );
         assert_eq!(
-            libc::ioctl(master.as_raw_fd(), libc::TIOCGPTN, &mut number),
+            libc::ioctl(master.as_raw_fd(), native::TIOCGPTN, &mut number),
             0
         );
     }
@@ -85,10 +88,10 @@ fn devpts_peer_is_operator_only_before_first_unlock() {
     assert_eq!(locked, 1);
     assert_eq!(
         rustix::fs::fstatfs(&pin).unwrap().f_type,
-        libc::DEVPTS_SUPER_MAGIC
+        0x1cd1 // DEVPTS_SUPER_MAGIC
     );
     assert_eq!(
-        (libc::major(m.rdev()), libc::minor(m.rdev())),
+        (rustix::fs::major(m.rdev()), rustix::fs::minor(m.rdev())),
         (136, number)
     );
     assert_eq!(m.mode() & 0o7777, 0o600);
@@ -116,10 +119,11 @@ fn persistent_filters_keep_state_without_interpreting_input() {
         .pty_open(&owner, PtyMode::Filter(StreamFilter::SqueezeSpaces))
         .unwrap();
     let child = pid(&p, &id);
-    assert_eq!(
-        fs::read(format!("/proc/{child}/cmdline")).unwrap(),
-        b"tr\0-s\0 \0"
-    );
+    let argv = fs::read(format!("/proc/{child}/cmdline")).unwrap();
+    #[cfg(target_os = "linux")]
+    assert_eq!(argv, b"tr\0-s\0 \0");
+    #[cfg(target_os = "android")]
+    assert_eq!(argv, b"eon-pty\0squeeze\0");
     // The first user space survives the admission probe. The filter keeps its
     // final-space state even when the next write comes after observing a line.
     send(&p, &owner, &id, b"    alpha   \nleft   ");
@@ -264,7 +268,10 @@ fn bidirectional_real_pty_owner_checks_paging_and_inert_display() {
         let fd = master.as_raw_fd();
         let mut locked: libc::c_int = 0;
         // SAFETY: TIOCGPTLCK writes an integer for this live master.
-        assert_eq!(unsafe { libc::ioctl(fd, libc::TIOCGPTLCK, &mut locked) }, 0);
+        assert_eq!(
+            unsafe { libc::ioctl(fd, native::TIOCGPTLCK, &mut locked) },
+            0
+        );
         assert_eq!(
             locked, 1,
             "the admitted worker needs no further slave opens"
@@ -457,12 +464,44 @@ fn child_has_only_pty_stdio_no_environment_no_secret_and_a_private_group() {
     let pid = pid(&p, &id);
     let proc = PathBuf::from(format!("/proc/{pid}"));
     assert!(fs::read(proc.join("environ")).unwrap().is_empty());
-    assert_eq!(fs::read(proc.join("cmdline")).unwrap(), b"cat\0");
-    assert_child_image(&proc, "/usr/bin/gnucat", "/usr/bin/cat");
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(fs::read(proc.join("cmdline")).unwrap(), b"cat\0");
+        assert_child_image(&proc, "/usr/bin/gnucat", "/usr/bin/cat");
+    }
+    #[cfg(target_os = "android")]
+    {
+        assert_eq!(fs::read(proc.join("cmdline")).unwrap(), b"eon-pty\0copy\0");
+        let image = fs::read_link(proc.join("exe")).unwrap();
+        assert!(
+            image.starts_with("/data/app") && image.ends_with("lib/x86_64/libeon_pty_worker.so")
+        );
+        let running = fs::metadata(proc.join("exe")).unwrap();
+        let pinned = p.programs.pinned_image().metadata().unwrap();
+        assert_eq!((running.dev(), running.ino()), (pinned.dev(), pinned.ino()));
+    }
     assert_eq!(fs::read_link(proc.join("cwd")).unwrap(), PathBuf::from("/"));
     let status = fs::read_to_string(proc.join("status")).unwrap();
     assert!(status.lines().any(|s| s == "NoNewPrivs:\t1"));
     assert!(status.lines().any(|s| s == "Seccomp:\t2"));
+    #[cfg(target_os = "android")]
+    {
+        // A zygote child already has a seccomp filter. Mode 2 alone does not
+        // prove that our pinned helper installed its stdio-only allowlist.
+        fn count(status: &str) -> u32 {
+            status
+                .lines()
+                .find_map(|s| s.strip_prefix("Seccomp_filters:"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        }
+        assert_eq!(
+            count(&status),
+            count(&fs::read_to_string("/proc/thread-self/status").unwrap()) + 1
+        );
+    }
     // SAFETY: queries on our live child PID.
     assert_eq!(unsafe { libc::getsid(pid as i32) }, pid as i32);
     assert_eq!(unsafe { libc::getpgid(pid as i32) }, pid as i32);

@@ -5,7 +5,7 @@ pub mod local_lsp;
 pub mod mcp_pinning;
 pub mod melon;
 pub mod microvm;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "android", target_arch = "x86_64")))]
 pub mod pty;
 pub mod quarantine;
 pub mod registry;
