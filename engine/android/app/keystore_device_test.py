@@ -127,8 +127,8 @@ def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, stock_assi
 
     def instrument(component, key, expected, *args):
         # The operator observer allows up to 30 seconds for each of eight visible checkpoints.
-        timeout = 270 if component in ("OperatorWindowAcceptance", "SessionMicAcceptance", "WorkflowNoticeAcceptance",
-                                       "ControlsAssistAcceptance") else 120
+        timeout = 360 if component == "ControlsAssistAcceptance" else (
+            270 if component in ("OperatorWindowAcceptance", "SessionMicAcceptance", "WorkflowNoticeAcceptance") else 120)
         output = adb("shell", "am", "instrument", "-w", "-r", *args, f"{TEST}/{TARGET}.{component}",
                      timeout=timeout)
         check_result(output, key, expected)
@@ -154,13 +154,14 @@ def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, stock_assi
             require_preconfigured_apk(adb)
             install(TEST, test_apk)
             if preconfigured_context:
-                print("On EON's selected controls tap Review what Android shares about EON. Pause, then tap Allow "
-                      "once. Inspect the result, end session, pause, and invoke normally. No "
-                      "accessibility service, mic or screenshot permission is needed.", flush=True)
+                print("On EON controls with CPU timing OFF, review sharing the setting, pause, confirm and dismiss. "
+                      + ("" if context_denied else "Select CPU timing ON and repeat the review, confirmation and dismissal. ")
+                      + "Pause, then invoke normally. This tests app-volunteered metadata, NOT AssistStructure.",
+                      flush=True)
                 if context_denied:
-                    instrument("ControlsAssistAcceptance", "controlsAssist", "PASS-policy-denied", "-e", "policy", "denied")
+                    instrument("ControlsAssistAcceptance", "controlsMetadata", "PASS-policy-denied", "-e", "policy", "denied")
                 else:
-                    instrument("ControlsAssistAcceptance", "controlsAssist", "PASS-session")
+                    instrument("ControlsAssistAcceptance", "controlsMetadata", "PASS-volunteered")
             elif preconfigured_workflow:
                 print("Start on EON controls with selected role status visible. Pause briefly at each step. "
                       "Invoke the assistant, expand, tap Check model profile, and wait for the completed count "
@@ -223,7 +224,7 @@ def parse_args(argv=None):
                            "Install the matching debug target, choose EON via the Android assistant picker and "
                            "leave its controls visible. No accessibility or microphone permission is needed.")
     mode.add_argument("--preconfigured-context-serial", metavar="SERIAL",
-                      help="observe one manual review of the OS assist structure on EON controls, then "
+                      help="observe review of app-volunteered settings from EON controls, then "
                            "dismissal and fresh private invocation. Use only a disposable setup-complete "
                            "API 34+ AVD with matching target already selected via Android's picker.")
     parser.add_argument("--context-denied", action="store_true", help="observe refusal after the operator disables "

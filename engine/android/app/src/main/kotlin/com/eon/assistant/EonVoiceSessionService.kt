@@ -38,19 +38,13 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
     private var toneStop: CancellationSignal? = null
     private var taskStop: CancellationSignal? = null
     private var microphone: SessionMic? = null
-    private var contextTicket: ControlsConsent.Ticket? = null
     private var contextDisplay: ControlsConsent.Ticket? = null
     private var contextNotice: String? = null
     private val contextGuard = object : Runnable {
         override fun run() {
-            if (contextNotice == null || !requireVisible()) return
-            if (!contextSharingEnabled() || contextDisplay?.let { !ControlsAssist.mayDisplay(it) } == true)
-                return unavailableContext()
-            val ticket = contextTicket
-            if (ticket != null && android.os.SystemClock.elapsedRealtime() >= ticket.until) {
-                unavailableContext()
-                return
-            }
+            val receipt = contextDisplay ?: return
+            if (!requireVisible()) return
+            if (!contextSharingEnabled() || !ControlsAssist.mayDisplay(receipt)) return unavailableContext()
             main.postDelayed(this, 300)
         }
     }
@@ -76,7 +70,6 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
         } catch (_: SecurityException) {
             false
         }
-
     }
 
     private fun contextSharingEnabled() = try {
@@ -87,11 +80,14 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
 
     override fun onPrepareShow(args: Bundle?, showFlags: Int) {
         clearShowing()
-        val ticket = ControlsAssist.beginShow(args, showFlags)
-        val allowed = surface.show(ticket != null || userInvokedVoiceHud(showFlags), eligible())
+        val eligible = eligible()
+        val ticket = if (eligible) ControlsAssist.takeShow(args, showFlags) else null
+        val allowed = surface.show(ticket != null || userInvokedVoiceHud(showFlags), eligible)
         if (allowed && ticket != null) {
-            contextTicket = ticket
-            contextNotice = context.getString(R.string.voice_context_waiting)
+            contextDisplay = ticket
+            if (contextSharingEnabled()) {
+                contextNotice = context.getString(if (ticket.timing) R.string.voice_context_timed else R.string.voice_context_untimed)
+            } else unavailableContext()
         } else ControlsAssist.cancel(ticket)
         setUiEnabled(allowed)
     }
@@ -110,27 +106,15 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
         }
         if (requireVisible()) {
             render()
-            if (contextTicket != null) main.post(contextGuard)
+            if (contextDisplay != null) main.post(contextGuard)
         }
     }
 
-    override fun onHandleAssist(state: AssistState) {
-        val ticket = contextTicket ?: return
-        if (!requireVisible()) return
-        if (!contextSharingEnabled()) return unavailableContext()
-        val count = ControlsAssist.protectedWindows(context, ticket, state)
-        if (count == null) return unavailableContext()
-        contextTicket = null
-        contextDisplay = ticket
-        contextNotice = context.getString(R.string.voice_context_protected, count)
-        render()
-    }
+    override fun onHandleAssist(state: AssistState) = Unit
     override fun onHandleScreenshot(screenshot: Bitmap?) = Unit
 
     private fun discardContext() {
-        ControlsAssist.cancel(contextTicket)
         ControlsAssist.cancel(contextDisplay)
-        contextTicket = null
         contextDisplay = null
         contextNotice = null
         main.removeCallbacks(contextGuard)

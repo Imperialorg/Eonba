@@ -35,7 +35,7 @@ class AssistantActivity : Activity() {
     private var micPermissionStatus: TextView? = null
     private val contextSource = Any()
     private var contextReview: Button? = null
-    private var reviewingContext = false
+    private var reviewingTiming: Boolean? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,6 +54,7 @@ class AssistantActivity : Activity() {
             text = "Measure EON process CPU during the next profile check"
             isSaveEnabled = false
             filterTouchesWhenObscured = true
+            setOnCheckedChangeListener { _, _ -> resetContextReview() }
         }
         column.addView(measureNextProfile)
         column.addView(Button(this).apply {
@@ -118,14 +119,15 @@ class AssistantActivity : Activity() {
                 isSaveEnabled = false
                 setText(R.string.voice_context_review)
                 setOnClickListener {
+                    val timing = measureNextProfile.isChecked
                     if (!resumed || !hasWindowFocus() || !selectedAndUnlocked(this@AssistantActivity)) {
                         resetContextReview()
-                    } else if (!reviewingContext) {
-                        reviewingContext = true
-                        setText(R.string.voice_context_confirm)
+                    } else if (reviewingTiming != timing) {
+                        reviewingTiming = timing
+                        setText(if (timing) R.string.voice_context_confirm_on else R.string.voice_context_confirm_off)
                     } else {
                         resetContextReview()
-                        if (!ControlsAssist.request(this@AssistantActivity, contextSource)) {
+                        if (!ControlsAssist.request(this@AssistantActivity, contextSource, timing)) {
                             roleStatus.setText(R.string.voice_context_unavailable)
                         }
                     }
@@ -196,18 +198,13 @@ class AssistantActivity : Activity() {
     }
 
     private fun resetContextReview() {
-        reviewingContext = false
+        reviewingTiming = null
         contextReview?.setText(R.string.voice_context_review)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (!hasFocus) resetContextReview()
-    }
-
-    override fun onProvideAssistData(data: Bundle) {
-        super.onProvideAssistData(data)
-        if (Build.VERSION.SDK_INT >= 31 && resumed) ControlsAssist.supply(contextSource, data)
     }
 
     private fun updateMicPermissionStatus() {

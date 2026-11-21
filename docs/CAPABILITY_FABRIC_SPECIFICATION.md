@@ -143,6 +143,14 @@ Automates developer tasks, builds, tests, persistent interactive debugging, and 
   - `dap.inspect_stack`: Captures stack frames, instruction pointers, and thread statuses on crash/stop events.
   - `dap.evaluate_expression`: Evaluates runtime expressions or reads live registers and heap variables, feeding the exact runtime state into Ciel's self-healing compiler loop.
 
+**Implemented debugger boundary:** `eon_cyber::dev_dap::inspect` is a host API
+on x86-64 Linux, not a remote debugger service. It selects a compiled-in
+fixture and breakpoint, never a PID, user program or expression. The native
+fixture reports its own allocation/free counts. OpenJDK reports live instance
+counts through JDI over private JDWP pipes; JDWP is not DAP. An adapter that
+only observes a stack reports `NotSampled` rather than a zero heap count. The
+general attach, stepping and evaluation operations above are not exported.
+
 #### Provisioning the confined Rust LSP
 
 The verified Rust profile is a dependency-free 2021 library rooted at `src/lib.rs`.
@@ -183,6 +191,26 @@ gate() {
 gate eon_capability sandbox::rust_analyzer::tests::lsp_and_patcher_tests_rust_worker_kernel_denials --lib
 gate local_lsp_rust_analyzer lsp_and_patcher_tests_confined_rust_analyzer --test local_lsp_rust_analyzer
 ```
+
+#### Provisioning the confined TypeScript LSP
+
+The verified x86-64 glibc profile uses vtsls 0.3.0 with TypeScript 5.9.3. It
+runs the language service in-process on open document snapshots. It does not
+run project code, load project plugins or discover files on disk.
+
+From `engine/core-rs`, with a vetted Node 24.22.1 binary and the upstream
+archives listed in `crates/eon-capability/provision/vtsls/inputs`:
+
+```bash
+bash crates/eon-capability/provision/build-vtsls.sh "$NODE" "$ARCHIVES" "$NEW_INSTALL"
+```
+
+Keep the emitted digest in trusted operator configuration, separate from the
+image. Do not recalculate a pin from the file at launch. On a host with a
+delegated pids controller, `bash crates/eon-capability/provision/test-vtsls.sh`
+uses the absolute `EON_TEST_VTSLS` path and `EON_TEST_VTSLS_SHA256` to run
+both the kernel-denial and semantic gates. A successful warm diagnostic
+query does not imply a sub-50-ms cold start or Kotlin support.
 
 ### 3.3 Cyber Defense & Hardening Capabilities (`cyber.defense.*`)
 Automates host security, static taint tracking, and live patching.

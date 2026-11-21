@@ -3,11 +3,12 @@
     <item type="id" name="assistant_role_status" />
     <item type="id" name="assistant_role_request" />
     <item type="id" name="assistant_context_review" />
-    <string name="voice_context_review">Review what Android shares about EON</string>
-    <string name="voice_context_confirm">Allow once: count protected windows on this EON controls page. No screen text, images or microphone. Tap again to confirm.</string>
-    <string name="voice_context_waiting">Checking Android’s assist structure for this EON page…</string>
-    <string name="voice_context_protected">EON controls · protected windows: %1$d. Android withheld their contents. Dismiss to forget.</string>
-    <string name="voice_context_unavailable">Android did not share a verified EON controls layout. No contents read.</string>
+    <string name="voice_context_review">Review sharing the CPU timing setting</string>
+    <string name="voice_context_confirm_on">Share once: CPU timing is ON. Send only this EON setting to the assistant card? Tap again to confirm. No measurements or screen contents.</string>
+    <string name="voice_context_confirm_off">Share once: CPU timing is OFF. Send only this EON setting to the assistant card? Tap again to confirm. No measurements or screen contents.</string>
+    <string name="voice_context_timed">EON controls shared: CPU timing ON. Check model profile in controls to measure this process. No screen contents collected.</string>
+    <string name="voice_context_untimed">EON controls shared: CPU timing OFF. Check model profile in controls without measuring this process. No screen contents collected.</string>
+    <string name="voice_context_unavailable">Shared setting unavailable. Screen layout and screenshot collection are always off.</string>
     <string name="voice_role_canceled">Selection canceled. EON is not the selected assistant.</string>
     <string name="voice_hud_title">EON · Mic off</string>
     <string name="voice_hud_ready">Session open</string>

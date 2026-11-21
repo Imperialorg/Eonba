@@ -20,6 +20,7 @@ public final class ControlsAssistAcceptance extends Instrumentation {
     private UiAutomation ui;
     private String step = "preflight";
     private boolean denied;
+    private static final String REVIEW = "Review sharing the CPU timing setting";
     private boolean selected() {
         return VoiceInteractionService.isActiveService(getTargetContext(),
                 new ComponentName(EON, EON + ".EonVoiceInteractionService"));
@@ -58,6 +59,22 @@ public final class ControlsAssistAcceptance extends Instrumentation {
         throw new AssertionError();
     }
 
+    private void review(int controls, boolean timing) {
+        String setting = timing ? "ON" : "OFF";
+        String confirm = "Share once: CPU timing is " + setting + ". Send only this EON setting to the assistant card? "
+                + "Tap again to confirm. No measurements or screen contents.";
+        await("explicit-review", r -> r.getWindowId() == controls &&
+                confirm.equalsIgnoreCase(label(r, "assistant_context_review")));
+        String expected = denied ? "Shared setting unavailable. Screen layout and screenshot collection are always off."
+                : timing ? "EON controls shared: CPU timing ON. Check model profile in controls to measure this process. No screen contents collected."
+                : "EON controls shared: CPU timing OFF. Check model profile in controls without measuring this process. No screen contents collected.";
+        int reviewed = await(denied ? "policy-denied" : "volunteered-setting", r -> r.getWindowId() != controls
+                && "Session open".equals(label(r, "hud_status")) && expected.equals(label(r, "hud_context")));
+        await("dismissed", r -> r.getWindowId() == controls && ui.getWindows().stream().anyMatch(w -> w.getId() == controls)
+                && ui.getWindows().stream().noneMatch(w -> w.getId() == reviewed)
+                && REVIEW.equalsIgnoreCase(label(r, "assistant_context_review")));
+    }
+
     @Override public void onStart() {
         Bundle result = new Bundle();
         int code = Activity.RESULT_CANCELED;
@@ -71,24 +88,16 @@ public final class ControlsAssistAcceptance extends Instrumentation {
                     | AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS;
             ui.setServiceInfo(info);
             int controls = await("selected-controls", r -> "EON is the selected assistant.".equals(label(r, "assistant_role_status"))
-                    && "Review what Android shares about EON".equalsIgnoreCase(label(r, "assistant_context_review")));
-            await("explicit-review", r -> r.getWindowId() == controls &&
-                    label(r, "assistant_context_review").toLowerCase(java.util.Locale.ROOT).startsWith("allow once:"));
-            String expected = denied ? "Android did not share a verified EON controls layout. No contents read."
-                    : "EON controls · protected windows: 1. Android withheld their contents. Dismiss to forget.";
-            int reviewed = await(denied ? "os-context-denied" : "os-structure", r -> r.getWindowId() != controls
-                    && "Session open".equals(label(r, "hud_status"))
-                    && expected.equals(label(r, "hud_context")));
-            await("dismissed", r -> r.getWindowId() == controls && ui.getWindows().stream().anyMatch(w -> w.getId() == controls)
-                    && ui.getWindows().stream().noneMatch(w -> w.getId() == reviewed)
-                    && "Review what Android shares about EON".equalsIgnoreCase(label(r, "assistant_context_review")));
+                    && REVIEW.equalsIgnoreCase(label(r, "assistant_context_review")));
+            review(controls, false);
+            if (!denied) review(controls, true);
             await("fresh-private-session", r -> r.getWindowId() != controls && "Session open".equals(label(r, "hud_status"))
                     && "EON · Mic off".equals(label(r, "hud_title")) && label(r, "hud_context").isEmpty());
             require(selected());
-            result.putString("controlsAssist", denied ? "PASS-policy-denied" : "PASS-session");
+            result.putString("controlsMetadata", denied ? "PASS-policy-denied" : "PASS-volunteered");
             code = Activity.RESULT_OK;
         } catch (RuntimeException | AssertionError | LinkageError failure) {
-            result.putString("controlsAssist", "FAIL-" + step);
+            result.putString("controlsMetadata", "FAIL-" + step);
         }
         finish(code, result);
     }

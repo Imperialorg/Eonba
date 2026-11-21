@@ -125,7 +125,7 @@
   - **Files**: `src/providers/workspace.rs`, `src/providers/process.rs`, `src/providers/pty.rs`
   - **Requirements**: Range reads, atomic temp-file writes, SHA-256 digest validation, pre-write journal snapshots. Persistent bidirectional PTY session multiplexer (`portable-pty`) exposing `process.pty_open`, `process.pty_write`, `process.pty_read_ring`, and `process.pty_signal` with in-memory 10,000-line circular ring buffer and 300s idle watchdog.
   - **Unit Tests**: `cargo test -p eon-capability workspace_tests`, `process_tests`, `pty_tests`.
-  - **Verified subset**: Linux has workflow-owned PTYs with bounded reads, writes, signals and idle cleanup. Host-approved operations can transform or count supplied bytes without exposing a shell, caller-controlled arguments or file operands. This is a devpts backend, not a cross-platform `portable-pty` provider. Workspace writes retain private file preimages, not directory snapshots.
+  - **Verified subset**: Linux has workflow-owned PTYs with bounded reads, writes and signals. Rereading buffered output does not postpone the idle watchdog. File edits durably journal the preimage before staging replacement bytes. An explicit workspace checkpoint captures a bounded tree of owned files and directories without publishing a file listing. The terminal backend is Linux devpts; no cross-platform `portable-pty` result.
 
 - [x] **Task 4.3: Network & Web Research Providers**
   - **Crate**: `eon-capability`
@@ -140,7 +140,7 @@
   - **Unit Tests**: `cargo test -p eon-capability lsp_and_patcher_tests`.
   - **Verified subset**: Confined clangd and rust-analyzer answered cross-file definitions, references, hover and fresh diagnostics on two-file projects. A task-capped rust-analyzer 1.99.1 worker took 122.8 ms from launch to its first diagnostic, 0.117 ms warm diagnostic p95 and 0.783 ms edit-to-diagnostic p95. It sees only supplied snapshots of a dependency-free library, not the workspace or Cargo build scripts.
   - **Python evidence**: A confined, digest-pinned Pyright 1.1.414 worker answered cross-file queries on flat Python modules supplied over stdio. Definition, references and hover each had a warm p95 below 0.5 ms; edit to fresh diagnostic took 10.128 ms p95. Startup to first diagnostic took 2.606 s.
-  - **Remaining servers**: Kotlin Language Server and vtsls have not passed. Stock vtsls launches a separate `tsserver`; the Pyright worker does not permit that child process. Cold queries do not meet the 50 ms target.
+  - **TypeScript evidence**: A digest-pinned vtsls 0.3.0 image with TypeScript 5.9.3 served JS, JSX, TS and TSX snapshots without launching `tsserver` as a child. Cross-file definitions, references, hover and fresh diagnostics passed. Warm diagnostic p95 was 0.56 ms; edit-to-diagnostic p95 was 8.13 ms. Cold startup was 2.69 s. Kotlin Language Server remains unverified.
 
 ---
 
@@ -231,14 +231,14 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Requirements**: Tree-sitter AST parsing across Rust, Kotlin, C/C++, Python, TypeScript. PageRank architectural RepoMap generator. Embedded Debug Adapter Protocol (DAP) client bridge (`dev.dap`) interfacing with `codelldb`, `debugpy`, and `jdwp` to inspect live stack frames, conditional breakpoints, and heap allocations. Automated compiler diagnostic capture and localized syntax tree repair.
   - **Unit Tests**: `cargo test -p eon-cyber ast_tests`, `self_healing_tests`, `dap_tests`.
   - **Verified subset**: Across four languages, 47 of 50 benign repair cases passed independent behavior checks after one edit, 48 within three revisions. Kotlin edits now require an unambiguous syntax match at the K2 diagnostic; the compact superclass fixture was not parseable by the pinned grammar. The separate RepoMap parses all six languages and ranks lexical membership and unambiguous syntactic call matches. Its hand-checked fixture covers 19 declarations in eight files. This is not compiler name resolution or live debugger verification.
-  - **Debugger evidence**: A separate LLVM 18 `lldb-dap` run stopped at each of two fixed conditions in an owned fixture, read the expected three source frames and exited cleanly. The bridge does not accept a PID, target, command or expression. CodeLLDB, debugpy and JDWP were not verified.
+  - **Debugger evidence**: CodeLLDB and LLVM `lldb-dap` observed three live frames at two fixed conditional breakpoints in an owned C fixture. Allocation/free counts were 2/1 and 3/2. On the JVM, JDI over private JDWP pipes stopped on the second visit, observed the three expected frames and counted three live marker objects without reading their values. These are fixture observations, not arbitrary attach, expression evaluation or heap dumps.
 
 - [ ] **Task 7.2: Defensive source review, repair proposals and platform telemetry**
   - **Crate**: `eon-cyber`
   - **Files**: `src/defense/taint_auditor.rs`, `src/defense/auto_patch.rs`, `src/defense/telemetry.rs`
   - **Requirements**: Review authorized source for patterns associated with CWE-119, CWE-89, CWE-362 and observable timing differences. Produce reviewable constant-time and bounds-checking edits, without executing submitted code or patching a running process. Collect opt-in, metadata-only telemetry on supported Linux/Android eBPF, Windows ETW and stock Android backends. Distinguish observed evidence from unsupported rules and unavailable sensors.
   - **Verification**: Exercise both matching and nonmatching source, compile and test the reviewed repair, check that reports do not disclose the source, and test each claimed telemetry backend on its supported host. Local `/proc/self/io` counters do not establish eBPF, ETW or VPN coverage.
-  - **Platform evidence**: An opted-in local action measured 334 ms of process-wide CPU time on an API 35 emulator. The app does not open a network connection, accept a target PID or persist a baseline. The Windows audit CLI cross-linked with a payload-free ETW marker. The Windows job checks delivery after opt-in and absence by default. No native Windows ETW, Android eBPF or VPN result.
+  - **Platform evidence**: The stock API 35 process-time sensor measured 334 ms for an opted-in local action. A separate self-only eBPF sensor recorded CPU-clock samples on supported Linux and explicitly reported unavailable on enforcing stock Android. Neither API accepts a target PID. The Windows ETW CLI cross-linked, but native delivery still needs an approved Windows run. No positive Android eBPF or VPN measurement.
 
 - [x] **Task 7.3: Offline dependency and advisory assessment**
   - **Crate**: `eon-cyber`
@@ -281,7 +281,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/transport/iroh_node.rs`, `src/transport/qos_lanes.rs`
   - **Requirements**: `iroh` integration for Ed25519 node addressing, zero-config STUN hole-punching and DERP relay routing across 5G/Wi-Fi roaming. 4-class QUIC QoS prioritization using RFC 9221 datagrams for Class 0 voice/barge-in (< 5ms) and reliable streams for Class 1/2/3. Wire serialization via `proto/eon.proto`.
   - **Unit Tests**: `cargo test -p eon-mesh iroh_and_qos_tests`.
-  - **Verified subset**: In five isolated Linux namespaces, one pinned connection migrated from a private HTTPS relay to direct UDP across two NATs and back. All four classes carried traffic; path and relay byte counters confirmed transit. With bounded voice queues, shorter test-only path timers reduced the longest cutover gap between peer decodes from 15.014 s to 1.002 s. Still, 49 of 54 cut frames had no receipt. The strict 5 ms deadline remains unmet. Direct mode is test-only; QAD is not RFC STUN and no physical carrier roam was measured.
+  - **Verified subset**: In five isolated Linux namespaces, one pinned connection migrated from a private HTTPS relay to direct UDP across two NATs and back. All four classes carried traffic. Removing the sender's direct interface while preserving its original relay socket still left a 1.003 s decode gap with the short test-only timers; 49 of 54 cut frames had no receipt. The strict 5 ms deadline remains unmet. Production remains relay-only; QAD is not RFC STUN and no physical carrier roam was measured.
 
 ---
 
@@ -319,7 +319,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/main/kotlin/com/eon/assistant/service/EonVoiceInteractionService.kt`, `EonVoiceInteractionSessionService.kt`, `res/xml/voice_interaction_service_config.xml`
   - **Requirements (stock Android)**: Support the user-selected assistant role and request hotword detection only where the OS and hardware permit it. Respect microphone permission and foreground restrictions. Consume only OS-supplied assist context while the role is active. Require fresh user consent for each screen-capture session; release resources on revocation. Test clean recovery after process death. A regular app cannot choose its OOM adjustment or promise immunity from OEM process management.
   - **Unit Tests**: Android instrumented test verifying assistant binding, assist structure extraction, and background audio streaming.
-  - **Platform evidence**: A clean API 35 AVD showed Android's real assistant role picker and canceled without selection. On a separately configured AVD, screen-off removed the visible card; after EON's process was killed, Android rebound the selected service under a new PID and a fresh invocation showed a new card. No secure lock credential, hotword hardware, microphone or assist-content extraction was tested in this run.
+  - **Platform evidence**: On API 35, assistant selection, microphone denial, role revocation, screen-off dismissal and recovery under a fresh PID without restored consent passed. A prototype counted protected windows, but Android's structure opt-in is binding-wide, not scoped to the requesting activity. That result does not establish a safe context-extraction backend. No hardware hotword or live screen-capture revocation result.
 
 ---
 
@@ -363,4 +363,4 @@ The security work in this roadmap is defensive: inspect authorized code, depende
     4. **Noisy Duplex Audio Suite**: Synthetic audio benchmark with heavy acoustic background noise (coffee shop babble, street traffic, television dialog); asserts zero false barge-ins via WeSpeaker speaker verification and TTFA < 200ms.
   - **Acceptance Criteria**: `cargo test --test eval_harness` executes the complete evaluation suite with 100% pass rate.
   - **Repair result**: Manual 06 §3.6 records the toolchains, exact corpus and per-language outcomes. The 94% one-edit result clears the repair threshold but does not establish a noisy-scene TTFA below 200 ms or a passing combined evaluation.
-  - **Combined result**: `python3 -B scripts/eval/acceptance.py` distinguishes failed checks from missing evidence. With the corrected WeSpeaker front end, clean speech and rumble triggered the held-out owner, but babble, traffic and TV missed the owner. All five negative intervals had zero false interruptions. The replay, defensive and repair checks passed; no physical session was supplied for acoustic latency (Manual 06 §§3.3, 3.7).
+  - **Combined result**: The explicitly selected Cargo `eval_harness` target runs the full evaluator, not just its five portable component tests. Four replay checks, the defensive regression and 47/50 first-edit repairs passed. At the original speaker threshold, clean and rumble triggered the held-out owner, but babble, traffic and TV did not. None of the five non-owner intervals interrupted playback. No authorized physical session was supplied. The combined gate did not pass (Manual 06 §§3.3, 3.7).

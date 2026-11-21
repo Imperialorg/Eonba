@@ -26,6 +26,7 @@ class FloatingHudActivity : Activity() {
     private lateinit var micStart: Button
     private var requestingMic = false
     private var resumed = false
+    internal val canStart get() = resumed && hasWindowFocus() && !isFinishing && !isDestroyed
     private val refresh = { render() }
 
     override fun onCreate(state: Bundle?) {
@@ -107,11 +108,13 @@ class FloatingHudActivity : Activity() {
 
     override fun onWindowFocusChanged(focus: Boolean) {
         super.onWindowFocusChanged(focus)
+        if (!focus) FloatingHudService.cancelPending(this)
         if (resumed && focus) render()
     }
 
     override fun onPause() {
         resumed = false
+        FloatingHudService.cancelPending(this)
         if (FloatingHudService.changed === refresh) FloatingHudService.changed = null
         super.onPause()
     }

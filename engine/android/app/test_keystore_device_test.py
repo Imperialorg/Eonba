@@ -18,8 +18,8 @@ class InstrumentationResults(unittest.TestCase):
                             ("demo", "PASS-denied"), ("demo", "PASS-allowed"), ("nativeVault", "PASS"),
                             ("voiceHud", "PASS-stock"), ("voiceHud", "PASS-session"),
                             ("workflowNotice", "PASS-session"),
-                            ("controlsAssist", "PASS-session"),
-                            ("controlsAssist", "PASS-policy-denied"),
+                            ("controlsMetadata", "PASS-volunteered"),
+                            ("controlsMetadata", "PASS-policy-denied"),
                             ("assistantActivity", "PASS-picker-canceled")):
             with self.subTest(key=key, result=result):
                 check_result(f"INSTRUMENTATION_RESULT: {key}={result}\r\nINSTRUMENTATION_CODE: -1\r\n", key, result)

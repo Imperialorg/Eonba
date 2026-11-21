@@ -25,8 +25,14 @@ public final class FloatingHudAcceptance extends Instrumentation {
     private String step = "preflight";
     private Context app;
     private int idleWidth;
+    private boolean micPhase;
+    private int peak;
 
-    @Override public void onCreate(Bundle args) { super.onCreate(args); start(); }
+    @Override public void onCreate(Bundle args) {
+        super.onCreate(args);
+        micPhase = args != null && "mic".equals(args.getString("mode"));
+        start();
+    }
 
     private static void require(boolean passed) { if (!passed) throw new AssertionError(); }
 
@@ -44,7 +50,7 @@ public final class FloatingHudAcceptance extends Instrumentation {
         for (StatusBarNotification n : app.getSystemService(NotificationManager.class).getActiveNotifications()) {
             Notification note = n.getNotification();
             if (!"eon.floating.status".equals(note.getChannelId())) continue;
-            require((note.flags & Notification.FLAG_FOREGROUND_SERVICE) != 0 && note.actions.length == 3);
+            require((note.flags & Notification.FLAG_FOREGROUND_SERVICE) != 0 && note.actions.length >= 1);
             return true;
         }
         return false;
@@ -56,12 +62,47 @@ public final class FloatingHudAcceptance extends Instrumentation {
         while (SystemClock.elapsedRealtime() < end) {
             FutureTask<Boolean> test = new FutureTask<>(condition);
             runOnMainSync(test);
-            require(!app.getSystemService(AppOpsManager.class).isOpActive(
-                    AppOpsManager.OPSTR_RECORD_AUDIO, Process.myUid(), app.getPackageName()));
+            if (!micPhase) require(!recording());
             if (test.get()) return;
             SystemClock.sleep(120);
         }
         throw new AssertionError();
+    }
+
+    private boolean recording() {
+        return app.getSystemService(AppOpsManager.class).isOpActive(
+                AppOpsManager.OPSTR_RECORD_AUDIO, Process.myUid(), app.getPackageName());
+    }
+
+    private boolean liveLevel() {
+        View root = card();
+        if (root == null || !root.isShown() || !notice() || !recording()) return false;
+        ToneGraph graph = root.findViewById(R.id.floating_meter);
+        if (!graph.isShown() || graph.getLevels().isEmpty()) return false;
+        int last = graph.getLevels().get(graph.getLevels().size() - 1);
+        return last > 0 && last <= 100 && app.getString(R.string.floating_mic_level, last)
+                .contentEquals(((TextView)root.findViewById(R.id.floating_status)).getText());
+    }
+
+    private void observeMic() throws Exception {
+        await("mic-unreviewed", () -> !recording() && !MicPermission.INSTANCE.allowed(app));
+        await("mic-reviewed-off", () -> MicPermission.INSTANCE.allowed(app) && !recording());
+        await("mic-live", this::liveLevel);
+        await("mic-finished", () -> {
+            View root = card();
+            if (root == null || !root.isShown() || !notice() || recording()) return false;
+            ToneGraph graph = root.findViewById(R.id.floating_meter);
+            if (!graph.isShown() || graph.getLevels().size() != 12) return false;
+            peak = java.util.Collections.max(graph.getLevels());
+            return peak > 0 && peak <= 100 && app.getString(R.string.floating_mic_done, peak)
+                    .contentEquals(((TextView)root.findViewById(R.id.floating_status)).getText());
+        });
+        await("mic-live-again", this::liveLevel);
+        await("mic-early-stop", () -> !recording() && !notice() && card() == null &&
+                app.getSystemService(android.os.PowerManager.class).isInteractive());
+        await("mic-live-third", this::liveLevel);
+        await("mic-screen-off", () -> !recording() && !notice() && card() == null &&
+                !app.getSystemService(android.os.PowerManager.class).isInteractive());
     }
 
     private boolean idle() {
@@ -113,9 +154,15 @@ public final class FloatingHudAcceptance extends Instrumentation {
             app = getTargetContext();
             require(Build.VERSION.SDK_INT == 35 && ("ranchu".equals(Build.HARDWARE) || "goldfish".equals(Build.HARDWARE))
                     && "com.eon.assistant".equals(app.getPackageName()));
-            observe();
-            result.putString("floatingHud", "PASS-operator");
-            result.putInt("idleWidthPx", idleWidth);
+            if (micPhase) {
+                observeMic();
+                result.putString("floatingHud", "PASS-mic");
+                result.putInt("peakRmsPercent", peak);
+            } else {
+                observe();
+                result.putString("floatingHud", "PASS-operator");
+                result.putInt("idleWidthPx", idleWidth);
+            }
             code = Activity.RESULT_OK;
         } catch (Exception | AssertionError | LinkageError failure) {
             result.putString("floatingHud", "FAIL-" + step);

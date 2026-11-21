@@ -15,17 +15,17 @@ import zipfile
 
 SOURCE = """\
 # The visits share one instruction but have distinct callers.
-def count(visit):
+def count(visit, marker_allocations, marker_live):
     return visit + 1
 
 def first():
-    return count(1)
+    return count(1, *record_marker(True))
 
 def second():
-    return count(2)
+    return count(2, *record_marker(False))
 
 def third():
-    return count(3)
+    return count(3, *record_marker(True))
 
 def main():
     a = first()
@@ -33,12 +33,39 @@ def main():
     c = third()
     assert (a, b, c) == (2, 3, 4)
 
+import weakref
+
+class Marker:
+    pass
+
+created = 0
+registry = weakref.WeakSet()
+retained = []
+
+def record_marker(keep):
+    global created
+    marker = Marker()
+    created += 1
+    registry.add(marker)
+    if keep:
+        retained.append(marker)
+    del marker
+    return created, len(registry)
+
 main()
 """
 WHEEL = "debugpy-1.8.22-py2.py3-none-any.whl"
 SHA256 = "a9e9d3550e15ca479c59333e90845029190531f0cacfedab3b815a57bd913947"
 SIZE = 5374857
 PYTHON = "/usr/bin/python3"
+LAUNCHER = """\
+import sys
+if not (sys.executable == "/usr/bin/python3" and sys.flags.isolated and
+        sys.flags.no_site and sys.flags.dont_write_bytecode and "site" not in sys.modules):
+    sys.exit(1)
+import runpy
+runpy.run_path("/proc/self/cwd/debugpy/launcher", run_name="__main__")
+"""
 
 
 class FixtureError(Exception):
@@ -77,6 +104,7 @@ def prepare(work):
     # Verify the exact bytes in memory before extracting into the private tmpfs.
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         archive.extractall(work, [n for n in archive.namelist() if n.startswith("debugpy/")])
+    (work / "launcher.py").write_text(LAUNCHER, encoding="utf-8")
     target = work / "count.py"
     target.write_text(SOURCE, encoding="utf-8")
     return str(target)
@@ -155,16 +183,48 @@ class Session:
             pass
         return body
 
+    def marker_counters(self, frame, visit):
+        frame_id = frame["id"]
+        if type(frame_id) is not int or not 1 <= frame_id <= 2**31 - 1:
+            raise FixtureError
+        scopes = self.call("scopes", dict(frameId=frame_id))["scopes"]
+        local, = [s for s in scopes if s["name"] == "Locals" and s.get("presentationHint") == "locals"]
+        ref = local["variablesReference"]
+        if local["expensive"] is not False or type(ref) is not int or not 1 <= ref <= 2**31 - 1:
+            raise FixtureError
+        # This source frame contains exactly three integer arguments, no
+        # objects. Never request globals, another frame, or a child reference.
+        variables = self.call("variables", dict(variablesReference=ref, filter="named",
+                                                start=0, count=3))["variables"]
+        allowed = {"visit", "marker_allocations", "marker_live"}
+        values = {}
+        if len(variables) != 3:
+            raise FixtureError
+        for item in variables:
+            name, value = item["name"], item["value"]
+            if (name not in allowed or name in values or item["type"] != "int"
+                    or type(item["variablesReference"]) is not int or item["variablesReference"] != 0
+                    or value not in ("0", "1", "2", "3")):
+                raise FixtureError
+            values[name] = value
+        if values["visit"] != visit:
+            raise FixtureError
+        return bytes((int(values["marker_allocations"]), int(values["marker_live"])))
+
     def inspect(self, visit, work, target):
         capabilities = self.call("initialize", dict(adapterID="debugpy", pathFormat="path",
-                                 linesStartAt1=True, columnsStartAt1=True))
+                                 linesStartAt1=True, columnsStartAt1=True, supportsVariableType=True))
         if capabilities.get("supportsConditionalBreakpoints") is not True:
             raise ProtocolError
+        # debugpy does not pass pythonArgs to the intermediate launcher. GNU
+        # env splits one constant literal into argv, without invoking a shell.
         self.launch_seq = self.send("launch", dict(type="debugpy", request="launch", name="owned",
                                     console="internalConsole", program=target, cwd=str(work),
                                     python=PYTHON, pythonArgs=["-I", "-S", "-B"],
+                                    debugLauncherPython="/usr/bin/env",
+                                    debugLauncherPath="-S /usr/bin/python3 -ISB /proc/self/cwd/launcher.py",
                                     debugAdapterHost="127.0.0.1", subProcess=False,
-                                    justMyCode=True, redirectOutput=False))
+                                    justMyCode=True, showReturnValue=False, redirectOutput=False))
         while not self.initialized:
             self.dispatch()
         condition = {"2": "visit == 2", "3": "visit == 3"}[visit]
@@ -179,17 +239,33 @@ class Session:
         frames = stack["stackFrames"]
         if len(frames) != 3 or any(f["source"]["path"] != target for f in frames):
             raise FixtureError
-        actual = [(f["name"], f["line"]) for f in frames]
-        expected = {"2": [("count", 3), ("second", 9), ("main", 16)],
-                    "3": [("count", 3), ("third", 12), ("main", 17)]}[visit]
-        if actual != expected:
-            raise FixtureError
+        # Send only six bytes encoding the observed names/physical lines.
+        # The host must recognize that visit's stack before it allows resume.
+        names = {"count": 1, "second": 2, "third": 3, "main": 4}
+        evidence = bytearray()
+        for frame in frames:
+            line = frame["line"]
+            if frame["name"] not in names or type(line) is not int or not 1 <= line <= 20:
+                raise FixtureError
+            evidence.extend((names[frame["name"]], line))
+        sys.stdout.buffer.write(evidence)
+        sys.stdout.buffer.flush()
+        action = sys.stdin.buffer.read(1)
+        if action == b"M":
+            # Only the host's verified-stack branch sends M. Recheck the
+            # top location here before requesting the integer-only locals.
+            if (frames[0]["name"], frames[0]["line"]) != ("count", 3):
+                raise FixtureError
+            sys.stdout.buffer.write(self.marker_counters(frames[0], visit))
+            sys.stdout.buffer.flush()
+            action = sys.stdin.buffer.read(1)
+        if action != b"C":
+            raise ProtocolError
         self.resumed = True
         self.call("continue", dict(threadId=self.thread))
         while not self.terminated:
             self.dispatch()
         self.call("disconnect", {})
-        return actual
 
 
 def main():
@@ -203,15 +279,13 @@ def main():
                           env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           stderr=subprocess.DEVNULL) as process:
         try:
-            stack = Session(process).inspect(visit, work, target)
+            Session(process).inspect(visit, work, target)
             process.stdin.close()
             if process.wait(timeout=2) != 0:
                 raise FixtureError
         finally:
             if process.poll() is None:
                 process.kill()
-    for name, line in stack:
-        print(f"{name}:{line}")
 
 
 if __name__ == "__main__":

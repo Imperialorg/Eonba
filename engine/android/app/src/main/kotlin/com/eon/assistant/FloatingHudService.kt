@@ -58,8 +58,10 @@ class FloatingHudService : Service() {
 
         private fun eligible(c: Context) = unlocked(c) && Settings.canDrawOverlays(c) && notificationsAllowed(c)
 
-        internal fun requestStart(activity: Activity): Boolean {
-            val ticket = consent.request(activity.hasWindowFocus() && eligible(activity)) ?: return false
+        internal fun cancelPending(activity: FloatingHudActivity) = consent.cancelPending(activity)
+
+        internal fun requestStart(activity: FloatingHudActivity): Boolean {
+            val ticket = consent.request(activity.canStart && eligible(activity), activity) ?: return false
             return try {
                 // Called only during the foreground Activity's explicit Start click. A stale delivery
                 // is allowed to stop without first promoting an unwanted service/notification.
@@ -85,7 +87,7 @@ class FloatingHudService : Service() {
         // Intentionally NOT a service Intent, notification action, binding or queued operation.
         internal fun startMic(activity: FloatingHudActivity): Boolean {
             val service = owner ?: return false
-            if (!activity.hasWindowFocus() || !FloatingHudActivities.showing || !eligible(activity) ||
+            if (!activity.canStart || !FloatingHudActivities.showing || !eligible(activity) ||
                 !MicPermission.allowed(activity)) return false
             return service.openMic(activity)
         }
@@ -129,7 +131,8 @@ class FloatingHudService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val ticket = intent?.data?.schemeSpecificPart
-        if (intent?.action == START && consent.consume(ticket, eligible(this))) {
+        val source = consent.sourceFor(ticket) as? FloatingHudActivity
+        if (intent?.action == START && consent.consume(ticket, source?.canStart == true && eligible(this))) {
             owner = this
             try {
                 foreground(checkNotNull(ticket), liveMic = false)

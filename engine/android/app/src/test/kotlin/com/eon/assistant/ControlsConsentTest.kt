@@ -1,44 +1,52 @@
 package com.eon.assistant
 
+import java.io.File
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertSame
-import kotlin.test.assertTrue
 
 class ControlsConsentTest {
     private var now = 0L
     private val gate = ControlsConsent { now }
 
-    @Test fun onlyTheSameFreshRequestCanShowThenReadOnce() {
+    @Test fun onlyTheSameFreshCapabilityAndReviewedValueCanBeConsumedOnce() {
         val source = Any()
-        val old = gate.issue(source)
-        val fresh = gate.issue(source)
-        assertNotEquals(old.key, fresh.key)
-        assertNull(gate.show(old.key))
+        val old = gate.issue(source, Any(), true)
+        val fresh = gate.issue(source, Any(), false)
         gate.cancel(old)
-        assertSame(fresh, gate.show(fresh.key))
-        assertNull(gate.show(fresh.key))
-        assertFalse(gate.consume(old))
-        assertTrue(gate.consume(fresh))
-        assertFalse(gate.consume(fresh))
-        assertNull(gate.show(fresh.key))
+        assertSame(fresh, gate.take(fresh.token, 0))
+        assertNull(gate.take(fresh.token, 0))
+        val wrongValue = gate.issue(source, Any(), true)
+        assertNull(gate.take(wrongValue.token, 0))
+        assertNull(gate.take(wrongValue.token, 1))
+        val wrongToken = gate.issue(source, Any(), false)
+        assertNull(gate.take(Any(), 0))
+        assertNull(gate.take(wrongToken.token, 0))
+        val timed = gate.issue(source, Any(), true)
+        assertSame(timed, gate.take(timed.token, 1))
     }
 
-    @Test fun callbacksWithoutAShowOrAfterExpiryRevocationOrRestartCannotRead() {
-        assertFalse(gate.consume(gate.issue(Any())))
-        val ticket = gate.issue(Any())
-        assertSame(ticket, gate.show(ticket.key))
+    @Test fun expiryRevocationAndRestartAllForgetTheCapability() {
+        val ticket = gate.issue(Any(), Any(), false)
         now = ticket.until
-        assertFalse(gate.consume(ticket))
-        val next = gate.issue(Any())
+        assertNull(gate.take(ticket.token, 0))
+        val next = gate.issue(Any(), Any(), false)
         gate.reset()
-        assertNull(gate.show(next.key))
-        val last = gate.issue(Any())
-        assertSame(last, gate.show(last.key))
-        val restarted = ControlsConsent { now }
-        assertNull(restarted.show(last.key))
-        assertFalse(restarted.consume(last))
+        assertNull(gate.take(next.token, 0))
+        val last = gate.issue(Any(), Any(), true)
+        assertNull(ControlsConsent { now }.take(last.token, 1))
+    }
+
+    @Test fun noProductionPathOpensTheBindingWideCollectionPolicy() {
+        val files = File("src/main").walk().filter { it.extension in listOf("java", "kt") }.toList()
+        val writes = Regex("""setDisabledShowContext\s*\(\s*([^)]*?)\s*\)""")
+        val calls = files.flatMap { f -> writes.findAll(f.readText()).map { f.name to it.groupValues[1] } }
+        assertEquals(listOf("EonVoiceInteractionService.kt" to "NO_ASSIST_CONTEXT"), calls)
+        assertEquals(3, NO_ASSIST_CONTEXT)
+        for (f in files) {
+            assertFalse(Regex("""\bdisabledShowContext\s*=(?!=)""").containsMatchIn(f.readText()), f.name)
+        }
     }
 }
