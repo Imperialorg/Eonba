@@ -37,6 +37,8 @@ class Capture:
 
 
 def _analyze(path: Path, threshold: int) -> Capture:
+    if sys.byteorder != "little":
+        raise ValueError("PCM analysis requires a little-endian host")
     if not 1 <= threshold <= 32767:
         raise ValueError("RMS threshold must be between 1 and 32767 PCM units")
     with wave.open(str(path), "rb") as wav:
