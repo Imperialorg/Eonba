@@ -2,6 +2,12 @@
     <bool name="voice_hud_supported">false</bool>
     <item type="id" name="assistant_role_status" />
     <item type="id" name="assistant_role_request" />
+    <item type="id" name="assistant_context_review" />
+    <string name="voice_context_review">Review what Android shares about EON</string>
+    <string name="voice_context_confirm">Allow once: count protected windows on this EON controls page. No screen text, images or microphone. Tap again to confirm.</string>
+    <string name="voice_context_waiting">Checking Android’s assist structure for this EON page…</string>
+    <string name="voice_context_protected">EON controls · protected windows: %1$d. Android withheld their contents. Dismiss to forget.</string>
+    <string name="voice_context_unavailable">Android did not share a verified EON controls layout. No contents read.</string>
     <string name="voice_role_canceled">Selection canceled. EON is not the selected assistant.</string>
     <string name="voice_hud_title">EON · Mic off</string>
     <string name="voice_hud_ready">Session open</string>
@@ -13,7 +19,7 @@
     <string name="voice_mic_permission">Request microphone permission</string>
     <string name="voice_mic_unprepared">Optional microphone meter: request Android microphone permission here. This does not start listening.</string>
     <string name="voice_mic_pregranted">Mic off. An existing grant alone cannot enable the meter. Deny EON microphone access in Android Settings, then request permission here (before choosing EON as assistant if needed).</string>
-    <string name="voice_mic_prepared">Permission reviewed. Only Start in an unlocked assistant card can turn the mic on.</string>
+    <string name="voice_mic_prepared">Permission reviewed. Only Start in an unlocked assistant card or in floating HUD controls can turn the mic on.</string>
     <string name="voice_mic_start">Start 6-second microphone meter</string>
     <string name="voice_mic_stop">Stop microphone now</string>
     <string name="voice_mic_title">EON · Mic on</string>

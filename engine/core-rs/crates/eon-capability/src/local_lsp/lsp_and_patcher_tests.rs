@@ -35,6 +35,7 @@ impl Fixture {
             deadline,
             rust_task_group: None,
             pyright_group: None,
+            vtsls_image: None,
         };
         LocalLsp::spawn(
             &config,
@@ -87,6 +88,17 @@ fn operator_configuration_is_explicit_and_never_uses_a_shell_or_script() {
     let script = f.0.join("rust-analyzer");
     fs::write(&script, "#!/bin/sh\n").unwrap();
     assert!(OperatorServer::new(ServerKind::RustAnalyzer, &script, &[], timeout).is_err());
+    for (kind, name) in [(ServerKind::Kotlin, "kotlin-language-server"), (ServerKind::Vtsls, "vtsls")] {
+        let launcher = f.0.join(name);
+        fs::write(&launcher, "#!/bin/sh\n").unwrap();
+        assert!(OperatorServer::new(kind, &launcher, &[], timeout).is_err());
+    }
+    let image = f.0.join("vtsls");
+    fs::copy("/usr/bin/true", &image).unwrap();
+    let unpinned = OperatorServer::new(ServerKind::Vtsls, &image, &[], timeout).unwrap();
+    let err = LocalLsp::start(&unpinned, &f.0).err().unwrap();
+    assert!(err.to_string().contains("pinned image"));
+    assert!(unpinned.with_vtsls_task_group(Path::new("relative"), [0; 32]).is_err());
     let mut empty = LocalLspPool::start(&[], &f.0).unwrap();
     assert!(empty.session(ServerKind::RustAnalyzer).is_none());
     empty.shutdown().unwrap();
@@ -472,6 +484,7 @@ fn path_scope_and_document_budget_also_apply_to_previews() {
         deadline: Duration::from_secs(1),
         rust_task_group: None,
         pyright_group: None,
+        vtsls_image: None,
     };
     assert!(LocalLsp::start(&config, &f.0).is_err());
     config.executable = PathBuf::from("/operator-only/server");

@@ -13,6 +13,12 @@ pub mod interproc;
     target_pointer_width = "64"
 ))]
 pub mod owned_dap;
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_pointer_width = "64"
+))]
+pub mod owned_debugpy;
 pub mod remediation;
 pub mod sbom;
 #[cfg(feature = "solver")]

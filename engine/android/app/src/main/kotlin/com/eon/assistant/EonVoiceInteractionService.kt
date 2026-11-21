@@ -18,6 +18,7 @@ class EonVoiceInteractionService : VoiceInteractionService() {
             setDisabledShowContext(NO_ASSIST_CONTEXT)
             if (disabledShowContext and NO_ASSIST_CONTEXT == NO_ASSIST_CONTEXT) {
                 owner = VoiceHudRegistry.Binding().also(voiceHud::ready)
+                ControlsAssist.ready(this)
             }
         } catch (_: SecurityException) {
             // The system can switch assistants while the service is starting.
@@ -25,6 +26,7 @@ class EonVoiceInteractionService : VoiceInteractionService() {
     }
 
     private fun release() {
+        ControlsAssist.release(this)
         owner?.let(voiceHud::shutdown)
         owner = null
         InspectionAccess.cancel()

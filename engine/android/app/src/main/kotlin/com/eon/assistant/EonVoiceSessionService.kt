@@ -1,11 +1,8 @@
 package com.eon.assistant
 
 import android.app.ActivityManager
-import android.app.KeyguardManager
-import android.app.role.RoleManager
 import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -14,12 +11,11 @@ import android.os.Bundle
 import android.os.CancellationSignal
 import android.os.Handler
 import android.os.Looper
-import android.os.PowerManager
-import android.service.voice.VoiceInteractionService
 import android.service.voice.VoiceInteractionSession
 import android.service.voice.VoiceInteractionSessionService
 import android.view.View
 import android.view.WindowManager
+import android.widget.TextView
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.FutureTask
@@ -42,6 +38,22 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
     private var toneStop: CancellationSignal? = null
     private var taskStop: CancellationSignal? = null
     private var microphone: SessionMic? = null
+    private var contextTicket: ControlsConsent.Ticket? = null
+    private var contextDisplay: ControlsConsent.Ticket? = null
+    private var contextNotice: String? = null
+    private val contextGuard = object : Runnable {
+        override fun run() {
+            if (contextNotice == null || !requireVisible()) return
+            if (!contextSharingEnabled() || contextDisplay?.let { !ControlsAssist.mayDisplay(it) } == true)
+                return unavailableContext()
+            val ticket = contextTicket
+            if (ticket != null && android.os.SystemClock.elapsedRealtime() >= ticket.until) {
+                unavailableContext()
+                return
+            }
+            main.postDelayed(this, 300)
+        }
+    }
     private var micLevels = emptyList<Int>()
     private val micGuard = object : Runnable {
         override fun run() {
@@ -59,25 +71,34 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
 
     private fun eligible(): Boolean {
         return try {
-            val role = context.getSystemService(RoleManager::class.java)
-            context.getSystemService(PowerManager::class.java)?.isInteractive == true &&
-                context.getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == false &&
-                role?.isRoleAvailable(RoleManager.ROLE_ASSISTANT) == true &&
-                role.isRoleHeld(RoleManager.ROLE_ASSISTANT) &&
-                VoiceInteractionService.isActiveService(context, ComponentName(context, EonVoiceInteractionService::class.java)) &&
+            selectedAndUnlocked(context) &&
                 disabledShowContext and NO_ASSIST_CONTEXT == NO_ASSIST_CONTEXT
         } catch (_: SecurityException) {
             false
         }
+
+    }
+
+    private fun contextSharingEnabled() = try {
+        userDisabledShowContext and SHOW_WITH_ASSIST == 0
+    } catch (_: SecurityException) {
+        false
     }
 
     override fun onPrepareShow(args: Bundle?, showFlags: Int) {
         clearShowing()
-        setUiEnabled(surface.show(userInvokedVoiceHud(showFlags), eligible()))
+        val ticket = ControlsAssist.beginShow(args, showFlags)
+        val allowed = surface.show(ticket != null || userInvokedVoiceHud(showFlags), eligible())
+        if (allowed && ticket != null) {
+            contextTicket = ticket
+            contextNotice = context.getString(R.string.voice_context_waiting)
+        } else ControlsAssist.cancel(ticket)
+        setUiEnabled(allowed)
     }
 
     override fun onShow(args: Bundle?, showFlags: Int) {
         if (!requireVisible()) return
+        FloatingHudService.stopFrom(context)
         InspectionAccess.cancel()
         try {
             // SCREEN_OFF is a protected system broadcast. Observe only while this card is shown.
@@ -87,12 +108,39 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
             closeHud()
             return
         }
-        if (requireVisible()) render()
+        if (requireVisible()) {
+            render()
+            if (contextTicket != null) main.post(contextGuard)
+        }
     }
 
-    // Framework callbacks can race a policy or role change. Do not unpack any payload.
-    override fun onHandleAssist(state: AssistState) = Unit
+    override fun onHandleAssist(state: AssistState) {
+        val ticket = contextTicket ?: return
+        if (!requireVisible()) return
+        if (!contextSharingEnabled()) return unavailableContext()
+        val count = ControlsAssist.protectedWindows(context, ticket, state)
+        if (count == null) return unavailableContext()
+        contextTicket = null
+        contextDisplay = ticket
+        contextNotice = context.getString(R.string.voice_context_protected, count)
+        render()
+    }
     override fun onHandleScreenshot(screenshot: Bitmap?) = Unit
+
+    private fun discardContext() {
+        ControlsAssist.cancel(contextTicket)
+        ControlsAssist.cancel(contextDisplay)
+        contextTicket = null
+        contextDisplay = null
+        contextNotice = null
+        main.removeCallbacks(contextGuard)
+    }
+
+    private fun unavailableContext() {
+        discardContext()
+        contextNotice = context.getString(R.string.voice_context_unavailable)
+        render()
+    }
 
     override fun onCreateContentView(): View {
         window?.window?.apply {
@@ -106,7 +154,7 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
             hud = it
             it.setMicClick(::toggleMic)
             it.onMicWindowLost = { clearMic() }
-            it.render(surface.frame)
+            render()
         }
     }
 
@@ -118,7 +166,13 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
         if (surface.frame != null) hud?.fillTouchableRegion(outInsets.touchableRegion)
     }
 
-    private fun render() = hud?.render(surface.frame)
+    private fun render() {
+        hud?.render(surface.frame)
+        hud?.findViewById<TextView>(R.id.hud_context)?.apply {
+            text = contextNotice
+            visibility = if (contextNotice == null) View.GONE else View.VISIBLE
+        }
+    }
 
     private fun requireVisible(): Boolean {
         if (surface.canUse(eligible())) return true
@@ -296,6 +350,7 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
     }
 
     private fun clearShowing() {
+        discardContext()
         clearMic()
         surface.hide()
         cancelTaskSample()

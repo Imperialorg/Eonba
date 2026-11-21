@@ -4,6 +4,8 @@
 //! root on disk, real workspace URI, host environment, config discovery, shell, or command RPC is provided.
 //! Pyright can enumerate a private directory of empty module-name markers;
 //! it receives file contents exclusively through the stdio overlay.
+//! The pinned vtsls image runs its TypeScript server in-process. Its inferred
+//! project contains only open snapshots and the embedded TypeScript library.
 //! Servers requiring a disk-backed project or unsupported capabilities may decline queries.
 //! The native policy is for trusted workers, not arbitrary binaries. Deadlines bound
 //! protocol I/O, not kernel/filesystem latency or the worker's CPU and memory use.
@@ -116,6 +118,7 @@ pub struct OperatorServer {
     deadline: Duration,
     rust_task_group: Option<PathBuf>,
     pyright_group: Option<pyright::Provision>,
+    vtsls_image: Option<(PathBuf, [u8; 32])>,
 }
 
 impl OperatorServer {
@@ -162,6 +165,7 @@ impl OperatorServer {
             deadline,
             rust_task_group: None,
             pyright_group: None,
+            vtsls_image: None,
         })
     }
 
@@ -189,6 +193,18 @@ impl OperatorServer {
             return Err(invalid("expected absolute Pyright task group and state directory"));
         }
         self.pyright_group = Some(pyright::Provision { group: group.to_owned(), state: state_dir.to_owned(), image_sha256 });
+        Ok(self)
+    }
+
+    /// The fixed vtsls SEA embeds its TypeScript server and standard library.
+    /// No Node CLI, tsserver subprocess, project SDK, plugins or disk project.
+    /// Supply an independently approved digest and capped cgroup as for Pyright.
+    pub fn with_vtsls_task_group(mut self, group: &Path, image_sha256: [u8; 32]) -> io::Result<Self> {
+        crate::sandbox::check_rust_analyzer_abi()?;
+        if self.kind != ServerKind::Vtsls || !group.is_absolute() {
+            return Err(invalid("expected absolute vtsls task group"));
+        }
+        self.vtsls_image = Some((group.to_owned(), image_sha256));
         Ok(self)
     }
 }
@@ -401,6 +417,9 @@ impl LocalLsp {
         if config.kind == ServerKind::Pyright && config.pyright_group.is_none() {
             return Err(invalid("Pyright requires its pinned image and bounded task group"));
         }
+        if config.kind == ServerKind::Vtsls && config.vtsls_image.is_none() {
+            return Err(invalid("vtsls requires its pinned image and bounded task group"));
+        }
         Self::spawn(config, workspace_root, config.kind.args())
     }
 
@@ -448,6 +467,8 @@ impl LocalLsp {
         } else if let Some(p) = &config.pyright_group {
             read_only.push(PathBuf::from(&virtual_root));
             WorkerIo::Pyright { group: &p.group, names: Path::new(&virtual_root), stubs: &stubs, digest: &p.image_sha256 }
+        } else if let Some((group, digest)) = &config.vtsls_image {
+            WorkerIo::Vtsls { group, digest }
         } else {
             WorkerIo::StdioProtocol
         };
@@ -496,6 +517,11 @@ impl LocalLsp {
         if config.pyright_group.is_some() {
             params["workspaceFolders"] = json!([{"name":"snapshots","uri":virtual_uri(&client.virtual_root, "")}]);
         }
+        if config.vtsls_image.is_some() {
+            // Only negotiated, on-demand reports can satisfy an edited snapshot.
+            params["capabilities"]["textDocument"].as_object_mut().expect("client capabilities")
+                .remove("publishDiagnostics");
+        }
         if client.kind == ServerKind::RustAnalyzer {
             params["rootUri"] = json!(format!("file://{}", client.virtual_root));
             params["capabilities"]["experimental"] = json!({"serverStatusNotification":true});
@@ -511,6 +537,9 @@ impl LocalLsp {
             io::Error::new(error.kind(), format!("confined LSP did not initialize: {error}"))
         })?;
         client.capabilities = Capabilities::parse(&init["capabilities"])?;
+        if config.vtsls_image.is_some() {
+            require(matches!(client.capabilities.diagnostics, Diagnostics::Pull { .. }), "expected vtsls pull diagnostics")?;
+        }
         // The pinned SEA installs this request handler unconditionally. Select
         // it in the fixed operator profile: early version-matched pushes can
         // still be pre-analysis empties. Never accept dynamic registration.

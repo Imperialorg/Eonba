@@ -62,6 +62,14 @@
                     android:src="@android:drawable/ic_menu_close_clear_cancel"
                     android:tint="#263F43" />
             </LinearLayout>
+            <TextView
+                android:id="@+id/hud_context"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:accessibilityLiveRegion="polite"
+                android:saveEnabled="false"
+                android:textColor="#13292D"
+                android:visibility="gone" />
             <LinearLayout
                 android:id="@+id/hud_details"
                 android:layout_width="match_parent"

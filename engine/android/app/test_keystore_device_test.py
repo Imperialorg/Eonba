@@ -18,6 +18,8 @@ class InstrumentationResults(unittest.TestCase):
                             ("demo", "PASS-denied"), ("demo", "PASS-allowed"), ("nativeVault", "PASS"),
                             ("voiceHud", "PASS-stock"), ("voiceHud", "PASS-session"),
                             ("workflowNotice", "PASS-session"),
+                            ("controlsAssist", "PASS-session"),
+                            ("controlsAssist", "PASS-policy-denied"),
                             ("assistantActivity", "PASS-picker-canceled")):
             with self.subTest(key=key, result=result):
                 check_result(f"INSTRUMENTATION_RESULT: {key}={result}\r\nINSTRUMENTATION_CODE: -1\r\n", key, result)
@@ -95,6 +97,14 @@ class DeviceModes(unittest.TestCase):
         manual = parse_args(["--preconfigured-hud-serial", "emulator-5554"])
         self.assertFalse(manual.stock_hud)
         self.assertIsNone(manual.serial)
+
+    def test_selected_context_is_opt_in_and_never_uses_a_stock_target(self):
+        manual = parse_args(["--preconfigured-context-serial", "emulator-5556"])
+        self.assertEqual(manual.preconfigured_context_serial, "emulator-5556")
+        self.assertIsNone(manual.serial)
+        self.assertIsNone(parse_args(["--serial", "emulator-5556"]).preconfigured_context_serial)
+        self.assertFalse(manual.context_denied)
+        self.assertTrue(parse_args(["--preconfigured-context-serial", "emulator-5556", "--context-denied"]).context_denied)
 
     def test_workflow_observes_only_its_own_result_and_preserves_operator_target(self):
         manual = parse_args(["--preconfigured-workflow-serial", "emulator-5556"])
@@ -229,6 +239,9 @@ class DeviceModes(unittest.TestCase):
                      ["--preconfigured-mic-serial", "emulator-5554", "--mic-phase", "all"],
                      ["--preconfigured-hud-serial", "emulator-5554", "--mic-phase", "complete"],
                      ["--preconfigured-workflow-serial", "emulator-5556", "--mic-phase", "complete"],
+                     ["--preconfigured-context-serial", "emulator-5556", "--serial", "emulator-5554"],
+                     ["--preconfigured-context-serial", "emulator-5556", "--stock-assistant"],
+                     ["--build-only", "--context-denied"], ["--serial", "emulator-5556", "--context-denied"],
                      ["--preconfigured-workflow-serial", "emulator-5556", "--demo-denied"],
                      ["--preconfigured-workflow-serial", "emulator-5556", "--serial", "emulator-5554"],
                      ["--preconfigured-workflow-serial", "emulator-5556", "--preconfigured-hud-serial", "emulator-5556"]):

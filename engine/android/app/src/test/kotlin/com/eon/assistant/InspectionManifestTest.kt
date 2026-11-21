@@ -21,15 +21,24 @@ class InspectionManifestTest {
     private fun Element.attr(name: String) = getAttributeNS(android, name)
 
     @Test
-    fun onlyOptionalMicrophoneAndOverlayProtectionWithSystemGuardedServices() {
+    fun optionalMicrophoneAndUserStartedSpecialUseOverlayWithSystemGuardedServices() {
         val manifest = root("AndroidManifest.xml")
         assertFalse(manifest.elements("application").single().hasAttributeNS(android, "debuggable"))
-        assertEquals(listOf("android.permission.HIDE_OVERLAY_WINDOWS", "android.permission.RECORD_AUDIO"),
-            manifest.elements("uses-permission").map { it.attr("name") })
+        assertEquals(setOf("HIDE_OVERLAY_WINDOWS", "RECORD_AUDIO", "SYSTEM_ALERT_WINDOW", "POST_NOTIFICATIONS",
+            "FOREGROUND_SERVICE", "FOREGROUND_SERVICE_SPECIAL_USE", "FOREGROUND_SERVICE_MICROPHONE").map { "android.permission.$it" }.toSet(),
+            manifest.elements("uses-permission").map { it.attr("name") }.toSet())
         val microphone = manifest.elements("uses-feature").single { it.attr("name") == "android.hardware.microphone" }
         assertEquals("false", microphone.attr("required"))
         val services = manifest.elements("service").associateBy { it.attr("name") }
-        assertEquals(setOf(".FocusedControlService", ".EonVoiceInteractionService", ".EonVoiceSessionService"), services.keys)
+        assertEquals(setOf(".FocusedControlService", ".EonVoiceInteractionService", ".EonVoiceSessionService",
+            ".FloatingHudService"), services.keys)
+        val floating = services.getValue(".FloatingHudService")
+        assertEquals("false", floating.attr("exported"))
+        assertEquals(setOf("specialUse", "microphone"), floating.attr("foregroundServiceType").split('|').toSet())
+        assertEquals("true", floating.attr("stopWithTask"))
+        assertEquals("@bool/voice_hud_supported", floating.attr("enabled"))
+        assertTrue(floating.elements("intent-filter").isEmpty())
+        assertEquals("false", manifest.elements("activity").single { it.attr("name") == ".FloatingHudActivity" }.attr("exported"))
         val service = services.getValue(".FocusedControlService")
         assertEquals("android.permission.BIND_ACCESSIBILITY_SERVICE", service.attr("permission"))
         assertEquals("@bool/focused_control_supported", service.attr("enabled"))

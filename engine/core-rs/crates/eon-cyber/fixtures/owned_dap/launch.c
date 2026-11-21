@@ -107,7 +107,13 @@ int main(int argc, char **argv) {
     if (worker < 0)
         return 1;
     if (!worker) {
+#ifdef OWNED_CODELLDB
+        /* Only the digest-checked executable in the private fixture directory. */
+        execl("./codelldb", "codelldb", "--liblldb",
+              "/usr/lib/llvm-18/lib/liblldb.so.1", (char *)0);
+#else
         execl("/usr/lib/llvm-18/bin/lldb-dap", "lldb-dap", (char *)0);
+#endif
         _exit(1);
     }
     close(STDIN_FILENO);

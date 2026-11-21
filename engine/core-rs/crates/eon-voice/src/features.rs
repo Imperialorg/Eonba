@@ -45,16 +45,33 @@ pub fn wespeaker_fbank(normalized: &[f32]) -> EonResult<Vec<Vec<f32>>> {
     let mut opts = base_options();
     opts.frame_opts.snip_edges = true;
     opts.frame_opts.window_type = "hamming".into();
+    // The pinned extractor's built-in log floors power at 1e-20, not the
+    // float epsilon used by WeSpeaker's Fbank::Compute on each mel band.
+    opts.use_log_fbank = false;
     let mut features = extractor(opts)?;
     let pcm: Vec<_> = normalized.iter().map(|s| s * 32768.0).collect();
     features.accept_waveform(SAMPLE_RATE_HZ, &pcm);
     features.input_finished();
+    for power in features.features.iter_mut().flatten() {
+        *power = power.clamp(f32::EPSILON, f32::INFINITY).ln();
+    }
     Ok(features.features)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wespeaker_silence_and_subfloor_energy_match_the_reference_log_floor() {
+        let mut pcm = [0.0; 400];
+        for impulse in [0.0, 1e-10] {
+            pcm[17] = impulse;
+            let frames = wespeaker_fbank(&pcm).unwrap();
+            assert_eq!(frames.len(), 1);
+            assert!(frames[0].iter().all(|&bin| bin == f32::EPSILON.ln()));
+        }
+    }
 
     #[test]
     fn wespeaker_matches_pcm16_hamming_reference_without_changing_asr_edges() {

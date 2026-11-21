@@ -109,3 +109,35 @@ fn self_io_reports_only_numeric_evidence_or_a_gap() {
         assert!(report["status"] == "unverified" || report["status"] == "observed");
     }
 }
+
+#[test]
+fn self_cpu_is_opt_in_for_reviews_only_and_preserves_findings() {
+    let source = b"def f():\n    return 'private_marker'\n";
+    let plain = audit("python", source);
+    let measured = invoke(&["python", "--self-cpu-ebpf"], source);
+    assert!(plain.status.success() && measured.status.success());
+    let plain: Value = serde_json::from_slice(&plain.stdout).unwrap();
+    assert!(plain.get("self_thread_user_cpu_ebpf").is_none());
+    assert!(!String::from_utf8_lossy(&measured.stdout).contains("private_marker"));
+    let mut report: Value = serde_json::from_slice(&measured.stdout).unwrap();
+    let cpu = report
+        .as_object_mut()
+        .unwrap()
+        .remove("self_thread_user_cpu_ebpf")
+        .unwrap();
+    assert_eq!(plain, report);
+    match cpu["status"].as_str() {
+        Some("observed") => assert!(cpu["samples"].as_u64().unwrap() > 0),
+        Some("unverified") => assert!(cpu.get("samples").is_none()),
+        status => panic!("unexpected status: {status:?}"),
+    }
+    for args in [
+        &["self-io", "--self-cpu-ebpf"][..],
+        &["python", "--self-cpu-ebpf", "target"][..],
+        &["python", "--self-cpu-ebpf", "--etw"][..],
+    ] {
+        let refused = invoke(args, b"");
+        assert_eq!(refused.status.code(), Some(2));
+        assert!(refused.stdout.is_empty());
+    }
+}

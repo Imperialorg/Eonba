@@ -1,7 +1,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.eon.assistant.keystoretest">
     <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="35" />
-    <application android:allowBackup="false" android:testOnly="true" />
+    <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
+    <application android:allowBackup="false" android:testOnly="true">
+        <activity android:name="com.eon.assistant.FloatingHudTouchFixture" android:exported="true" />
+    </application>
+    <instrumentation android:name="com.eon.assistant.FloatingHudAcceptance"
+        android:targetPackage="com.eon.assistant" />
+    <instrumentation android:name="com.eon.assistant.ControlsAssistAcceptance"
+        android:targetPackage="com.eon.assistant.keystoretest" />
     <instrumentation android:name="com.eon.assistant.WorkflowNoticeAcceptance"
         android:targetPackage="com.eon.assistant.keystoretest" />
     <instrumentation android:name="com.eon.assistant.SessionMicAcceptance"

@@ -1,4 +1,4 @@
-//! Additional libuv operations for the fixed Pyright SEA only. The inherited
+//! Additional libuv operations for the fixed Node LSP images. The inherited
 //! pthread/cgroup/rlimit and read-only openat rules remain in effect.
 use std::collections::BTreeMap;
 use std::io;
@@ -11,22 +11,25 @@ use super::{EonResult, sandbox_err};
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod vtsls_tests;
 
 pub(super) fn verify(
     fd: &landlock::PathFd,
     meta: &std::fs::Metadata,
+    name: &str,
     expected: &[u8; 32],
 ) -> io::Result<()> {
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::MetadataExt;
     if !meta.is_file() || meta.mode() & 0o6222 != 0 || meta.len() > 256 * 1024 * 1024 {
-        return Err(io::Error::other("expected immutable Pyright SEA"));
+        return Err(io::Error::other(format!("expected immutable {name} SEA")));
     }
     let mut image = std::fs::File::open(format!("/proc/self/fd/{}", fd.as_fd().as_raw_fd()))?;
     let mut hash = Sha256::new();
     io::copy(&mut image, &mut hash)?;
     if hash.finalize().as_slice() != expected {
-        return Err(io::Error::other("unapproved Pyright SEA digest"));
+        return Err(io::Error::other(format!("unapproved {name} SEA digest")));
     }
     Ok(())
 }

@@ -1,20 +1,26 @@
-//! Opt-in, Linux x86-64 LLVM 18 stdio probe for one compiled-in counting fixture.
+//! Opt-in Linux x86-64 stdio probes for one compiled-in C counting fixture.
 //! This is not a debugger service. There is no target, PID, path, source text,
 //! command, expression, socket address, or raw DAP argument in the public API.
-//! The trusted system compiler and adapter must be installed locally. The
+//! Both adapters use the local LLVM 18 compiler and debug server. For CodeLLDB,
+//! provision `extension/adapter/codelldb` from the [upstream v1.12.3 Linux x64
+//! VSIX](https://github.com/vadimcn/codelldb/releases/tag/v1.12.3) as
+//! `engine/core-rs/target/owned-dap-codelldb-1.12.3`. Only that binary
+//! is copied, digest-checked with system `sha256sum`, and used with system liblldb.
+//! No extension scripts, downloads, VS Code installation or listener are needed. The
 //! workspace (including `target/`) must not be writable by other principals.
 //! Child tracing, seccomp and `/proc/thread-self/children` are required. The
 //! protocol is bounded to 15 seconds, 48 incoming messages and 64 KiB/message.
 //! Host filesystem latency and the kernel reaping a killed task are not timed.
 //! Same-user hostile code and compromised system tools are outside this model.
 
+mod counters;
 mod wire;
 
 use serde_json::{Value, json};
 use std::fs::{self, DirBuilder, File};
 use std::io::Read;
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -28,11 +34,22 @@ const LAUNCH: &str = include_str!("../fixtures/owned_dap/launch.c");
 const CLANG: &str = "/usr/lib/llvm-18/bin/clang";
 const ADAPTER: &str = "/usr/lib/llvm-18/bin/lldb-dap";
 const SERVER: &str = "/usr/lib/llvm-18/bin/lldb-server";
+const CODELLDB_FILE: &str = "owned-dap-codelldb-1.12.3";
+const CODELLDB_BYTES: u64 = 6_129_488;
+const CODELLDB_CHECK: &str =
+    "8d714773b3416190bad90c6f5fae46e0d3c106bc3b7778a9547a8eb96cff219e  codelldb\n";
 static RUN: Mutex<()> = Mutex::new(());
 
 unsafe extern "C" {
     fn geteuid() -> u32;
     fn kill(pid: i32, sig: i32) -> i32;
+}
+
+/// Fixed stdio implementations, not adapter executable or configuration inputs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Adapter {
+    LldbDap,
+    CodeLldb,
 }
 
 /// Two distinct callers of the same instruction. Neither accepts expression text.
@@ -69,6 +86,20 @@ pub struct SourceFrame {
     pub function: &'static str,
     /// One-based physical line in the in-tree `count.c`.
     pub line: u32,
+}
+
+/// Successful 8-byte allocations and completed frees made by the fixture
+/// itself at the selected visit, not allocator statistics or heap contents.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AllocationCounters {
+    pub allocations: u8,
+    pub frees: u8,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct CountingObservation {
+    pub frames: [SourceFrame; 3],
+    pub counters: AllocationCounters,
 }
 
 /// No adapter error strings, process identifiers, debuggee output or host paths.
@@ -138,8 +169,8 @@ impl Workspace {
         cmd
     }
 
-    fn start(&self, end: Instant) -> Result<(ChildGuard, Wire)> {
-        self.build(end)?;
+    fn start(&self, kind: Adapter, end: Instant) -> Result<(ChildGuard, Wire)> {
+        self.build(kind, end)?;
         // Both stdio descriptors use an anonymous pair, not a filesystem
         // socket, port, listener or externally connectable endpoint.
         let (client, adapter) = UnixStream::pair().map_err(|_| Error::Transport)?;
@@ -159,17 +190,57 @@ impl Workspace {
         ))
     }
 
-    fn build(&self, end: Instant) -> Result<()> {
-        for path in [CLANG, ADAPTER, SERVER, "/usr/bin/ld"] {
+    fn provision_codelldb(&self, end: Instant) -> Result<()> {
+        let tool = self.0.with_file_name(CODELLDB_FILE);
+        let meta = tool.symlink_metadata().map_err(|_| Error::Unavailable)?;
+        // SAFETY: geteuid has no arguments or preconditions.
+        let uid = unsafe { geteuid() };
+        if !meta.is_file()
+            || meta.len() != CODELLDB_BYTES
+            || meta.mode() & 0o022 != 0
+            || (meta.uid() != 0 && meta.uid() != uid)
+        {
+            return Err(Error::Unavailable);
+        }
+        let copy = self.0.join("codelldb");
+        fs::copy(tool, &copy).map_err(|_| Error::Unavailable)?;
+        fs::set_permissions(copy, fs::Permissions::from_mode(0o700))
+            .map_err(|_| Error::Unavailable)?;
+        fs::write(self.0.join("codelldb.sha256"), CODELLDB_CHECK)
+            .map_err(|_| Error::Unavailable)?;
+        let verifier = self
+            .command(Path::new("/usr/bin/sha256sum"))
+            .args(["--check", "--status", "codelldb.sha256"])
+            .spawn()
+            .map_err(|_| Error::Unavailable)?;
+        ChildGuard {
+            child: Some(verifier),
+            supervisor: false,
+        }
+        .finish(end, Error::Unavailable)
+    }
+
+    fn build(&self, kind: Adapter, end: Instant) -> Result<()> {
+        let adapter_tool = match kind {
+            Adapter::LldbDap => ADAPTER,
+            Adapter::CodeLldb => "/usr/lib/llvm-18/lib/liblldb.so.1",
+        };
+        for path in [CLANG, adapter_tool, SERVER, "/usr/bin/ld"] {
             if !Path::new(path).is_file() {
                 return Err(Error::Unavailable);
             }
         }
+        if kind == Adapter::CodeLldb {
+            self.provision_codelldb(end)?;
+        }
         for (src, body, bin) in [("count.c", COUNT, "count"), ("launch.c", LAUNCH, "launch")] {
             let src = self.0.join(src);
             fs::write(&src, body).map_err(|_| Error::Build)?;
-            let child = self
-                .command(Path::new(CLANG))
+            let mut clang = self.command(Path::new(CLANG));
+            if bin == "launch" && kind == Adapter::CodeLldb {
+                clang.arg("-DOWNED_CODELLDB");
+            }
+            let child = clang
                 .args([
                     "--no-default-config",
                     "--ld-path=/usr/bin/ld",
@@ -266,14 +337,20 @@ fn source_stack(frames: &Value, src: &str, visit: Visit) -> Result<[SourceFrame;
     result.try_into().map_err(|_| Error::UnexpectedFixture)
 }
 
-fn paused_stack(wire: &mut Wire, work: &Path, visit: Visit) -> Result<(u64, [SourceFrame; 3])> {
+fn paused_stack(
+    wire: &mut Wire,
+    work: &Path,
+    kind: Adapter,
+    visit: Visit,
+) -> Result<(u64, CountingObservation)> {
     let src = work.join("count.c");
     let src = src.to_str().ok_or(Error::Unavailable)?;
     let caps = wire.call(
         "initialize",
         json!({
             "adapterID":"lldb", "pathFormat":"path", "linesStartAt1":true, "columnsStartAt1":true,
-            "supportsRunInTerminalRequest":false, "supportsStartDebuggingRequest":false
+            "supportsRunInTerminalRequest":false, "supportsStartDebuggingRequest":false,
+            "supportsVariableType":true, "supportsVariablePaging":true
         }),
     )?;
     if caps["supportsConditionalBreakpoints"] != true
@@ -281,12 +358,15 @@ fn paused_stack(wire: &mut Wire, work: &Path, visit: Visit) -> Result<(u64, [Sou
     {
         return Err(Error::Unavailable);
     }
-    wire.call(
-        "launch",
-        json!({
+    let launch = match kind {
+        Adapter::LldbDap => json!({
             "program":work.join("count"), "cwd":work, "disableASLR":false, "stopOnEntry":false
         }),
-    )?;
+        Adapter::CodeLldb => json!({
+            "program":work.join("count"), "cwd":work, "terminal":"console", "expressions":"native"
+        }),
+    };
+    wire.begin_launch(launch)?;
     wire.wait_for(|e| e.initialized)?;
     let stop_line = line(visit.locations()[0].1)?;
     let set = wire.call(
@@ -305,7 +385,7 @@ fn paused_stack(wire: &mut Wire, work: &Path, visit: Visit) -> Result<(u64, [Sou
     }
     wire.call("configurationDone", json!({}))?;
     let (thread, hit) = wire
-        .wait_for(|e| e.stop.is_some())?
+        .wait_for(|e| e.launched && e.stop.is_some())?
         .stop
         .ok_or(Error::Protocol)?;
     if id != hit {
@@ -315,27 +395,40 @@ fn paused_stack(wire: &mut Wire, work: &Path, visit: Visit) -> Result<(u64, [Sou
         "stackTrace",
         json!({"threadId":thread, "startFrame":0, "levels":3}),
     )?;
-    Ok((thread, source_stack(&trace["stackFrames"], src, visit)?))
+    let frames = source_stack(&trace["stackFrames"], src, visit)?;
+    let counters = counters::observe(wire, kind, visit, &trace["stackFrames"])?;
+    Ok((thread, CountingObservation { frames, counters }))
+}
+
+/// Run the counting fixture with the original system LLVM adapter.
+pub fn inspect_counting_fixture(visit: Visit) -> Result<[SourceFrame; 3]> {
+    inspect_counting_fixture_with(Adapter::LldbDap, visit)
 }
 
 /// Run the complete protocol on an owned child. Success requires a verified
-/// conditional breakpoint, the matching three live source frames and exit 0.
-/// Only one probe at a time; no automatic installation or less confined retry.
-pub fn inspect_counting_fixture(visit: Visit) -> Result<[SourceFrame; 3]> {
+/// conditional hit, three matching live frames, exit 0, termination, disconnect
+/// and supervisor cleanup. No installation or less confined retry.
+pub fn inspect_counting_fixture_with(kind: Adapter, visit: Visit) -> Result<[SourceFrame; 3]> {
+    observe_counting_fixture(kind, visit).map(|observation| observation.frames)
+}
+
+/// Returns only known source frames and the fixture's two checked integer
+/// counters. Success also requires normal exit after the final block is freed.
+pub fn observe_counting_fixture(kind: Adapter, visit: Visit) -> Result<CountingObservation> {
     let _run = RUN.try_lock().map_err(|_| Error::Busy)?;
     let end = Instant::now() + Duration::from_secs(15);
     let work = Workspace::create()?;
-    let (guard, mut wire) = work.start(end)?;
-    let (thread, frames) = paused_stack(&mut wire, &work.0, visit)?;
-    wire.call("continue", json!({"threadId":thread}))?;
-    wire.wait_for(|e| e.exited)?;
+    let (guard, mut wire) = work.start(kind, end)?;
+    let (thread, observation) = paused_stack(&mut wire, &work.0, kind, visit)?;
+    wire.resume(thread)?;
+    wire.wait_for(|e| e.terminated)?;
     wire.call("disconnect", json!({"terminateDebuggee":true}))?;
     // Disconnect was acknowledged and the fixture already exited normally.
     // Stop the persistent adapter while stdio is still open, then require
     // the supervisor to confirm there are no descendants left.
     guard.stop();
     guard.finish(end, Error::Transport)?;
-    Ok(frames)
+    Ok(observation)
 }
 
 #[cfg(test)]
@@ -343,12 +436,38 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires a trusted local target directory and system sha256sum"]
+    fn wrong_adapter_digest_fails_closed_even_at_the_expected_size() {
+        let reserved = Workspace::create().unwrap();
+        let work = Workspace(reserved.0.join("fixture"));
+        fs::create_dir(&work.0).unwrap();
+        let fake = File::create(reserved.0.join(CODELLDB_FILE)).unwrap();
+        fake.set_permissions(fs::Permissions::from_mode(0o600))
+            .unwrap();
+        fake.set_len(CODELLDB_BYTES).unwrap();
+        assert_eq!(
+            work.provision_codelldb(Instant::now() + Duration::from_secs(15)),
+            Err(Error::Unavailable)
+        );
+    }
+
+    #[test]
     #[ignore = "requires provisioned LLVM 18 clang, lldb-dap, lldb-server and local child tracing"]
     fn cancellation_reaps_a_real_paused_fixture() {
+        check_reaped(Adapter::LldbDap);
+    }
+
+    #[test]
+    #[ignore = "requires provisioned CodeLLDB v1.12.3, LLVM 18 and local child tracing"]
+    fn cancellation_reaps_a_real_paused_codelldb_fixture() {
+        check_reaped(Adapter::CodeLldb);
+    }
+
+    fn check_reaped(kind: Adapter) {
         let end = Instant::now() + Duration::from_secs(15);
         let work = Workspace::create().unwrap();
-        let (guard, mut wire) = work.start(end).unwrap();
-        let (thread, _) = paused_stack(&mut wire, &work.0, Visit::Third).unwrap();
+        let (guard, mut wire) = work.start(kind, end).unwrap();
+        let (thread, _) = paused_stack(&mut wire, &work.0, kind, Visit::Third).unwrap();
         // The fixed fixture is single-threaded. Hold its procfs inode, not a
         // numeric PID to look up after shutdown (PIDs can be reused).
         let status = File::open(format!("/proc/{thread}/status")).unwrap();

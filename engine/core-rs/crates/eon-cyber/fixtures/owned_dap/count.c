@@ -1,6 +1,14 @@
-/* Deliberately different callers make a conditional hit observable from the
- * source stack alone. No arguments, I/O, allocation, or host data. */
+#include <stdlib.h>
+
+static unsigned successful_allocations, completed_frees;
+
+/* The only variables in this frame are three scalar integers. The block
+ * itself stays in main; its contents are never inspected. */
 static int count(int visit) {
+    unsigned allocations = successful_allocations;
+    unsigned frees = completed_frees;
+    if (allocations != (unsigned)visit || frees + 1 != allocations)
+        return 0;
     return visit + 1;
 }
 
@@ -16,9 +24,28 @@ static int third(void) {
     return count(3);
 }
 
+static void *acquire(void) {
+    void *block = malloc(8);
+    if (!block)
+        exit(1);
+    ++successful_allocations;
+    return block;
+}
+
+static void release(void *block) {
+    free(block);
+    ++completed_frees;
+}
+
 int main(void) {
+    void *block = acquire();
     int a = first();
+    release(block);
+    block = acquire();
     int b = second();
+    release(block);
+    block = acquire();
     int c = third();
-    return a + b + c == 9 ? 0 : 1;
+    release(block);
+    return a + b + c == 9 && successful_allocations == 3 && completed_frees == 3 ? 0 : 1;
 }

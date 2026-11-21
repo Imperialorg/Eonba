@@ -4,16 +4,40 @@
 # default route, public DNS/relay, host firewall change or privileged test role.
 set -euo pipefail
 umask 077
-[[ $(id -u) != 0 ]] || { echo "run as the unprivileged build user" >&2; exit 2; }
+usage() {
+    cat <<'HELP'
+Usage: test_wan_nat.sh [--lose-direct-interface] [--short-path-timeout] [--require-voice-deadline]
+
+Test relay → direct UDP across two NATs → relay on the same pinned QUIC connection.
+By default the routers silently blackhole the direct route. Success verifies
+migration and delivery after fallback, not uninterrupted voice during the cut.
+
+  --lose-direct-interface    Instead remove sender A's direct interface. Its private
+                             TLS relay is already connected on a separate interface.
+                             Only A is notified; verify the original standby survives.
+  --short-path-timeout       Use test-only 250 ms path keepalive and 1 s idle timeout.
+  --require-voice-deadline   Also require every cut audio attempt to reach peer decode
+                             in <5 ms one-way. Missing or late frames fail the run.
+  -h, --help                 Print this help without building or creating namespaces.
+
+Run as an unprivileged Linux build user with passwordless sudo for the namespace
+fixture. The printed evidence directory retains logs; ephemeral keys and fixture
+namespaces are removed on exit.
+HELP
+}
 strict=0
 profile=default
+cut_mode=blackhole
 for arg in "$@"; do
     case "$arg" in
         --require-voice-deadline) strict=1 ;;
         --short-path-timeout) profile=short ;;
-        *) echo "usage: $0 [--require-voice-deadline] [--short-path-timeout]" >&2; exit 2 ;;
+        --lose-direct-interface) cut_mode=interface-loss ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "unknown option: $arg" >&2; usage >&2; exit 2 ;;
     esac
 done
+[[ $(id -u) != 0 ]] || { echo "run as the unprivileged build user" >&2; exit 2; }
 cd "$(dirname "$0")/../engine/core-rs"
 scratch="$PWD/target/wan-nat-$$-$RANDOM"
 mkdir -p target
@@ -21,17 +45,27 @@ mkdir "$scratch"
 echo "WAN evidence: $scratch"
 names=() jobs=()
 cleanup() {
-    local rc=$?
-    if (( rc != 0 && ${#jobs[@]} )); then touch "$scratch/abort"; fi
+    local rc=$? cleanup_error=0 pid ns
+    trap - EXIT
+    trap '' HUP INT TERM
+    if (( rc != 0 && ${#jobs[@]} )); then touch "$scratch/abort" || cleanup_error=1; fi
     # All roles have an external wall-clock limit, including on setup failure.
-    for pid in "${jobs[@]}"; do wait "$pid" || rc=1; done
-    for ns in "${names[@]}"; do sudo -n ip netns del "$ns" || rc=1; done
-    rm -rf -- "$scratch/keys"
+    for pid in "${jobs[@]}"; do wait "$pid" || cleanup_error=1; done
+    for ns in "${names[@]}"; do sudo -n ip netns del "$ns" || cleanup_error=1; done
+    rm -rf -- "$scratch/keys" || cleanup_error=1
+    if (( rc == 0 && cleanup_error )); then rc=1; fi
     if (( rc != 0 )); then tail -n 8 "$scratch"/*.log >&2 || :; fi
     exit "$rc"
 }
 trap cleanup EXIT
-trap 'exit 1' HUP INT TERM
+# Defer a signal across creation and registration so teardown owns the resource.
+registering=0
+interrupted=0
+on_signal() {
+    interrupted=1
+    (( registering )) || exit 1
+}
+trap on_signal HUP INT TERM
 export TMPDIR="$scratch"
 timeout 20m cargo test --locked --jobs 2 -p eon-mesh --lib --no-run --message-format=json >"$scratch/build.jsonl"
 exe=$(python3 -c 'import json,sys; print(next(m["executable"] for m in map(json.loads,sys.stdin) if m.get("executable") and m["target"]["name"] == "eon_mesh"))' <"$scratch/build.jsonl")
@@ -57,8 +91,11 @@ a="$prefix-a" b="$prefix-b" na="$prefix-na" nb="$prefix-nb" relay="$prefix-relay
 ipn() { sudo -n ip -n "$@"; }
 inside() { sudo -n ip netns exec "$@"; }
 for ns in "$a" "$b" "$na" "$nb" "$relay"; do
+    registering=1
     sudo -n ip netns add "$ns"
     names+=("$ns")
+    registering=0
+    (( !interrupted )) || exit 1
     ipn "$ns" link set lo up
 done
 ipn "$relay" link add backplane type bridge
@@ -94,6 +131,20 @@ attach() {
 }
 attach "$a" "$na" 1 2 3
 attach "$b" "$nb" 2 3 2
+if [[ $cut_mode == interface-loss ]]; then
+    # A's approved TLS origin has a separate last mile. UDP (including QAD)
+    # still uses wan0 and both NATs; there is no peer route on relay0.
+    ipn "$a" link add relay0 type veth peer name standby netns "$relay"
+    ipn "$a" addr add 172.30.84.2/30 dev relay0
+    ipn "$relay" addr add 172.30.84.1/30 dev standby
+    ipn "$a" link set relay0 up
+    ipn "$relay" link set standby up
+    inside "$a" iptables -A OUTPUT -o relay0 -d 10.77.0.1 -p tcp --dport 8443 -j ACCEPT
+    inside "$a" iptables -A OUTPUT -o relay0 -j DROP
+    inside "$a" ip6tables -A OUTPUT -o relay0 -j DROP
+    ipn "$a" route add table 84 10.77.0.1/32 via 172.30.84.1 dev relay0
+    ipn "$a" rule add pref 84 to 10.77.0.1/32 ipproto tcp dport 8443 lookup 84
+fi
 for ns in "${names[@]}"; do
     echo "$ns"
     ipn "$ns" -4 route
@@ -105,11 +156,14 @@ user=$(id -un)
 role() {
     local inode
     inode=$(stat -Lc %i "/run/netns/$1")
+    registering=1
     inside "$1" sudo -n -u "$user" env EON_WAN_ROLE="$2" EON_WAN_PARENT_NS="$parent" EON_WAN_NETNS="$inode" \
-        EON_WAN_PATH_PROFILE="$profile" timeout --kill-after=2s 80s "$exe" \
+        EON_WAN_PATH_PROFILE="$profile" EON_WAN_CUT="$cut_mode" timeout --kill-after=2s 80s "$exe" \
         --ignored --exact wan::netns::iroh_and_qos_tests_nat_path_change --nocapture \
         >"$2.log" 2>&1 &
     jobs+=("$!")
+    registering=0
+    (( !interrupted )) || exit 1
 }
 await_marker() {
     local i pid
@@ -138,15 +192,32 @@ for router in "$na" "$nb"; do
     inside "$router" iptables -t nat -nvxL
 done >nat.log
 (( direct ))
-# Impair only the translated peer-to-peer route. QAD and relay remain reachable.
+standby_cookie() {
+    inside "$a" ss -HOetn state established src 172.30.84.2 dst 10.77.0.1:8443 |
+        awk '{for (i=1; i<=NF; i++) if ($i ~ /^sk:/) print $i}'
+}
+if [[ $cut_mode == interface-loss ]]; then
+    standby_before=$(standby_cookie)
+    [[ $standby_before =~ ^sk:[[:xdigit:]]+$ ]] || { echo "expected one independent TLS relay socket" >&2; exit 1; }
+fi
 python3 -c 'from pathlib import Path; import time; Path("cut-start").write_text(str(time.monotonic_ns()))'
-ipn "$na" route add blackhole 10.77.0.3/32
-ipn "$nb" route add blackhole 10.77.0.2/32
+if [[ $cut_mode == interface-loss ]]; then
+    ipn "$a" link del wan0
+else
+    # Silent impairment at the routers. No notification on either endpoint.
+    ipn "$na" route add blackhole 10.77.0.3/32
+    ipn "$nb" route add blackhole 10.77.0.2/32
+fi
 touch cut
+if [[ $cut_mode == interface-loss ]]; then
+    await_marker counter-ready
+    [[ $(standby_cookie) == "$standby_before" ]] || { echo "original TLS standby did not survive" >&2; exit 1; }
+    echo "relay0 retained established relay socket $standby_before across wan0 removal" >>routes.log
+fi
 for pid in "${jobs[@]}"; do wait "$pid"; done
 jobs=()
 grep -hE '^(QAD|witness|stream|relay )' a.log b.log relay.log
-python3 - "$strict" "$profile" <<'PY' | tee summary.log
+python3 - "$strict" "$profile" "$cut_mode" <<'PY' | tee summary.log
 import math
 import re
 import sys
@@ -167,7 +238,7 @@ arrivals = {s: (t - sends[s][1]) // 1000 for s, t in received.items()}
 assert all(v >= 0 for v in arrivals.values())
 phases = dict.fromkeys(p for p, _ in sends.values())
 assert {"direct", "cut", "fallback"} <= phases.keys(), "missing transition samples"
-print(f"path_timing_profile={sys.argv[2]}")
+print(f"path_timing_profile={sys.argv[2]} cut_mode={sys.argv[3]}")
 for phase in phases:
     seqs = [s for s, (p, _) in sends.items() if p == phase]
     for metric, observed in [("oneway", arrivals), ("echo", echoes)]:

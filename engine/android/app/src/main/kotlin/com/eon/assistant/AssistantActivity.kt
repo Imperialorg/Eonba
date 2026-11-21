@@ -33,6 +33,9 @@ class AssistantActivity : Activity() {
     private var selectionCanceled = false
     private var micPermissionPending = false
     private var micPermissionStatus: TextView? = null
+    private val contextSource = Any()
+    private var contextReview: Button? = null
+    private var reviewingContext = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -76,6 +79,15 @@ class AssistantActivity : Activity() {
             }
         })
         column.addView(result)
+        if (Build.VERSION.SDK_INT >= 31) {
+            column.addView(Button(this).apply {
+                setText(R.string.floating_controls)
+                filterTouchesWhenObscured = true
+                setOnClickListener {
+                    if (resumed && hasWindowFocus()) startActivity(Intent(this@AssistantActivity, FloatingHudActivity::class.java))
+                }
+            })
+        }
         roleStatus = TextView(this).apply { id = R.id.assistant_role_status; isSaveEnabled = false }
         requestRole = Button(this).apply {
             id = R.id.assistant_role_request
@@ -100,6 +112,25 @@ class AssistantActivity : Activity() {
         column.addView(roleStatus)
         column.addView(requestRole)
         if (Build.VERSION.SDK_INT >= 31) {
+            contextReview = Button(this).apply {
+                id = R.id.assistant_context_review
+                filterTouchesWhenObscured = true
+                isSaveEnabled = false
+                setText(R.string.voice_context_review)
+                setOnClickListener {
+                    if (!resumed || !hasWindowFocus() || !selectedAndUnlocked(this@AssistantActivity)) {
+                        resetContextReview()
+                    } else if (!reviewingContext) {
+                        reviewingContext = true
+                        setText(R.string.voice_context_confirm)
+                    } else {
+                        resetContextReview()
+                        if (!ControlsAssist.request(this@AssistantActivity, contextSource)) {
+                            roleStatus.setText(R.string.voice_context_unavailable)
+                        }
+                    }
+                }
+            }.also(column::addView)
             column.addView(TextView(this).apply { setText(R.string.voice_hud_help) })
             micPermissionStatus = TextView(this).also(column::addView)
             column.addView(Button(this).apply {
@@ -162,6 +193,21 @@ class AssistantActivity : Activity() {
             results.singleOrNull() == PackageManager.PERMISSION_GRANTED && MicPermission.granted(this)
         MicPermission.reviewed = approved
         updateMicPermissionStatus()
+    }
+
+    private fun resetContextReview() {
+        reviewingContext = false
+        contextReview?.setText(R.string.voice_context_review)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus) resetContextReview()
+    }
+
+    override fun onProvideAssistData(data: Bundle) {
+        super.onProvideAssistData(data)
+        if (Build.VERSION.SDK_INT >= 31 && resumed) ControlsAssist.supply(contextSource, data)
     }
 
     private fun updateMicPermissionStatus() {
@@ -247,10 +293,13 @@ class AssistantActivity : Activity() {
             else -> "This device does not offer an assistant role."
         }
         requestRole.isEnabled = available && !held
+        contextReview?.isEnabled = held
     }
 
     override fun onPause() {
         resumed = false
+        if (Build.VERSION.SDK_INT >= 31) ControlsAssist.cancelSource(contextSource)
+        resetContextReview()
         measureNextProfile.isChecked = false
         InspectionAccess.cancelPendingConfirmation()
         consent?.dismiss()

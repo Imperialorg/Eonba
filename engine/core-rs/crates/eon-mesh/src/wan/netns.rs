@@ -275,6 +275,11 @@ async fn peer(side: &str) -> EonResult<()> {
         .unwrap();
     let peer = pin(other);
     let relay: RelayUrl = URL.parse().unwrap();
+    let interface_loss = match std::env::var("EON_WAN_CUT").unwrap().as_str() {
+        "blackhole" => false,
+        "interface-loss" => true,
+        _ => panic!("unknown route impairment"),
+    };
     let ca = fs::read("keys/ca.der").unwrap();
     let rate = NonZeroU32::new(4 * 1024 * 1024).unwrap();
     // Verify the shipping private-CA, relay-only API, separately from migration.
@@ -292,8 +297,7 @@ async fn peer(side: &str) -> EonResult<()> {
     // No peer socket is handed to connect. QAD reports the *translated* socket;
     // the opposite LAN has no route to this socket's untranslated address.
     let bind = (Ipv4Addr::new(192, 168, host, 2), 41770);
-    // Both profiles detect the black hole from the transport itself: no
-    // notification at cut, new connection, rerouted frames or replay.
+    // Neither timing profile gets a notification of a distant black hole.
     let transport = QuicTransportConfig::builder();
     let transport = match std::env::var("EON_WAN_PATH_PROFILE").unwrap().as_str() {
         "default" => transport,
@@ -337,7 +341,20 @@ async fn peer(side: &str) -> EonResult<()> {
         expected(mapped)
     );
     let app = async {
-        witness(&ep, side, 0, &TransportAddr::Relay(relay.clone())).await?;
+        let relay = TransportAddr::Relay(relay);
+        witness(&ep, side, 0, &relay).await?;
+        let standby = ep
+            .paths()
+            .iter()
+            .find(|p| p.remote_addr() == &relay)
+            .expect("bootstrap relay path")
+            .id();
+        let relay_selected = || {
+            ep.paths()
+                .get(standby)
+                .filter(|p| p.remote_addr() == &relay)
+                .map(|p| p.is_selected())
+        };
         mark(&format!("bootstrap-proven-{side}"));
         wait("route-open").await;
         // The on-link routers have actually enabled the peer route. Notify
@@ -345,13 +362,27 @@ async fn peer(side: &str) -> EonResult<()> {
         // interface notifications. No address or synthetic path is injected.
         ep.endpoint.network_change().await;
         witness(&ep, side, 1, &TransportAddr::Ip(expected(remote).into())).await?;
+        if interface_loss {
+            assert_eq!(relay_selected(), Some(false), "no open relay standby");
+        }
         if side == "a" {
             sleep(Duration::from_millis(600)).await;
             mark("direct-proven");
         }
         wait("cut").await;
+        if interface_loss && side == "a" {
+            // Only A lost a local interface. B receives no fixture hint.
+            ep.endpoint.network_change().await;
+        }
         batch(&ep, side, 2).await?; // receipts may stall; never reconnect or replay
-        witness(&ep, side, 3, &TransportAddr::Relay(relay)).await?;
+        witness(&ep, side, 3, &relay).await?;
+        if interface_loss {
+            assert_eq!(
+                relay_selected(),
+                Some(true),
+                "original relay path not reused"
+            );
+        }
         if side == "a" {
             sleep(Duration::from_millis(600)).await;
             mark("drain");

@@ -142,8 +142,8 @@ fn build_ruleset(
             } else {
                 AccessFs::ReadDir | AccessFs::ReadFile
             }
-        } else if matches!(io, WorkerIo::RustAnalyzer(_) | WorkerIo::Pyright { .. }) {
-            if let WorkerIo::Pyright { digest, .. } = io
+        } else if io.thread_group().is_some() {
+            if let Some((name, digest)) = io.node_image()
                 && path == program
             {
                 #[cfg(all(
@@ -152,8 +152,8 @@ fn build_ruleset(
                     target_env = "gnu",
                     target_pointer_width = "64"
                 ))]
-                pyright::verify(&fd, &metadata, digest)
-                    .map_err(|e| sandbox_err("Pyright SEA", e))?;
+                pyright::verify(&fd, &metadata, name, digest)
+                    .map_err(|e| sandbox_err("LSP SEA", e))?;
                 #[cfg(not(all(
                     target_os = "linux",
                     target_arch = "x86_64",
@@ -161,8 +161,8 @@ fn build_ruleset(
                     target_pointer_width = "64"
                 )))]
                 {
-                    let _ = digest;
-                    return Err(sandbox_err("Pyright SEA", "unsupported ABI"));
+                    let _ = (name, digest);
+                    return Err(sandbox_err("LSP SEA", "unsupported ABI"));
                 }
             }
             if rust_analyzer::executable_grant(path, program, &fd, &metadata)
@@ -270,10 +270,10 @@ fn worker_filters(io: WorkerIo<'_>) -> EonResult<Vec<BpfProgram>> {
     let arch =
         TargetArch::try_from(std::env::consts::ARCH).map_err(|e| sandbox_err("architecture", e))?;
     let mut filters = Vec::new();
-    if matches!(io, WorkerIo::RustAnalyzer(_) | WorkerIo::Pyright { .. }) {
+    if io.thread_group().is_some() {
         filters.push(rust_analyzer::thread_filter(&mut rules, arch)?);
     }
-    if matches!(io, WorkerIo::Pyright { .. }) {
+    if io.node_image().is_some() {
         #[cfg(all(
             target_os = "linux",
             target_arch = "x86_64",
@@ -287,7 +287,7 @@ fn worker_filters(io: WorkerIo<'_>) -> EonResult<Vec<BpfProgram>> {
             target_env = "gnu",
             target_pointer_width = "64"
         )))]
-        return Err(sandbox_err("pyright", "unsupported ABI"));
+        return Err(sandbox_err("Node LSP", "unsupported ABI"));
     }
     let filter = SeccompFilter::new(
         rules,
@@ -329,6 +329,29 @@ pub(crate) enum WorkerIo<'a> {
         stubs: &'a Path,
         digest: &'a [u8; 32],
     },
+    Vtsls {
+        group: &'a Path,
+        digest: &'a [u8; 32],
+    },
+}
+
+impl<'a> WorkerIo<'a> {
+    fn thread_group(self) -> Option<&'a Path> {
+        match self {
+            Self::RustAnalyzer(group) | Self::Pyright { group, .. } | Self::Vtsls { group, .. } => {
+                Some(group)
+            }
+            _ => None,
+        }
+    }
+
+    fn node_image(self) -> Option<(&'static str, &'a [u8; 32])> {
+        match self {
+            Self::Pyright { digest, .. } => Some(("Pyright", digest)),
+            Self::Vtsls { digest, .. } => Some(("vtsls", digest)),
+            _ => None,
+        }
+    }
 }
 
 /// Runs `program` with `args` under `policy` and returns its output. Fails if confinement cannot be enforced.
@@ -352,19 +375,22 @@ pub(crate) fn confine_command(
     command.env_clear().current_dir("/").stdout(Stdio::piped());
     match io {
         WorkerIo::ClosedInput => command.stdin(Stdio::null()).stderr(Stdio::piped()),
-        WorkerIo::StdioProtocol | WorkerIo::RustAnalyzer(_) | WorkerIo::Pyright { .. } => {
+        WorkerIo::StdioProtocol
+        | WorkerIo::RustAnalyzer(_)
+        | WorkerIo::Pyright { .. }
+        | WorkerIo::Vtsls { .. } => {
             command.stdin(Stdio::piped()).stderr(Stdio::null())
         }
     };
-    if let WorkerIo::RustAnalyzer(group) | WorkerIo::Pyright { group, .. } = io {
+    if let Some(group) = io.thread_group() {
         rust_analyzer::prepare(command, group)
             .map_err(|e| sandbox_err("threaded LSP limits", e))?;
     }
-    if matches!(io, WorkerIo::Pyright { .. }) {
+    if io.node_image().is_some() {
         // This worker performs no TLS. Do not read the host OpenSSL config.
         let parent = Path::new(command.get_program())
             .parent()
-            .ok_or_else(|| sandbox_err("pyright", "missing installation directory"))?
+            .ok_or_else(|| sandbox_err("Node LSP", "missing installation directory"))?
             .to_owned();
         command
             .current_dir(parent)

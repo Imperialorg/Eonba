@@ -2662,6 +2662,7 @@ dependencies = [
 name = "eon-cyber"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "eon-ebpf",
  "eon-primitives",
  "petgraph 0.8.3",
