@@ -11,10 +11,11 @@ use iroh_relay::{
     },
 };
 use std::{fs, net::Ipv4Addr, os::unix::fs::MetadataExt, path::Path, sync::Arc};
-use tokio::time::{MissedTickBehavior, interval, sleep};
+use tokio::time::{MissedTickBehavior, interval_at, sleep};
 
 const IP: Ipv4Addr = Ipv4Addr::new(10, 77, 0, 1);
 const URL: &str = "https://10.77.0.1:8443";
+const MEDIA_URL: &str = "https://10.77.0.1:8444";
 const WAIT: Duration = Duration::from_secs(25);
 const CHUNK: usize = 64 * 1024;
 
@@ -61,7 +62,15 @@ impl AccessControl for Members {
     }
 }
 
-async fn relay() {
+fn media_enabled() -> bool {
+    match std::env::var("EON_WAN_MEDIA").as_deref() {
+        Ok("0") => false,
+        Ok("1") => true,
+        _ => panic!("missing fixture media policy"),
+    }
+}
+
+async fn start_relay(port: u16, qad: bool) -> Server {
     let tls = rustls::ServerConfig::builder_with_provider(iroh::tls::default_provider())
         .with_safe_default_protocol_versions()
         .unwrap()
@@ -73,14 +82,31 @@ async fn relay() {
         .unwrap();
     let mut relay = iroh_relay::server::RelayConfig::new((Ipv4Addr::LOCALHOST, 0));
     relay.tls = Some(TlsConfig::new(
-        (IP, 8443),
+        (IP, port),
         CertConfig::Manual { server_config: tls },
     ));
     relay.access = Arc::new(Members([pin("a"), pin("b")]));
     let mut cfg = ServerConfig::default();
     cfg.relay = Some(relay);
-    cfg.quic = Some(QuicConfig::new((IP, 7842)));
-    let server = Server::spawn(cfg).await.unwrap();
+    cfg.quic = qad.then(|| QuicConfig::new((IP, 7842)));
+    Server::spawn(cfg).await.unwrap()
+}
+
+fn private_stun() -> bool {
+    match std::env::var("EON_WAN_DISCOVERY").as_deref() {
+        Ok("qad") => false,
+        Ok("stun") => true,
+        _ => panic!("missing fixture discovery policy"),
+    }
+}
+
+async fn relay() {
+    let server = start_relay(8443, !private_stun()).await;
+    let media = if media_enabled() {
+        Some(start_relay(8444, false).await)
+    } else {
+        None
+    };
     println!(
         "relay HTTPS={:?} QAD={:?}",
         server.https_addr(),
@@ -97,7 +123,22 @@ async fn relay() {
         "relay fallback_forwarded_rx={rx} fallback_forwarded_tx={tx} qad_connections={}",
         m.qad_connections.get()
     );
-    assert!(rx >= CHUNK as u64 && tx >= CHUNK as u64 && m.qad_connections.get() >= 2);
+    assert!(rx >= CHUNK as u64 && tx >= CHUNK as u64);
+    if private_stun() {
+        assert_eq!(m.qad_connections.get(), 0);
+    } else {
+        assert!(m.qad_connections.get() >= 2);
+    }
+    if let Some(media) = media {
+        let m = &media.metrics().server;
+        println!(
+            "relay media_forwarded_rx={} media_forwarded_tx={}",
+            m.bytes_recv.get(),
+            m.bytes_sent.get()
+        );
+        assert!(m.bytes_recv.get() > 0 && m.bytes_sent.get() > 0);
+        media.shutdown().await.unwrap();
+    }
     server.shutdown().await.unwrap();
 }
 
@@ -119,15 +160,16 @@ fn monotonic_ns() -> i128 {
 // Sample at a fixed cadence, independent of receipt/loss and stream backpressure.
 // Count local send errors as attempts too.
 async fn measure(ep: &WanEndpoint) -> EonResult<()> {
-    let mut tick = interval(Duration::from_millis(20));
-    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let start = Instant::now();
+    let period = Duration::from_millis(20);
+    let mut tick = interval_at(start, period);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut samples = Vec::new();
     let mut drain = 0;
     let mut steady = [false; 2];
     loop {
         tokio::select! {
-            _ = tick.tick() => {
+            scheduled = tick.tick() => {
                 if Path::new("drain").exists() {
                     drain += 1;
                     if drain > 10 { break; }
@@ -145,13 +187,19 @@ async fn measure(ep: &WanEndpoint) -> EonResult<()> {
                 let frame = audio(seq);
                 let now = Instant::now();
                 let ns = monotonic_ns();
-                let sent = ep.send_audio(&frame);
-                println!("send seq={seq} t_us={} phase={phase} mono_ns={ns} path={path:?}", (now-start).as_micros());
+                // Keep a primary-only PCM echo as a witness on each stable
+                // selected path. Never skip a scheduled attempt for a witness.
+                let probe = (phase == "direct" && !steady[0]) || (phase == "fallback" && !steady[1]) || phase == "bootstrap";
+                let copies = ep.media.is_some() && !probe;
+                let sent = if copies { ep.send_redundant_audio(&frame).map(|c| Some((c.primary, c.standby))) }
+                           else { ep.send_audio(&frame).map(|_| None) };
+                let slot = (scheduled - start).as_nanos() / period.as_nanos();
+                println!("send seq={seq} t_us={} phase={phase} mono_ns={ns} slot={slot} path={path:?} queued={sent:?}", (now-start).as_micros());
                 samples.push((now, phase, path, false));
                 if let Err(e) = sent { println!("audio_send_error seq={seq}: {e}"); }
             }
-            frame = ep.recv_audio() => {
-                let frame = frame?;
+            frame = ep.recv_audio_observed() => {
+                let (frame, route) = frame?;
                 let now = Instant::now();
                 let seq = usize::try_from(frame.sequence_number).unwrap();
                 assert_eq!(frame, audio(seq));
@@ -159,7 +207,10 @@ async fn measure(ep: &WanEndpoint) -> EonResult<()> {
                 assert!(!*seen);
                 *seen = true;
                 println!("echo seq={seq} rtt_us={}", (now-*sent).as_micros());
-                if ep.paths().iter().any(|p| p.is_selected() && Some(p.remote_addr()) == path.as_ref()) {
+                if route == Arrival::Primary && ep.paths().iter().any(|p| p.is_selected() && Some(p.remote_addr()) == path.as_ref()) {
+                    if *phase == "bootstrap" && path.as_ref().is_some_and(TransportAddr::is_relay) && !Path::new("bootstrap-audio").exists() {
+                        mark("bootstrap-audio");
+                    }
                     steady[0] |= *phase == "direct" && path.as_ref().is_some_and(TransportAddr::is_ip);
                     steady[1] |= *phase == "fallback" && path.as_ref().is_some_and(TransportAddr::is_relay);
                 }
@@ -247,7 +298,7 @@ async fn witness(ep: &WanEndpoint, side: &str, stage: u32, addr: &TransportAddr)
     })
     .await
     .unwrap_or_else(|_| panic!("expected {addr:?}; current paths: {:?}", ep.paths()));
-    mark(&format!("{phase}-{side}"));
+    fs::write(format!("{phase}-{side}"), monotonic_ns().to_string()).unwrap();
     wait(&format!("{phase}-{other}")).await;
     if stage == 3 {
         wait("counter-ready").await;
@@ -294,7 +345,7 @@ async fn peer(side: &str) -> EonResult<()> {
     mark(&format!("closed-{side}"));
     wait(&format!("closed-{other}")).await;
 
-    // No peer socket is handed to connect. QAD reports the *translated* socket;
+    // No peer socket is handed to connect. Discovery reports our *translated* socket;
     // the opposite LAN has no route to this socket's untranslated address.
     let bind = (Ipv4Addr::new(192, 168, host, 2), 41770);
     // Neither timing profile gets a notification of a distant black hole.
@@ -309,18 +360,37 @@ async fn peer(side: &str) -> EonResult<()> {
     let builder = relay_builder(transport)
         .bind_addr(bind)
         .unwrap()
-        .ca_tls_config(iroh::tls::CaTlsConfig::custom_roots([ca.into()]));
-    let ep = WanEndpoint::open_configured(
+        .ca_tls_config(iroh::tls::CaTlsConfig::custom_roots([ca.clone().into()]));
+    let expected = |i| std::net::SocketAddrV4::new(Ipv4Addr::new(10, 77, 0, i), 41770);
+    let (builder, qad, source) = if private_stun() {
+        // The authenticated Binding probe released exactly `bind`. IP/port
+        // reuse alone does not prove reachability: witness() below requires
+        // actual primary payload bytes on the selected translated sockets.
+        let addr = fs::read_to_string(format!("stun-mapped-{side}"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(addr, std::net::SocketAddr::V4(expected(mapped)));
+        (builder.external_addr(addr), None, "STUN")
+    } else {
+        (builder, Some(RelayQuicConfig::new(7842)), "QAD")
+    };
+    let mut ep = WanEndpoint::open_configured(
         me,
         peer,
-        RelayConfig::new(relay.clone(), Some(RelayQuicConfig::new(7842))),
+        RelayConfig::new(relay.clone(), qad),
         rate,
         WAIT,
         builder,
     )
     .await?;
     assert_eq!(ep.peer_id(), peer);
-    let expected = |i| std::net::SocketAddrV4::new(Ipv4Addr::new(10, 77, 0, i), 41770);
+    let primary_id = ep.conn.stable_id();
+    if media_enabled() {
+        ep.enable_media_standby(MEDIA_URL.parse().unwrap(), ca, WAIT)
+            .await?;
+    }
+    assert!(ep.endpoint.bound_sockets().contains(&bind.into()));
     timeout(WAIT, async {
         loop {
             if ep
@@ -335,14 +405,15 @@ async fn peer(side: &str) -> EonResult<()> {
         }
     })
     .await
-    .expect("QAD did not report this endpoint's SNAT mapping");
+    .expect("endpoint does not advertise its discovered SNAT mapping");
     println!(
-        "QAD side={side} bound={bind:?} reflected={} peer={peer}",
+        "{source} side={side} bound={bind:?} reflected={} peer={peer}",
         expected(mapped)
     );
     let app = async {
         let relay = TransportAddr::Relay(relay);
         witness(&ep, side, 0, &relay).await?;
+        wait("bootstrap-audio").await;
         let standby = ep
             .paths()
             .iter()
@@ -397,11 +468,17 @@ async fn peer(side: &str) -> EonResult<()> {
         let echo = async {
             loop {
                 tokio::select! {
-                    chunk = ep.recv_audio() => {
-                        let chunk = chunk?;
+                    chunk = ep.recv_audio_observed() => {
+                        let (chunk, via) = chunk?;
                         let received = monotonic_ns();
-                        ep.send_audio(&chunk)?;
-                        println!("received seq={} mono_ns={received}", chunk.sequence_number);
+                        let direct = ep.paths().iter().any(|p| p.is_selected() && p.remote_addr().is_ip());
+                        assert_eq!(chunk, audio(usize::try_from(chunk.sequence_number).unwrap()));
+                        if via == Arrival::Primary {
+                            ep.send_audio(&chunk)?;
+                        } else {
+                            ep.send_redundant_audio(&chunk)?;
+                        }
+                        println!("received seq={} mono_ns={received} via={via:?} direct={direct}", chunk.sequence_number);
                     }
                     _ = sleep(Duration::from_millis(20)) => {
                         if Path::new("finished").exists() { return Ok(()); }
@@ -412,6 +489,7 @@ async fn peer(side: &str) -> EonResult<()> {
         tokio::try_join!(app, echo)?;
         mark("b-complete");
     }
+    assert_eq!(ep.conn.stable_id(), primary_id);
     ep.close().await;
     Ok(())
 }

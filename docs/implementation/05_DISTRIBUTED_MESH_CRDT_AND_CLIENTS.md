@@ -107,6 +107,23 @@ Run the strict test first with default timing, then add `--short-path-timeout`. 
 
 All four runs migrated without reconnecting and failed the strict deadline. The short profile reduced the interruption, not the 20 ms send cadence. The gap is the longest time between consecutive peer decodes that overlaps the cut. The `cut-start` and `counter-ready` marker timestamps bound the cut, not the next sender ticks. This includes the receipts bracketing a cut with no arrivals. A low latency percentile for the few frames received is not continuous voice delivery.
 
+**Opt-in media duplication.** Both operators can call `enable_media_standby` on their existing pinned sessions, supplying a **distinct** private HTTPS relay IP origin and its DER CA. The same Ed25519 peers authenticate on `eon/mesh/wan-media-copy/1`; direction-specific TLS exporter proofs bind the fresh standby handshake to the primary. This is another QUIC transport, not another logical session. It accepts no application streams. `send_audio` never offloads: only `send_redundant_audio` queues copies on both transports and reports which queues accepted them. Class 1–3 streams and receipts stay on the primary. A slow stream does not hold up PCM.
+
+Both copies are valid PCM protobufs. A nine-byte fixed64 extension (field 15, first on the wire) fits **inside** the existing 1,150-byte limit. An ordinary receiver ignores it, including after asymmetric setup failure. A bound receiver suppresses duplicates with a 128-ID sliding window per direction; falling behind the window drops the frame rather than playing a replay. Ending the primary revokes the lane; reconnect requires fresh consent. Duplication uses additional bandwidth and cannot help if both routes fail.
+
+Add `--redundant-media` to the original gate. For `--lose-direct-interface`, the script checks both original TLS socket cookies across removal of `wan0`. Selected-path byte deltas, private relay counters, primary-only PCM echoes and Class 1–3 receipts still witness primary migration. Strict accounting uses **send timestamps** in `[cut-start, counter-ready)`, including absent and late decodes; skipped send slots fail. A separate standby witness must be sent **after** impairment installation and decoded before either endpoint shows recovery.
+
+`--private-stun` replaces QAD in the **fixture only**. Both clients perform RFC 8489 Binding against the fixed private UDP origin using fresh transaction IDs, separate short-term credentials and MESSAGE-INTEGRITY-SHA256. Each client verifies its XOR-MAPPED-ADDRESS, releases its local port, and the test QUIC endpoint rebinds that address and advertises its own mapping. This is not shared live-socket STUN or general-purpose NAT discovery. The gate verifies direct payload on the actual translated sockets with no QAD listener or QAD connections.
+
+| Reviewed private cut run (`--require-voice-deadline` throughout) | Attempts | <5 ms | Late | Missing | Standby first, after installation and before recovery | Strict result |
+|---|---:|---:|---:|---:|---:|---|
+| Interface loss, short timers, QAD, primary only | 57 | 7 | 0 | 50 | 0 | Fail |
+| Interface loss, short timers, QAD, redundant | 56 | 56 | 0 | 0 | 49 | Pass |
+| Interface loss, default timers, private STUN, redundant | 1,276 | 1,169 | 107 | 0 | 288 | Fail |
+| Silent blackhole, default timers, private STUN, redundant | 758 | 750 | 8 | 0 | 746 | Fail |
+
+All four runs migrated and skipped zero send slots. These results show improved delivery in this five-namespace topology, **not** a general 5 ms guarantee. Production remains relay-only: the peer pin does not restrict the direct IP candidates iroh may probe. Production direct routing, zero-config STUN and physical 5G/Wi-Fi roaming are not verified.
+
 ### 2.3 Schema Reconciliation and Clock-Skew-Immune 15ms Spatial Election (`src/spatial.rs`)
 
 **Protobuf Reconciliation**: Update `SensoryClaim` in `proto/eon.proto` with two optional fields so it matches `DISTRIBUTED_NETWORKING_MESH.md` §8.1 without breaking existing field numbers `1..8`:

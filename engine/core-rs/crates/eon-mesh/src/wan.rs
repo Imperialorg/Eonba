@@ -3,6 +3,7 @@
 //! While open, iroh maintains its connection to the configured relay. The
 //! relay sees endpoint IDs, sizes and timing, not the end-to-end QUIC payload.
 
+mod media;
 #[cfg(all(test, target_os = "linux"))]
 mod netns;
 #[cfg(test)]
@@ -25,6 +26,7 @@ use prost::Message;
 use tokio::time::{Instant, sleep_until, timeout};
 
 use crate::qos::{BulkPacer, TrafficClass};
+pub use media::AudioCopies;
 pub use wire::{AudioPcmChunk, CrdtDeltaSync, EpochInvalidationEvent, ReliableFrame};
 
 const ALPN: &[u8] = b"eon/mesh/wan-qos/1";
@@ -34,6 +36,13 @@ const MAX_AUDIO: usize = 1150;
 // Includes noq's per-datagram bookkeeping. Fits a maximum wire chunk but
 // not two ordinary 20 ms frames (640 PCM bytes each).
 const AUDIO_RECV_WINDOW: usize = 1200;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Arrival {
+    Primary,
+    PrimaryCopy,
+    StandbyCopy,
+}
 
 fn transport_error(error: impl std::fmt::Display) -> EonError {
     EonError::OperationFailed {
@@ -74,19 +83,25 @@ fn validate_relay(relay: &RelayUrl) -> EonResult<()> {
     Ok(())
 }
 
-/// One application connection to exactly one peer via exactly one relay.
-/// Neither peer announcements nor per-request addresses enter the dial path.
+/// One pinned application session. By default it uses a single relay and
+/// never duplicates audio. Neither announcements nor per-frame addresses
+/// enter the dial path.
 pub struct WanEndpoint {
     endpoint: Endpoint,
     conn: Connection,
     relay: RelayUrl,
     budget: Budget,
+    media: Option<media::MediaLane>,
 }
 
 fn relay_builder(transport: QuicTransportConfigBuilder) -> Builder {
+    datagram_builder(transport, 8)
+}
+
+fn datagram_builder(transport: QuicTransportConfigBuilder, bidi_streams: u8) -> Builder {
     let transport = transport
         .max_concurrent_uni_streams(0u8.into())
-        .max_concurrent_bidi_streams(8u8.into())
+        .max_concurrent_bidi_streams(bidi_streams.into())
         // Only Class 0 uses DATAGRAM. Prefer new arrivals to stale queued PCM.
         .datagram_send_buffer_size(MAX_AUDIO)
         .datagram_receive_buffer_size(Some(AUDIO_RECV_WINDOW))
@@ -162,22 +177,14 @@ impl WanEndpoint {
             ));
         }
         timeout(wait, async {
-            let ep = builder
-                .clear_address_lookup()
-                .portmapper_config(PortmapperConfig::Disabled)
-                .net_report_config(NetReportConfig::minimal())
-                .relay_mode(RelayMode::Custom(config.into()))
-                .secret_key(secret)
-                .alpns(vec![ALPN.to_vec()])
-                .bind()
-                .await
-                .map_err(transport_error)?;
-            let conn = rendezvous(&ep, pinned, &relay).await?;
+            let ep = bind(builder, secret, config, ALPN).await?;
+            let conn = rendezvous(&ep, pinned, &relay, ALPN).await?;
             Ok(Self {
                 endpoint: ep,
                 conn,
                 relay,
                 budget: Budget::new(bytes_per_sec),
+                media: None,
             })
         })
         .await
@@ -205,26 +212,64 @@ impl WanEndpoint {
     pub async fn reconnect(mut self, wait: Duration) -> EonResult<Self> {
         let pinned = self.peer_id();
         self.conn.close(0u8.into(), b"reconnecting");
-        self.conn = timeout(wait, rendezvous(&self.endpoint, pinned, &self.relay))
-            .await
-            .map_err(|_| {
-                transport_error("timed out reconnecting to the provisioned relay peer")
-            })??;
+        let media = self.media.take();
+        self.conn = timeout(wait, async {
+            let ((), new_primary) = tokio::join!(
+                Self::drain_media(media),
+                rendezvous(&self.endpoint, pinned, &self.relay, ALPN)
+            );
+            new_primary
+        })
+        .await
+        .map_err(|_| transport_error("timed out reconnecting to the provisioned relay peer"))??;
         Ok(self)
     }
 
     pub async fn close(self) {
-        self.endpoint.close().await;
+        self.conn.close(0u8.into(), b"session ended");
+        tokio::join!(Self::drain_media(self.media), self.endpoint.close());
+    }
+
+    async fn drain_media(media: Option<media::MediaLane>) {
+        if let Some(media) = media {
+            media.close().await;
+        }
     }
 }
 
-async fn rendezvous(ep: &Endpoint, pinned: EndpointId, relay: &RelayUrl) -> EonResult<Connection> {
+async fn bind(
+    builder: Builder,
+    secret: SecretKey,
+    config: RelayConfig,
+    alpn: &[u8],
+) -> EonResult<Endpoint> {
+    builder
+        .clear_address_lookup()
+        .portmapper_config(PortmapperConfig::Disabled)
+        .net_report_config(NetReportConfig::minimal())
+        .relay_mode(RelayMode::Custom(config.into()))
+        .secret_key(secret)
+        .alpns(vec![alpn.to_vec()])
+        .bind()
+        .await
+        .map_err(transport_error)
+}
+
+async fn rendezvous(
+    ep: &Endpoint,
+    pinned: EndpointId,
+    relay: &RelayUrl,
+    alpn: &[u8],
+) -> EonResult<Connection> {
     // iroh 1.4 chooses a listening "home relay" from probe results. Both
     // peers instead register by dialing. Choose the same connection by key order.
     let peer = EndpointAddr::new(pinned).with_relay_url(relay.clone());
-    let dial = async { ep.connect(peer, ALPN).await.map_err(transport_error) };
+    let dial = async { ep.connect(peer, alpn).await.map_err(transport_error) };
     let (outgoing, incoming) = tokio::try_join!(dial, accept(ep, pinned, relay))?;
-    if outgoing.remote_id() != pinned || incoming.remote_id() != pinned {
+    if [&outgoing, &incoming]
+        .iter()
+        .any(|c| c.remote_id() != pinned || c.alpn() != alpn)
+    {
         return Err(EonError::SecurityViolation("unpaired WAN identity".into()));
     }
     Ok(if ep.id() < pinned { outgoing } else { incoming })
@@ -298,14 +343,18 @@ impl WanEndpoint {
     /// Read in arrival order. If the reader stalls, older unread datagrams
     /// are evicted to make room. This is a byte budget, not an age check.
     pub async fn recv_audio(&self) -> EonResult<AudioPcmChunk> {
-        let bytes = self.conn.read_datagram().await.map_err(transport_error)?;
-        if bytes.len() > MAX_AUDIO {
-            return Err(invalid("oversized audio datagram"));
-        }
-        let pcm = AudioPcmChunk::decode(bytes).map_err(transport_error)?;
-        pcm.validate()?;
+        Ok(self.recv_audio_observed().await?.0)
+    }
+
+    async fn recv_audio_observed(&self) -> EonResult<(AudioPcmChunk, Arrival)> {
+        let received = if let Some(media) = &self.media {
+            media.recv(&self.conn).await?
+        } else {
+            let bytes = self.conn.read_datagram().await.map_err(transport_error)?;
+            (wire::decode_audio(bytes)?, Arrival::Primary)
+        };
         self.budget.observe(TrafficClass::Audio);
-        Ok(pcm)
+        Ok(received)
     }
 
     /// Finishes when the peer has decoded the frame, not when it has persisted

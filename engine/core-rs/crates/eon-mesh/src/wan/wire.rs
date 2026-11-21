@@ -25,8 +25,18 @@ impl AudioPcmChunk {
         {
             return Err(invalid("expected one bounded Class 0 PCM16 chunk"));
         }
+
         Ok(())
     }
+}
+
+pub(super) fn decode_audio(bytes: bytes::Bytes) -> EonResult<AudioPcmChunk> {
+    if bytes.len() > MAX_AUDIO {
+        return Err(invalid("oversized audio datagram"));
+    }
+    let pcm = AudioPcmChunk::decode(bytes).map_err(super::transport_error)?;
+    pcm.validate()?;
+    Ok(pcm)
 }
 
 #[derive(Clone, PartialEq, Message)]
