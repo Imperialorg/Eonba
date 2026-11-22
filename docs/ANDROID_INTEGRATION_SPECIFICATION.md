@@ -287,13 +287,15 @@ With EON selected, open **Review an Android assistant profile check**. Back leav
 
 **Owner-context policy.** `getUserDisabledShowContext()` reports the user's two Settings switches, not enterprise policy. Android's [`isAssistDataAllowed`](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/core/java/com/android/server/wm/ActivityTaskManagerService.java) enforces additional restrictions on OS capture. For its two *app-authored* context routes, EON checks the text switch, the calling user's `DevicePolicyManager.getScreenCaptureDisabled(null)` and, on API 35+, `UserManager.DISALLOW_ASSIST_CONTENT`. On 35+ it also declines non-managed profiles (which can include private space), without querying other users. Missing policy services or failed checks deny sharing. These checks apply before using the context and while showing the result; they are not a substitute for the OS's whole-display policy. The CPU-setting show bundle contains only the one-use Binder ticket, not the reviewed setting.
 
-Use the signed APK and observer installation described below on disposable 3 GiB API 35 Google APIs x86_64 AVDs. Select EON through Settings. Run the allowed case with default policy; for the denied case turn **Use text from screen** off through Android Settings:
+On a disposable, unlocked, setup-complete 3 GiB API 35 Google APIs x86_64 AVD with no personal data, install the matching signed debug **target** and select EON through Settings. Leave the observer uninstalled. From `engine/android`, choose the case matching the policy already on that AVD:
 
 ```sh
-OBS=com.eon.assistant.keystoretest/com.eon.assistant.ProfileActionAcceptance
-"$ANDROID_HOME/platform-tools/adb" -s "$SERIAL" shell am instrument -w -r "$OBS"
-"$ANDROID_HOME/platform-tools/adb" -s "$SERIAL" shell am instrument -w -r -e policy denied "$OBS"
+python3 app/keystore_device_test.py --preconfigured-profile-serial "$SERIAL" --profile-policy allowed
+# On a separate AVD with Use text from screen already off:
+python3 app/keystore_device_test.py --preconfigured-profile-serial "$SERIAL" --profile-policy denied
 ```
+
+The driver checks setup, target APK identity and the closed collection mask, then installs and removes only its observer. Use `restricted` or `capture-disabled` only on a disposable AVD already under that policy. The observer checks the active service and actual policy before driving the UI. A different case's result does not count. This driver does not establish that an OS view tree was delivered.
 
 On `AE3A.240806.043/12960925` (enforcing, loopback-only host network, no host audio or cameras), `PASS-os-action` observed the source's completed profile check, `p0_mobile_ultralight`, and a separately confirmed CPU setting. `PASS-policy-denied` observed both refusals and an unexecuted profile check. Both verified a fresh empty assistant card, `mDisabledShowContext=3`, and no microphone use. The observer also accepts `-e policy restricted` or `-e policy capture-disabled` on an already managed test device with just that restriction active. These enterprise denial cases were **not** verified on a managed device: the stock emulator denied the shell permission to impose `no_assist_content`, and the observer refused to count an unrestricted run as a pass. No admin permission was granted. The JVM suite covers denied and unavailable policy inputs.
 

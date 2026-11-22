@@ -99,7 +99,10 @@ public final class ProfileActionAcceptance extends Instrumentation {
                     || "capture-disabled".equals(policy));
             boolean denied = !"allowed".equals(policy);
             // Each negative case requires its own real policy to be the only blocker.
-            require("denied".equals(policy) == "0".equals(shell("settings get secure assist_structure_enabled")));
+            String textSwitch = shell("settings --user current get secure assist_structure_enabled");
+            // Android defaults this switch to enabled when the setting is absent.
+            require("0".equals(textSwitch) || "1".equals(textSwitch) || "null".equals(textSwitch));
+            require("denied".equals(policy) == "0".equals(textSwitch));
             require("restricted".equals(policy) == getTargetContext().getSystemService(UserManager.class)
                     .hasUserRestriction(UserManager.DISALLOW_ASSIST_CONTENT));
             require("capture-disabled".equals(policy) == getTargetContext().getSystemService(DevicePolicyManager.class)

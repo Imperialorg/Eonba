@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from keystore_device_test import (MIC_PHASES, TARGET, TEST, check_packages, check_result, parse_args,
+from keystore_device_test import (MIC_PHASES, PROFILE_RESULTS, TARGET, TEST, check_packages, check_result, parse_args,
                                   require_closed_context, require_preconfigured_apk, require_setup_complete,
                                   require_stock_emulator, run)
 
@@ -42,6 +42,42 @@ class InstrumentationResults(unittest.TestCase):
 
 
 class DeviceModes(unittest.TestCase):
+    def test_profile_case_needs_a_named_policy_and_preconfigured_serial(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            for args in (["--serial", "emulator-5554", "--profile-policy", "allowed"],
+                         ["--preconfigured-profile-serial", "emulator-5554"]):
+                with self.assertRaises(SystemExit):
+                    parse_args(args)
+        for policy in PROFILE_RESULTS:
+            args = parse_args(["--preconfigured-profile-serial", "emulator-5554", "--profile-policy", policy])
+            self.assertIsNone(args.serial)
+            self.assertEqual(args.profile_policy, policy)
+
+    def test_profile_gate_preserves_target_and_requires_the_requested_policy_result(self):
+        for expected in ("PASS-policy-restricted", "PASS-os-action"):
+            with (self.subTest(result=expected),
+                  patch("keystore_device_test.require_stock_emulator") as emulator,
+                  patch("keystore_device_test.require_setup_complete") as setup,
+                  patch("keystore_device_test.require_preconfigured_apk") as identity,
+                  patch("keystore_device_test.require_closed_context") as closed,
+                  patch("keystore_device_test.subprocess.check_output", side_effect=[
+                      f"package:android\npackage:{TARGET}\n", "Success\n",
+                      f"INSTRUMENTATION_RESULT: profileAction={expected}\nINSTRUMENTATION_CODE: -1\n",
+                      "Success\n"]) as adb,
+                  contextlib.redirect_stdout(io.StringIO()),
+                  contextlib.nullcontext() if expected == PROFILE_RESULTS["restricted"] else self.assertRaises(SystemExit)):
+                run(Path("/sdk"), "emulator-5554", Path("/observer.apk"), profile_policy="restricted")
+            emulator.assert_called_once()
+            self.assertEqual(emulator.call_args.args[1:], ("emulator-5554", 35))
+            setup.assert_called_once()
+            identity.assert_called_once()
+            self.assertEqual(closed.call_count, 2 if expected == PROFILE_RESULTS["restricted"] else 1)
+            self.assertEqual([c.args[0][3:] for c in adb.call_args_list], [
+                ["shell", "pm", "list", "packages", "-u", "--user", "all"],
+                ["install", "-t", Path("/observer.apk")],
+                ["shell", "am", "instrument", "-w", "-r", "--user", "current", "-e", "policy", "restricted",
+                 f"{TEST}/{TARGET}.ProfileActionAcceptance"], ["uninstall", TEST]])
+
     def test_operator_observer_has_time_for_all_eight_checkpoints(self):
         calls = []
 

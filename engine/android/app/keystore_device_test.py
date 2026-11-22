@@ -130,9 +130,17 @@ def require_closed_context(adb):
         raise SystemExit("Android did not confirm both assist structure and screenshot are disabled.")
 
 
+PROFILE_RESULTS = {
+    "allowed": "PASS-os-action",
+    "denied": "PASS-policy-denied",
+    "restricted": "PASS-policy-restricted",
+    "capture-disabled": "PASS-policy-capture-disabled",
+}
+
+
 def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, stock_assistant=False, preconfigured_allowed=False,
         preconfigured_hud=False, preconfigured_workflow=False, mic_phase=None, preconfigured_context=False,
-        context_denied=False):
+        context_denied=False, profile_policy=None):
     def adb(*args, timeout=120):
         return subprocess.check_output([sdk / "platform-tools/adb", "-s", serial, *args],
                                        text=True, stderr=subprocess.STDOUT, timeout=timeout)
@@ -144,15 +152,18 @@ def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, stock_assi
         output = adb("shell", "am", "instrument", "-w", "-r", *args, f"{TEST}/{TARGET}.{component}",
                      timeout=timeout)
         check_result(output, key, expected)
-        if component == "ControlsAssistAcceptance":
+        if component in ("ControlsAssistAcceptance", "ProfileActionAcceptance"):
             require_closed_context(adb)
         name = expected.removeprefix("PASS-") if key == "keystore" else f"{key}={expected}"
         print(f"PASS: {name}", flush=True)
 
-    selected_session = preconfigured_hud or preconfigured_workflow or preconfigured_context or mic_phase is not None
+    if profile_policy is not None and profile_policy not in PROFILE_RESULTS:
+        raise SystemExit("Unknown profile policy case.")
+    selected_session = (preconfigured_hud or preconfigured_workflow or preconfigured_context
+                        or mic_phase is not None or profile_policy is not None)
     preconfigured = preconfigured_allowed or selected_session
     minimum_api = 34 if demo_denied or stock_hud or stock_assistant or preconfigured else 28
-    require_stock_emulator(adb, serial, 35 if mic_phase == "process-death" else minimum_api)
+    require_stock_emulator(adb, serial, 35 if mic_phase == "process-death" or profile_policy is not None else minimum_api)
     if selected_session:
         require_setup_complete(adb)
     if context_denied and (not preconfigured_context or
@@ -167,10 +178,15 @@ def run(sdk, serial, test_apk, *, demo_denied=False, stock_hud=False, stock_assi
 
         if preconfigured:
             require_preconfigured_apk(adb)
-            if preconfigured_context:
+            if preconfigured_context or profile_policy is not None:
                 require_closed_context(adb)
             install(TEST, test_apk)
-            if preconfigured_context:
+            if profile_policy is not None:
+                # The observer checks the actual OS policy before touching the UI.
+                # Never configure the policy, grant the role, or replace the target.
+                instrument("ProfileActionAcceptance", "profileAction", PROFILE_RESULTS[profile_policy],
+                           "--user", "current", "-e", "policy", profile_policy)
+            elif preconfigured_context:
                 print("On EON controls with CPU timing OFF, review sharing the setting, pause, confirm and dismiss. "
                       + ("" if context_denied else "Select CPU timing ON and repeat the review, confirmation and dismissal. ")
                       + "Pause, then invoke normally. This tests app-volunteered metadata, NOT AssistStructure.",
@@ -244,6 +260,11 @@ def parse_args(argv=None):
                       help="observe review of app-volunteered settings from EON controls, then "
                            "dismissal and fresh private invocation. Use only a disposable setup-complete "
                            "API 34+ AVD with matching target already selected via Android's picker.")
+    mode.add_argument("--preconfigured-profile-serial", metavar="SERIAL",
+                      help="exercise both owner-context routes on an already configured disposable API 35 AVD. "
+                           "The observer drives EON's private controls; no settings, grants or roles are changed.")
+    parser.add_argument("--profile-policy", choices=PROFILE_RESULTS,
+                        help="existing device policy to verify; requires --preconfigured-profile-serial")
     parser.add_argument("--context-denied", action="store_true", help="observe refusal after the operator disables "
                         "Use text from screen in Android Settings; requires --preconfigured-context-serial")
     parser.add_argument("--mic-phase", choices=MIC_PHASES, help="required only with --preconfigured-mic-serial")
@@ -256,6 +277,8 @@ def parse_args(argv=None):
                         help="on the clean unlocked API 34+ AVD, launch EON's ACTION_ASSIST activity and "
                              "cancel its real Android role picker without making a selection")
     args = parser.parse_args(argv)
+    if bool(args.preconfigured_profile_serial) != (args.profile_policy is not None):
+        parser.error("--preconfigured-profile-serial and --profile-policy must be supplied together")
     if args.context_denied and not args.preconfigured_context_serial:
         parser.error("--context-denied requires --preconfigured-context-serial")
     if bool(args.preconfigured_mic_serial) != (args.mic_phase is not None):
@@ -275,10 +298,11 @@ if __name__ == "__main__":
     apk = build(sdk)
     if not args.build_only:
         run(sdk, args.serial or args.preconfigured_allowed_serial or args.preconfigured_hud_serial
-            or args.preconfigured_mic_serial or args.preconfigured_workflow_serial or args.preconfigured_context_serial, apk,
+            or args.preconfigured_mic_serial or args.preconfigured_workflow_serial or args.preconfigured_context_serial
+            or args.preconfigured_profile_serial, apk,
             demo_denied=args.demo_denied, stock_hud=args.stock_hud, stock_assistant=args.stock_assistant,
             preconfigured_allowed=args.preconfigured_allowed_serial is not None,
             preconfigured_hud=args.preconfigured_hud_serial is not None,
             preconfigured_context=args.preconfigured_context_serial is not None,
-            context_denied=args.context_denied,
+            context_denied=args.context_denied, profile_policy=args.profile_policy,
             preconfigured_workflow=args.preconfigured_workflow_serial is not None, mic_phase=args.mic_phase)
