@@ -1,5 +1,8 @@
-//! A session on one selected speaker. The recorder supplies only the authorized, live input reference.
+//! Physical rig and device-free timing sessions share one semantic turn/bridge decision.
 //! Never open a microphone, pad an unfinished turn at EOF, or interpret a partial as a command.
+
+#[path = "eon-rig-turn/software.rs"]
+mod software;
 
 use std::error::Error;
 use std::io::{self, Read, Write};
@@ -231,9 +234,14 @@ fn start_prefix(
 
 fn main() -> Result<()> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if let [flag, models] = args.as_slice()
+        && flag == "--software-timing-session"
+    {
+        return software::session(Path::new(models));
+    }
     let [flag, rate, speaker, models] = args.as_slice() else {
         return Err(
-            "usage: eon-rig-turn --live-reference-session RATE alsa:hw:CARD=NAME,DEV=N MODEL_DIRECTORY"
+            "usage: eon-rig-turn --software-timing-session ABS_MODEL_DIRECTORY | --live-reference-session RATE alsa:hw:CARD=NAME,DEV=N MODEL_DIRECTORY"
                 .into(),
         );
     };
