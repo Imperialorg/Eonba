@@ -7,6 +7,7 @@ umask 077
 usage() {
     cat <<'HELP'
 Usage: test_wan_nat.sh [--lose-direct-interface] [--redundant-media] [--private-stun | --isolated-n0] [--short-path-timeout] [--require-voice-deadline]
+       test_wan_nat.sh --field-continuity
 
 Test relay → direct UDP across two NATs → relay on the same pinned QUIC connection.
 By default the routers silently blackhole the direct route. Success verifies
@@ -25,6 +26,9 @@ migration and delivery after fallback, not uninterrupted voice during the cut.
                              No public services, peer tickets or host DNS changes.
   --require-voice-deadline   Also require every cut audio attempt to reach peer decode
                              in <5 ms one-way. Missing or late frames fail the run.
+  --field-continuity         Run both shipping field CLI roles against the private N0
+                             mirror. Bracket receiver interface removal using a PTY.
+                             This measures decode gaps, not one-way delay or a radio roam.
   -h, --help                 Print this help without building or creating namespaces.
 
 Run as an unprivileged Linux build user with passwordless sudo for the namespace
@@ -37,6 +41,7 @@ media=0
 discovery=qad
 profile=default
 cut_mode=blackhole
+field=0
 for arg in "$@"; do
     case "$arg" in
         --require-voice-deadline) strict=1 ;;
@@ -46,6 +51,9 @@ for arg in "$@"; do
             [[ $discovery == qad ]] || { echo "choose one discovery profile" >&2; exit 2; }
             if [[ $arg == --private-stun ]]; then discovery=stun; else discovery=n0; fi ;;
         --lose-direct-interface) cut_mode=interface-loss ;;
+        --field-continuity)
+            [[ $# == 1 ]] || { echo "--field-continuity runs alone" >&2; exit 2; }
+            field=1; discovery=n0; cut_mode=interface-loss ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $arg" >&2; usage >&2; exit 2 ;;
     esac
@@ -88,6 +96,12 @@ trap on_signal HUP INT TERM
 export TMPDIR="$scratch"
 timeout 20m cargo test --locked --jobs 2 -p eon-mesh --lib --no-run --message-format=json >"$scratch/build.jsonl"
 exe=$(python3 -c 'import json,sys; print(next(m["executable"] for m in map(json.loads,sys.stdin) if m.get("executable") and m["target"]["name"] == "eon_mesh"))' <"$scratch/build.jsonl")
+field_exe=
+if (( field )); then
+    timeout 20m cargo build --locked --jobs 2 -p eon-mesh --bin eon-wan-continuity \
+        --message-format=json >"$scratch/field-build.jsonl"
+    field_exe=$(python3 -c 'import json,sys; print(next(m["executable"] for m in map(json.loads,sys.stdin) if m.get("executable") and m["target"]["name"] == "eon-wan-continuity"))' <"$scratch/field-build.jsonl")
+fi
 cd "$scratch"
 mkdir keys
 for side in a b; do
@@ -235,9 +249,12 @@ role() {
     local inode
     inode=$(stat -Lc %i "/run/netns/$1")
     registering=1
+    # sudo may reset umask when dropping privileges. Keep newly provisioned
+    # profiles private inside the role too.
     inside "$1" sudo -n -u "$user" env EON_WAN_ROLE="$2" EON_WAN_PARENT_NS="$parent" EON_WAN_NETNS="$inode" \
         EON_WAN_PATH_PROFILE="$profile" EON_WAN_CUT="$cut_mode" EON_WAN_MEDIA="$media" EON_WAN_DISCOVERY="$discovery" \
-        timeout --kill-after=2s 80s "$exe" \
+        EON_FIELD_EXE="$field_exe" \
+        bash -c 'umask 077; exec "$@"' sh timeout --kill-after=2s 80s "$exe" \
         --ignored --exact wan::netns::iroh_and_qos_tests_nat_path_change --nocapture \
         >"$2.log" 2>&1 &
     jobs+=("$!")
@@ -316,6 +333,43 @@ PY
         inside "$relay" iptables -I OUTPUT -p udp --sport 3478 -d "10.77.0.$outer" -j DROP
     done
     inside "$relay" iptables -A INPUT -s 10.77.0.2 -p udp --sport 41770 --dport 3478
+fi
+if (( field )); then
+    # The field binary gets no fixture hints or additional media transport.
+    # Count sustained data-sized peer UDP, not the QAD probes to the relay.
+    inside "$nb" iptables -I FORWARD -o outer -d 10.77.0.2 -p udp --dport 41770 -m length --length 640:900
+    ipn "$na" route del blackhole 10.77.0.3/32
+    ipn "$nb" route del blackhole 10.77.0.2/32
+    role "$relay" field-relay
+    await_marker ready
+    role "$a" field-a
+    role "$b" field-b
+    for ((i=0; i<200; i++)); do
+        packets=$(inside "$nb" iptables -nvxL FORWARD | awk '/length 640:900/{print $1}')
+        [[ $packets =~ ^[0-9]+$ ]] || exit 1
+        if (( packets >= 24 )); then break; fi
+        for pid in "${jobs[@]}"; do kill -0 "$pid" 2>/dev/null || exit 1; done
+        sleep .15
+    done
+    (( packets >= 24 )) || { echo "no sustained direct UDP before the cut" >&2; exit 1; }
+    touch direct-traffic
+    await_marker field-begin
+    ipn "$a" link del wan0
+    touch cut
+    # Both CLI processes must finish successfully before shutting down the services.
+    wait "${jobs[2]}"
+    wait "${jobs[3]}"
+    touch finished
+    for pid in "${jobs[@]}"; do wait "$pid"; done
+    jobs=()
+    grep -Fx 'eon_continuity_v1 clock=receiver_monotonic' field-receipts.log
+    queued=$(<field-sent.log)
+    [[ $queued =~ ^queued=[1-9][0-9]*$ ]]
+    grep -E "^status=complete bracketed=true limit=1500 $queued " field-receipts.log
+    grep '^relay after interface removal:' field-relay.log
+    cat pkarr.log
+    echo "private_field_capture=PASS direct_udp_packets_before_cut=$packets"
+    exit 0
 fi
 role "$relay" relay
 await_marker ready

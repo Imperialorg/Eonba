@@ -13,6 +13,8 @@ use iroh_relay::{
 use std::{fs, net::Ipv4Addr, os::unix::fs::MetadataExt, path::Path, sync::Arc};
 use tokio::time::{MissedTickBehavior, interval_at, sleep};
 
+mod field;
+
 const IP: Ipv4Addr = Ipv4Addr::new(10, 77, 0, 1);
 const URL: &str = "https://10.77.0.1:8443";
 const MEDIA_URL: &str = "https://10.77.0.1:8444";
@@ -23,12 +25,7 @@ fn mark(name: &str) {
     fs::write(name, []).unwrap();
 }
 
-async fn wait(name: &str) {
-    let deadline = if name == "fallback-a" {
-        Duration::from_secs(65)
-    } else {
-        WAIT
-    };
+async fn wait_for(name: &str, deadline: Duration) {
     timeout(deadline, async {
         while !Path::new(name).exists() {
             assert!(
@@ -40,6 +37,18 @@ async fn wait(name: &str) {
     })
     .await
     .unwrap_or_else(|_| panic!("missing marker {name}"));
+}
+
+async fn wait(name: &str) {
+    wait_for(
+        name,
+        if name == "fallback-a" {
+            Duration::from_secs(65)
+        } else {
+            WAIT
+        },
+    )
+    .await;
 }
 
 fn pin(side: &str) -> EndpointId {
@@ -104,7 +113,7 @@ fn isolated_n0() -> bool {
     std::env::var("EON_WAN_DISCOVERY").as_deref() == Ok("n0")
 }
 
-async fn relay() {
+async fn relay(field: bool) {
     let server = start_relay(8443, !private_stun()).await;
     let media = if media_enabled() {
         Some(start_relay(8444, false).await)
@@ -117,6 +126,17 @@ async fn relay() {
         server.quic_addr()
     );
     mark("ready");
+    if field {
+        wait_for("cut", Duration::from_secs(50)).await;
+        let m = &server.metrics().server;
+        let (rx, tx) = (m.bytes_recv.get(), m.bytes_sent.get());
+        wait_for("finished", Duration::from_secs(50)).await;
+        let (rx, tx) = (m.bytes_recv.get() - rx, m.bytes_sent.get() - tx);
+        println!("relay after interface removal: forwarded_rx={rx} forwarded_tx={tx}");
+        assert!(rx >= CHUNK as u64 && tx >= CHUNK as u64);
+        server.shutdown().await.unwrap();
+        return;
+    }
     wait("fallback-a").await;
     let m = &server.metrics().server;
     let (rx, tx) = (m.bytes_recv.get(), m.bytes_sent.get());
@@ -431,12 +451,7 @@ async fn peer(side: &str) -> EonResult<()> {
         }
         // Published by this device, signed by the correct key, but no longer
         // reachable. The HTTPS store never has to forge a DNS record.
-        let stale = iroh::address_lookup::EndpointInfo::new(me.public())
-            .with_relay_url(iroh::defaults::prod::default_na_west_relay().url)
-            .to_pkarr_signed_packet(&me, 30)
-            .unwrap()
-            .to_relay_payload();
-        fs::write(format!("keys/stale-{side}.pkt"), stale).unwrap();
+        write_stale_record(side, &me);
         let ep = WanEndpoint::open_managed_n0(
             me.clone(),
             peer,
@@ -615,6 +630,15 @@ async fn peer(side: &str) -> EonResult<()> {
     Ok(())
 }
 
+fn write_stale_record(side: &str, me: &SecretKey) {
+    let stale = iroh::address_lookup::EndpointInfo::new(me.public())
+        .with_relay_url(iroh::defaults::prod::default_na_west_relay().url)
+        .to_pkarr_signed_packet(me, 30)
+        .unwrap()
+        .to_relay_payload();
+    fs::write(format!("keys/stale-{side}.pkt"), stale).unwrap();
+}
+
 #[tokio::test]
 #[ignore = "only via scripts/test_wan_nat.sh; requires a disposable isolated topology"]
 async fn iroh_and_qos_tests_nat_path_change() -> EonResult<()> {
@@ -633,8 +657,12 @@ async fn iroh_and_qos_tests_nat_path_change() -> EonResult<()> {
             .and_then(|s| s.parse().ok())
     );
     match std::env::var("EON_WAN_ROLE").unwrap().as_str() {
-        "relay" => {
-            relay().await;
+        role @ ("relay" | "field-relay") => {
+            relay(role == "field-relay").await;
+            Ok(())
+        }
+        role @ ("field-a" | "field-b") => {
+            field::run(role == "field-a").await;
             Ok(())
         }
         role @ ("a" | "b") => peer(role).await,
