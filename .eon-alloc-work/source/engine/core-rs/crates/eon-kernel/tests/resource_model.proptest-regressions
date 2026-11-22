@@ -1,7 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc 84cd5bd8c2332f1bb0461ab6bc39f5230fdc765e633bf2643214dd21cc469b8c # shrinks to ops = [Acquire { priority: 0, cpu: 1, file: 1, write: false }, Acquire { priority: 0, cpu: 1, file: 1, write: true }]

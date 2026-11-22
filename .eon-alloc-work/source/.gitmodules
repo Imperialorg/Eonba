@@ -1,4 +1,0 @@
-[submodule "lean"]
-	path = integrations/lean
-	url = https://github.com/QuantConnect/Lean.git
-	shallow = true
