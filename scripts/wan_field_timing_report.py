@@ -8,6 +8,7 @@ from typing import NamedTuple
 
 
 LIMIT = 1500  # 30-second fixture, 50 nominal send slots/second
+PERIOD_NS = 20_000_000
 PHASES = ("before", "during", "after")
 CLASSES = ("proven_under_5ms", "bound_ge_5ms_inconclusive", "decoded_without_receipt", "peer_missing")
 
@@ -42,16 +43,40 @@ def check_summary(role, actual, **expected):
         require(actual[key] == str(value), f"{role}: inconsistent {key} (expected {value})")
 
 
-def sender_bounds(lines):
-    bounds = {}
+class Send(NamedTuple):
+    slot: int
+    lag_ns: int
+    rtt_ns: int | None
+
+    @property
+    def rtt_upper_us(self):
+        return None if self.rtt_ns is None else (self.rtt_ns + 999) // 1000
+
+    @property
+    def slot_upper_us(self):
+        return None if self.rtt_ns is None else (self.lag_ns + self.rtt_ns + 999) // 1000
+
+
+def sender_samples(lines):
+    samples = {}
+    previous_slot = 0
+    previous_send = None
     for line in lines:
-        row = re.fullmatch(r"seq=([0-9]+) decode_receipt_rtt_upper_us=([0-9]+|unavailable)", line)
+        row = re.fullmatch(r"seq=([0-9]+) slot=([0-9]+) send_lag_ns=([0-9]+) "
+                           r"decode_receipt_rtt_ns=([0-9]+|unavailable)", line)
         require(row, "malformed sender sample")
-        seq = int(row[1])
-        require(1 <= seq <= LIMIT and seq not in bounds, f"invalid or duplicate sender seq={seq}")
-        bounds[seq] = None if row[2] == "unavailable" else int(row[2])
-    require(bounds and bounds.keys() == set(range(1, len(bounds) + 1)), "missing sender sequence")
-    return bounds
+        seq, slot, lag = map(int, row.groups()[:3])
+        require(seq == len(samples) + 1, f"missing or out-of-order sender seq={seq}")
+        require(previous_slot < slot <= LIMIT, f"invalid or duplicate nominal slot={slot}")
+        require(lag < PERIOD_NS, f"launch outside nominal slot={slot}")
+        send_ns = (slot - 1) * PERIOD_NS + lag
+        require(previous_send is None or send_ns - previous_send >= PERIOD_NS,
+                f"compressed inter-send interval at slot={slot}")
+        samples[seq] = Send(slot, lag, None if row[4] == "unavailable" else int(row[4]))
+        previous_slot = slot
+        previous_send = send_ns
+    require(samples, "missing sender samples")
+    return samples
 
 
 def receiver_decodes(lines, queued, media):
@@ -94,13 +119,13 @@ def receiver_decodes(lines, queued, media):
 
 
 def timing_report(sender, receiver, media):
-    tx_rows, tx = split_report(sender, "eon_continuity_timing_v1 clock=sender_monotonic")
+    tx_rows, tx = split_report(sender, "eon_continuity_timing_v2 clock=sender_monotonic")
     rx_rows, rx = split_report(receiver, "eon_continuity_v1 clock=receiver_monotonic")
-    bounds = sender_bounds(tx_rows)
-    queued = len(bounds)
+    samples = sender_samples(tx_rows)
+    queued = len(samples)
     decodes, max_gap, marked_gap = receiver_decodes(rx_rows, queued, media)
     before = [seq for seq, (phase, _) in decodes.items() if phase == "before"]
-    ack = {seq for seq, bound in bounds.items() if bound is not None}
+    ack = {seq for seq, sample in samples.items() if sample.rtt_upper_us is not None}
     require(ack <= decodes.keys(), "acknowledgment without a receiver decode for that sequence")
     require(ack.intersection(before), "no acknowledged decode before removal")
     highest_before = max(before)
@@ -109,10 +134,11 @@ def timing_report(sender, receiver, media):
 
     unique = len(decodes)
     missing = queued - unique
-    max_bound = max(bounds[s] for s in ack)
+    max_bound = max(samples[s].rtt_upper_us for s in ack)
     if media:
         require(not missing, "redundant run has missing decodes")
-        require(("after", "standby_copy") in decodes.values(), "no standby-first decode after removal")
+        require(any(seq > highest_before and obs == ("after", "standby_copy")
+                    for seq, obs in decodes.items()), "no standby-first decode of a fresh probe after removal")
 
     common = dict(status="complete", limit=LIMIT, queued=queued, skipped=LIMIT - queued)
     # Raw duplicate packets are not additional first-decode rows.
@@ -125,10 +151,10 @@ def timing_report(sender, receiver, media):
                   invalid_returns=0)
 
     counts = {phase: Counter() for phase in (*PHASES, "no_decode", "all")}
-    out = [f"eon_field_timing_join_v2 threshold_us=5000 redundant_media={int(media)}"]
-    for seq in range(1, queued + 1):
+    out = [f"eon_field_timing_join_v3 threshold_us=5000 redundant_media={int(media)}"]
+    for seq, sample in samples.items():
         phase, via = decodes.get(seq, ("no_decode", "none"))
-        bound = bounds[seq]
+        bound = sample.slot_upper_us
         if phase == "no_decode":
             kind = "peer_missing"
         elif bound is None:
@@ -137,8 +163,9 @@ def timing_report(sender, receiver, media):
             kind = "proven_under_5ms" if bound < 5000 else "bound_ge_5ms_inconclusive"
         counts[phase][kind] += 1
         counts["all"][kind] += 1
-        out.append(f"seq={seq} phase={phase} via={via} "
-                   f"decode_receipt_rtt_upper_us={bound if bound is not None else 'unavailable'} deadline={kind}")
+        out.append(f"seq={seq} slot={sample.slot} phase={phase} via={via} send_lag_ns={sample.lag_ns} "
+                   f"decode_receipt_rtt_upper_us={sample.rtt_upper_us if bound is not None else 'unavailable'} "
+                   f"slot_to_receipt_upper_us={bound if bound is not None else 'unavailable'} deadline={kind}")
     for phase, tally in counts.items():
         out.append(f"phase={phase} sequences={sum(tally.values())} " +
                    " ".join(f"{kind}={tally[kind]}" for kind in CLASSES))
@@ -147,7 +174,10 @@ def timing_report(sender, receiver, media):
     all_slots = proven == LIMIT
     out.append(f"evidence_verification=verified limit={LIMIT} queued={queued} skipped={LIMIT - queued} "
                f"acknowledged={len(ack)} unacknowledged={queued - len(ack)} "
-               f"max_decode_receipt_rtt_upper_us={max_bound} invalid_returns=0 all_queued_under_5ms={all_queued}")
+               f"max_decode_receipt_rtt_upper_us={max_bound} "
+               f"max_slot_to_receipt_upper_us={max(samples[s].slot_upper_us for s in ack)} "
+               f"launch_ge_5ms={sum(s.lag_ns >= 5_000_000 for s in samples.values())} "
+               f"invalid_returns=0 all_queued_under_5ms={all_queued}")
     out.append(f"deadline_verdict={'proven' if all_slots else 'not_proven'} scope=all_nominal_slots "
                f"threshold_us=5000 proven_slots={proven} total_slots={LIMIT} unproven_slots={LIMIT - proven} "
                f"skipped={LIMIT - queued} unacknowledged={queued - len(ack)} "

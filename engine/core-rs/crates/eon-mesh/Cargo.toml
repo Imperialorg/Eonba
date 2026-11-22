@@ -28,7 +28,7 @@ prost = "0.14.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
 sha2 = { version = "0.10", optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 
 [dev-dependencies]
 eon-cli = { path = "../eon-cli" }
@@ -38,7 +38,7 @@ iroh-relay = { version = "1.4", features = ["server"] }
 tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { version = "1.1.6", features = ["fs", "process", "termios"] }
+rustix = { version = "1.1.6", features = ["fs", "process", "termios", "time"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 rustix = { version = "1.1.6", features = ["pty", "time"] }

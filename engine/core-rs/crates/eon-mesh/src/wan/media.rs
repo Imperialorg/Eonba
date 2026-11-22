@@ -15,6 +15,14 @@ pub(super) fn tagged(packet: &[u8]) -> bool {
     packet.first() == Some(&COPY_ID_KEY)
 }
 
+pub(super) fn unpack_copy(packet: Bytes) -> EonResult<(u64, Bytes)> {
+    if !tagged(&packet) || !(PREFIX..=MAX_AUDIO).contains(&packet.len()) {
+        return Err(invalid("invalid redundant datagram"));
+    }
+    let id = u64::from_le_bytes(packet[1..PREFIX].try_into().unwrap());
+    Ok((id, packet.slice(PREFIX..)))
+}
+
 /// Which local DATAGRAM queues accepted an explicitly duplicated frame.
 /// Neither flag is a delivery receipt.
 #[derive(Debug, PartialEq, Eq)]
@@ -232,7 +240,7 @@ impl MediaLane {
         self.endpoint.close().await;
     }
 
-    pub(super) async fn recv(&self, primary: &Connection) -> EonResult<(AudioPcmChunk, Arrival)> {
+    pub(super) async fn read_packet(&self, primary: &Connection) -> EonResult<(Bytes, bool)> {
         loop {
             check_open(primary)?;
             let (packet, standby) = tokio::select! {
@@ -244,17 +252,21 @@ impl MediaLane {
                 }
             };
             check_open(primary)?;
+            return Ok((packet, standby));
+        }
+    }
+
+    pub(super) async fn recv(&self, primary: &Connection) -> EonResult<(AudioPcmChunk, Arrival)> {
+        loop {
+            let (packet, standby) = self.read_packet(primary).await?;
             if !tagged(&packet) {
                 if standby {
                     return Err(invalid("untagged standby datagram"));
                 }
                 return Ok((wire::decode_audio(packet)?, Arrival::Primary));
             }
-            if !(PREFIX..=MAX_AUDIO).contains(&packet.len()) {
-                return Err(invalid("invalid redundant datagram size"));
-            }
-            let id = u64::from_le_bytes(packet[1..PREFIX].try_into().unwrap());
-            let pcm = wire::decode_audio(packet.slice(PREFIX..))?;
+            let (id, payload) = unpack_copy(packet)?;
+            let pcm = wire::decode_audio(payload)?;
             if self.received.lock().unwrap().admit(id) {
                 return Ok((
                     pcm,

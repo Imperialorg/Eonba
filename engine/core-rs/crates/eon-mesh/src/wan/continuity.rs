@@ -8,6 +8,9 @@ use super::{Arrival, AudioPcmChunk, Bytes, Duration, ReliableFrame, TrafficClass
 use ring::rand::{SecureRandom, SystemRandom};
 use tokio::time::{sleep_until, timeout};
 
+#[cfg(target_os = "linux")]
+mod timer;
+
 const PERIOD: Duration = Duration::from_millis(20);
 const CONTROL_WAIT: Duration = Duration::from_secs(10);
 const DRAIN: Duration = Duration::from_millis(500);
@@ -57,7 +60,8 @@ impl CapturePlan {
         }
     }
 
-    /// Both operators opt into primary-only return traffic after first decode.
+    /// Both operators opt into challenge returns after first decode, using
+    /// bound Class 0 copies in both directions only in the matching copy plan.
     pub fn with_decode_receipts(self) -> Self {
         Self {
             timing: true,
@@ -70,14 +74,14 @@ impl CapturePlan {
             (false, false) => READY,
             (false, true) => READY_COPIES,
             (true, false) => b"eon/continuity/2/challenge/ready",
-            (true, true) => b"eon/continuity/2/challenge/ready-bound-copies",
+            (true, true) => b"eon/continuity/3/challenge/ready-bidirectional-copies",
         };
         control(tag, self.limit())
     }
 
     fn timed_start(self) -> ReliableFrame {
         let tag: &[u8] = if self.copies {
-            b"eon/continuity/2/challenge/start-bound-copies"
+            b"eon/continuity/3/challenge/start-bidirectional-copies"
         } else {
             b"eon/continuity/2/challenge/start"
         };
@@ -106,13 +110,15 @@ fn control(tag: &[u8], count: u32) -> ReliableFrame {
     }
 }
 
-/// Queue consecutive sequences at least 20 ms apart, never catch up in bursts.
+/// Queue consecutive sequences on a 20 ms cadence; expired slots are not replayed.
 /// Consumes the endpoint: another capture requires fresh provisioning/consent.
 pub async fn transmit(ep: WanEndpoint, plan: CapturePlan) -> Result<u32, &'static str> {
     transmit_observed(ep, plan).await.result()
 }
 
 struct SentProbe {
+    slot: u32,
+    lag: Duration,
     sent: Instant,
     challenge: Challenge,
     bound: Option<Duration>,
@@ -134,8 +140,9 @@ impl Transmission {
         self.status.map(|()| self.queued)
     }
 
-    fn record_echo(&mut self, packet: Bytes, now: Instant) {
-        if !super::media::tagged(&packet)
+    fn record_echo(&mut self, packet: super::EonResult<Bytes>, now: Instant) {
+        if let Ok(packet) = packet
+            && !super::media::tagged(&packet)
             && let Ok(pcm) = super::wire::decode_audio(packet)
             && pcm.timestamp_ms == 0
             && let Ok(seq) = usize::try_from(pcm.sequence_number)
@@ -158,7 +165,7 @@ impl Transmission {
     // deadline or reliable exchange first; don't cancel a partially read stream.
     async fn observe_until<T>(
         &mut self,
-        mut read_primary: impl AsyncFnMut() -> Option<Bytes>,
+        mut read_return: impl AsyncFnMut() -> Option<super::EonResult<Bytes>>,
         until: impl Future<Output = T>,
     ) -> T {
         if self.samples.is_empty() {
@@ -169,9 +176,8 @@ impl Transmission {
             tokio::select! {
                 biased;
                 done = &mut until => return done,
-                packet = read_primary() => {
-                    // Receipts are primary-only. Only a transport close ends
-                    // this read loop; a bad datagram consumes just that packet.
+                packet = read_return() => {
+                    // A bad datagram consumes just that packet.
                     let Some(packet) = packet else { return until.await };
                     self.record_echo(packet, Instant::now());
                 }
@@ -182,7 +188,7 @@ impl Transmission {
 
 impl fmt::Display for Transmission {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "eon_continuity_timing_v1 clock=sender_monotonic")?;
+        writeln!(f, "eon_continuity_timing_v2 clock=sender_monotonic")?;
         // Round up so the printed upper bound never understates the RTT.
         let upper_us = |rtt: Option<Duration>| {
             rtt.map_or_else(
@@ -196,9 +202,13 @@ impl fmt::Display for Transmission {
             max = max.max(probe.bound);
             writeln!(
                 f,
-                "seq={} decode_receipt_rtt_upper_us={}",
+                "seq={} slot={} send_lag_ns={} decode_receipt_rtt_ns={}",
                 i + 1,
-                upper_us(probe.bound)
+                probe.slot,
+                probe.lag.as_nanos(),
+                probe
+                    .bound
+                    .map_or_else(|| "unavailable".into(), |d| d.as_nanos().to_string())
             )?;
         }
         let timing = if acknowledged == 0 {
@@ -228,7 +238,11 @@ pub async fn transmit_observed(ep: WanEndpoint, plan: CapturePlan) -> Transmissi
         status: Ok(()),
         limit: plan.limit(),
         queued: 0,
-        samples: Vec::new(),
+        samples: Vec::with_capacity(if plan.timing {
+            plan.limit() as usize
+        } else {
+            0
+        }),
         invalid_returns: 0,
         peer_unique: None,
     };
@@ -236,6 +250,44 @@ pub async fn transmit_observed(ep: WanEndpoint, plan: CapturePlan) -> Transmissi
         if plan.copies && ep.media.is_none() {
             return Err("missing_bound_standby");
         }
+        #[cfg(target_os = "linux")]
+        let timer = plan
+            .timing
+            .then(timer::SlotTimer::new)
+            .transpose()
+            .map_err(|_| "slot_timer_unavailable")?;
+        let wait_until = async |at: Instant| -> Result<(), &'static str> {
+            #[cfg(target_os = "linux")]
+            if let Some(timer) = &timer {
+                return timer.wait(at).await.map_err(|_| "slot_timer_failed");
+            }
+            sleep_until(at.into()).await;
+            Ok(())
+        };
+        let mut frame = AudioPcmChunk {
+            pcm_data: SILENCE.to_vec(),
+            ..Default::default()
+        };
+        let rng = SystemRandom::new();
+        if plan.timing {
+            frame.pcm_data[..TIMED_PREFIX.len()].copy_from_slice(TIMED_PREFIX);
+        }
+        let read_return = async || {
+            let packet = if plan.copies {
+                let lane = ep.media.as_ref()?;
+                let packet = match lane.read_packet(&ep.conn).await {
+                    Ok((packet, _)) => packet,
+                    // Primary close revokes standby reads. Already buffered
+                    // primary returns can still be accounted for at shutdown.
+                    Err(_) => ep.conn.read_datagram().await.ok()?,
+                };
+                super::media::unpack_copy(packet).map(|(_, payload)| payload)
+            } else {
+                Ok(ep.conn.read_datagram().await.ok()?)
+            };
+            ep.budget.observe(TrafficClass::Audio);
+            Some(packet)
+        };
         let ready = timeout(CONTROL_WAIT, ep.recv())
             .await
             .map_err(|_| "ready_timeout")?
@@ -256,35 +308,34 @@ pub async fn transmit_observed(ep: WanEndpoint, plan: CapturePlan) -> Transmissi
                 return Err("invalid_started_or_plan");
             }
         }
-        let mut frame = AudioPcmChunk {
-            pcm_data: SILENCE.to_vec(),
-            ..Default::default()
-        };
-        let rng = SystemRandom::new();
-        if plan.timing {
-            frame.pcm_data[..TIMED_PREFIX.len()].copy_from_slice(TIMED_PREFIX);
-        }
-        let read_primary = async || {
-            let packet = ep.conn.read_datagram().await.ok()?;
-            ep.budget.observe(TrafficClass::Audio);
-            Some(packet)
-        };
-        let stop = Instant::now() + plan.span();
-        while out.queued < plan.limit() && Instant::now() < stop {
+        // One sender-local epoch after the peer's application-level barrier.
+        let start = Instant::now();
+        let stop = start + plan.span();
+        let mut slot = 0;
+        let mut due = start;
+        let mut not_before = start; // hard floor between actual send starts
+        while slot < out.limit && due < stop {
             frame.sequence_number = i64::from(out.queued + 1);
-            let sample = if plan.timing {
-                let mut challenge = Challenge::default();
+            let mut challenge = Challenge::default();
+            if plan.timing {
                 rng.fill(&mut challenge)
                     .map_err(|_| "challenge_unavailable")?;
                 frame.pcm_data[CHALLENGE].copy_from_slice(&challenge);
-                Some(SentProbe {
-                    sent: Instant::now(), // before encoding or enqueueing either copy
-                    challenge,
-                    bound: None,
-                })
-            } else {
-                None
-            };
+            }
+            let wake = due.max(not_before).min(stop);
+            while Instant::now() < wake {
+                out.observe_until(&read_return, wait_until(wake)).await?;
+            }
+            let sent = Instant::now(); // before encoding or enqueueing either copy
+            if sent >= stop {
+                break;
+            }
+            if plan.timing && sent >= due + PERIOD {
+                // All expired slots remain holes. Service the one open slot;
+                // not_before prevents a compressed second send even at its edge.
+                slot = (sent.duration_since(start).as_nanos() / PERIOD.as_nanos()) as u32;
+                due = start + PERIOD * slot;
+            }
             if plan.copies {
                 ep.send_redundant_audio(&frame).map(|_| ())
             } else {
@@ -292,11 +343,24 @@ pub async fn transmit_observed(ep: WanEndpoint, plan: CapturePlan) -> Transmissi
             }
             .map_err(|_| "audio_queue_failed")?;
             out.queued += 1;
-            if let Some(sample) = sample {
-                out.samples.push(sample);
-            }
-            let next = sleep_until((Instant::now() + PERIOD).min(stop).into());
-            out.observe_until(&read_primary, next).await;
+            slot += 1;
+            not_before = sent + PERIOD;
+            due = if plan.timing {
+                out.samples.push(SentProbe {
+                    slot,
+                    lag: sent.duration_since(due),
+                    sent,
+                    challenge,
+                    bound: None,
+                });
+                start + PERIOD * slot
+            } else {
+                Instant::now() + PERIOD // legacy minimum inter-send interval
+            };
+        }
+        // Filling the last slot does not end the negotiated capture span early.
+        while Instant::now() < stop {
+            out.observe_until(&read_return, wait_until(stop)).await?;
         }
         let queued = out.queued;
         let finish = async {
@@ -309,7 +373,7 @@ pub async fn transmit_observed(ep: WanEndpoint, plan: CapturePlan) -> Transmissi
                 .map_err(|_| "drain_timeout")?
                 .map_err(|_| "drain_failed")
         };
-        let unique = match out.observe_until(&read_primary, finish).await? {
+        let unique = match out.observe_until(&read_return, finish).await? {
             ReliableFrame::Bulk { index, bytes }
                 if plan.timing && bytes == TIMED_DRAINED && index <= queued =>
             {
@@ -320,9 +384,19 @@ pub async fn transmit_observed(ep: WanEndpoint, plan: CapturePlan) -> Transmissi
         };
         // The receiver closes after its reliable DRAINED receipt. A late echo
         // is not that close and must not race the reliable receipt off the wire.
-        let _ = out
-            .observe_until(&read_primary, timeout(CONTROL_WAIT, ep.conn.closed()))
-            .await;
+        if plan.timing {
+            let deadline = Instant::now() + CONTROL_WAIT;
+            while Instant::now() < deadline {
+                let Ok(Some(packet)) =
+                    tokio::time::timeout_at(deadline.into(), read_return()).await
+                else {
+                    break;
+                };
+                out.record_echo(packet, Instant::now());
+            }
+        } else {
+            let _ = timeout(CONTROL_WAIT, ep.conn.closed()).await;
+        }
         if unique.is_some_and(|n| out.acknowledged() > n) {
             return Err("inconsistent_decode_count");
         }
@@ -456,7 +530,7 @@ pub async fn receive(
         limit,
         timing: false,
         queued: None,
-        receipts: Vec::new(),
+        receipts: Vec::with_capacity(limit as usize),
         duplicates: 0,
         marks: Vec::new(),
     };
@@ -545,14 +619,18 @@ pub async fn receive(
                         out.duplicates = out.duplicates.saturating_add(1);
                     } else {
                         out.receipts.push((seq, at, via));
-                        if let Some(arm) = arm.take() { marks = Some(arm()); }
                         if let Some(echo) = &mut echo {
-                            // Best effort on the primary even for a standby-first
-                            // decode. Failure to queue a return is not forward loss.
                             echo.sequence_number = pcm.sequence_number;
                             echo.pcm_data.copy_from_slice(&pcm.pcm_data[CHALLENGE]);
-                            let _ = ep.send_audio(echo);
+                            // A Class 0 return, not a reliable application frame.
+                            // Never wait, retry, or infer delivery from enqueue.
+                            if plan.copies {
+                                let _ = ep.send_redundant_audio(echo);
+                            } else {
+                                let _ = ep.send_audio(echo);
+                            }
                         }
+                        if let Some(arm) = arm.take() { marks = Some(arm()); }
                     }
                 }
             }
@@ -613,6 +691,8 @@ mod timing_tests {
             queued: 3,
             samples: (1..=3)
                 .map(|i| SentProbe {
+                    slot: i.into(),
+                    lag: Duration::ZERO,
                     sent: start,
                     challenge: [i; 16],
                     bound: None,
@@ -627,7 +707,7 @@ mod timing_tests {
             ..Default::default()
         };
         let at = start + Duration::from_nanos(5_000_001);
-        let packet = |pcm: &AudioPcmChunk| Bytes::from(pcm.encode_to_vec());
+        let packet = |pcm: &AudioPcmChunk| Ok(Bytes::from(pcm.encode_to_vec()));
         for seq in [-1, 0, 4, i64::MAX] {
             pcm.sequence_number = seq;
             out.record_echo(packet(&pcm), at);
@@ -640,7 +720,7 @@ mod timing_tests {
             pcm.pcm_data = wrong;
             out.record_echo(packet(&pcm), at);
         }
-        out.record_echo(Bytes::from_static(&[0xff]), at); // undecodable wire
+        out.record_echo(Ok(Bytes::from_static(&[0xff])), at); // undecodable wire
         assert!(out.to_string().contains("timing=unavailable"));
         assert_eq!(out.invalid_returns, 10);
 
@@ -649,8 +729,8 @@ mod timing_tests {
         out.record_echo(packet(&pcm), at + PERIOD);
         assert_eq!(out.invalid_returns, 10); // valid duplicate isn't malformed
         let report = out.to_string();
-        assert!(report.contains("seq=2 decode_receipt_rtt_upper_us=5001\n"));
-        assert!(report.contains("seq=1 decode_receipt_rtt_upper_us=unavailable\n"));
+        assert!(report.contains("seq=2 slot=2 send_lag_ns=0 decode_receipt_rtt_ns=5000001\n"));
+        assert!(report.contains("seq=1 slot=1 send_lag_ns=0 decode_receipt_rtt_ns=unavailable\n"));
         assert!(report.contains(
             "skipped=47 acknowledged=1 unacknowledged=2 peer_missing=1 decoded_without_receipt=1"
         ));
@@ -663,6 +743,8 @@ mod timing_tests {
             limit: 50,
             queued: 1,
             samples: vec![SentProbe {
+                slot: 1,
+                lag: Duration::ZERO,
                 sent: Instant::now(),
                 challenge: [7; 16],
                 bound: None,
@@ -683,7 +765,7 @@ mod timing_tests {
             if packet.is_none() {
                 done.take().unwrap().send(()).unwrap();
             }
-            packet
+            packet.map(Ok)
         };
         timeout(Duration::from_secs(1), out.observe_until(read, wait))
             .await

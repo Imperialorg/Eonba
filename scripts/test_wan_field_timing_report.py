@@ -4,12 +4,12 @@ from unittest.mock import patch
 from wan_field_timing_report import timing_report
 
 
-SENT = """eon_continuity_timing_v1 clock=sender_monotonic
-seq=1 decode_receipt_rtt_upper_us=4999
-seq=2 decode_receipt_rtt_upper_us=60000
-seq=3 decode_receipt_rtt_upper_us=5000
-seq=4 decode_receipt_rtt_upper_us=unavailable
-seq=5 decode_receipt_rtt_upper_us=unavailable
+SENT = """eon_continuity_timing_v2 clock=sender_monotonic
+seq=1 slot=1 send_lag_ns=1000 decode_receipt_rtt_ns=4998000
+seq=2 slot=2 send_lag_ns=1000 decode_receipt_rtt_ns=60000000
+seq=3 slot=4 send_lag_ns=1 decode_receipt_rtt_ns=4999000
+seq=4 slot=5 send_lag_ns=1 decode_receipt_rtt_ns=unavailable
+seq=5 slot=6 send_lag_ns=1 decode_receipt_rtt_ns=unavailable
 status=complete timing=observed limit=1500 queued=5 skipped=1495 acknowledged=3 unacknowledged=2 peer_missing=1 decoded_without_receipt=1 max_decode_receipt_rtt_upper_us=60000 invalid_returns=0
 """
 RECEIVED = """eon_continuity_v1 clock=receiver_monotonic
@@ -28,11 +28,11 @@ class FieldTimingReportTests(unittest.TestCase):
         result = timing_report(SENT, RECEIVED, False)
         rows = result.text.splitlines()
         for row in [
-            "seq=1 phase=before via=primary decode_receipt_rtt_upper_us=4999 deadline=proven_under_5ms",
-            "seq=2 phase=after via=primary decode_receipt_rtt_upper_us=60000 deadline=bound_ge_5ms_inconclusive",
-            "seq=3 phase=during via=primary decode_receipt_rtt_upper_us=5000 deadline=bound_ge_5ms_inconclusive",
-            "seq=4 phase=no_decode via=none decode_receipt_rtt_upper_us=unavailable deadline=peer_missing",
-            "seq=5 phase=after via=primary decode_receipt_rtt_upper_us=unavailable deadline=decoded_without_receipt",
+            "seq=1 slot=1 phase=before via=primary send_lag_ns=1000 decode_receipt_rtt_upper_us=4998 slot_to_receipt_upper_us=4999 deadline=proven_under_5ms",
+            "seq=2 slot=2 phase=after via=primary send_lag_ns=1000 decode_receipt_rtt_upper_us=60000 slot_to_receipt_upper_us=60001 deadline=bound_ge_5ms_inconclusive",
+            "seq=3 slot=4 phase=during via=primary send_lag_ns=1 decode_receipt_rtt_upper_us=4999 slot_to_receipt_upper_us=5000 deadline=bound_ge_5ms_inconclusive",
+            "seq=4 slot=5 phase=no_decode via=none send_lag_ns=1 decode_receipt_rtt_upper_us=unavailable slot_to_receipt_upper_us=unavailable deadline=peer_missing",
+            "seq=5 slot=6 phase=after via=primary send_lag_ns=1 decode_receipt_rtt_upper_us=unavailable slot_to_receipt_upper_us=unavailable deadline=decoded_without_receipt",
             "phase=all sequences=5 proven_under_5ms=1 bound_ge_5ms_inconclusive=2 decoded_without_receipt=1 peer_missing=1",
         ]:
             self.assertIn(row, rows)
@@ -46,15 +46,15 @@ class FieldTimingReportTests(unittest.TestCase):
     def test_no_during_decode_or_sub_5ms_bound_is_required(self):
         rx = (RECEIVED.replace("mark=begin rx_us=30000", "mark=begin rx_us=2000")
               .replace("mark=end rx_us=70000", "mark=end rx_us=3000").replace("phase=during", "phase=after"))
-        report = timing_report(SENT.replace("=4999", "=5000"), rx, False).text
+        report = timing_report(SENT.replace("=4998000", "=4999000"), rx, False).text
         self.assertIn("phase=during sequences=0 ", report)
         self.assertIn("phase=all sequences=5 proven_under_5ms=0 bound_ge_5ms_inconclusive=3 ", report)
 
     def test_strict_proof_requires_every_nominal_slot_not_just_every_queued_sequence(self):
-        tx = """eon_continuity_timing_v1 clock=sender_monotonic
-seq=1 decode_receipt_rtt_upper_us=1000
-seq=2 decode_receipt_rtt_upper_us=4999
-seq=3 decode_receipt_rtt_upper_us=4000
+        tx = """eon_continuity_timing_v2 clock=sender_monotonic
+seq=1 slot=1 send_lag_ns=0 decode_receipt_rtt_ns=1000000
+seq=2 slot=2 send_lag_ns=0 decode_receipt_rtt_ns=4999000
+seq=3 slot=3 send_lag_ns=1000 decode_receipt_rtt_ns=4000000
 status=complete timing=observed limit=1500 queued=3 skipped=1497 acknowledged=3 unacknowledged=0 peer_missing=0 decoded_without_receipt=0 max_decode_receipt_rtt_upper_us=4999 invalid_returns=0
 """
         rx = """eon_continuity_v1 clock=receiver_monotonic
@@ -77,10 +77,10 @@ status=complete bracketed=true limit=1500 queued=3 unique=3 missing=0 duplicates
             result = timing_report(tx, rx, False)
             self.assertIn("deadline_verdict=proven ", result.text)
             self.assertEqual(result.exit_code(True), 0)
-            result = timing_report(tx.replace("=4999", "=5000"), rx, False)
+            result = timing_report(tx.replace("slot=2 send_lag_ns=0", "slot=2 send_lag_ns=1000"), rx, False)
             self.assertIn("bound_ge_5ms_inconclusive=1", result.text)
             self.assertEqual(result.exit_code(True), 3)
-            no_return = (tx.replace("=4000", "=unavailable").replace("acknowledged=3 unacknowledged=0",
+            no_return = (tx.replace("=4000000", "=unavailable").replace("acknowledged=3 unacknowledged=0",
                          "acknowledged=2 unacknowledged=1").replace("decoded_without_receipt=0", "decoded_without_receipt=1"))
             result = timing_report(no_return, rx, False)
             self.assertIn("unproven_slots=1 skipped=0 unacknowledged=1 bound_ge_5ms_inconclusive=0", result.text)
@@ -88,8 +88,12 @@ status=complete bracketed=true limit=1500 queued=3 unique=3 missing=0 duplicates
 
     def test_missing_or_inconsistent_sender_evidence_fails(self):
         for old, new in [
-            ("eon_continuity_timing_v1 clock=sender_monotonic", "queued=5"),
-            ("seq=4 decode_receipt_rtt_upper_us=unavailable\n", ""),
+            ("eon_continuity_timing_v2", "eon_continuity_timing_v1"),
+            ("seq=4 slot=5 send_lag_ns=1 decode_receipt_rtt_ns=unavailable\n", ""),
+            ("slot=2 send_lag_ns=1000", "slot=2 send_lag_ns=999"),
+            ("slot=4 ", "slot=2 "),
+            ("slot=6 ", "slot=1501 "),
+            ("send_lag_ns=1000 ", "send_lag_ns=20000000 "),
             ("seq=3 ", "seq=2 "),
             ("seq=1 ", "seq=0 "),
             ("seq=5 ", "seq=1501 "),
@@ -115,13 +119,12 @@ status=complete bracketed=true limit=1500 queued=3 unique=3 missing=0 duplicates
             timing_report(SENT, RECEIVED.replace("seq=3 ", "seq=4 "), False)
 
     def test_capture_and_timing_must_bracket_the_removal(self):
-        for seq, bound, error in [(1, 4999, "before removal"), (2, 60000, "after removal")]:
-            tx = SENT.replace(f"seq={seq} decode_receipt_rtt_upper_us={bound}",
-                              f"seq={seq} decode_receipt_rtt_upper_us=unavailable")
+        for seq, bound, error in [(1, 4998000, "before removal"), (2, 60000000, "after removal")]:
+            tx = SENT.replace(f"decode_receipt_rtt_ns={bound}", "decode_receipt_rtt_ns=unavailable")
             tx = (tx.replace("acknowledged=3 unacknowledged=2", "acknowledged=2 unacknowledged=3")
                   .replace("decoded_without_receipt=1", "decoded_without_receipt=2"))
             if seq == 2:
-                tx = tx.replace("max_decode_receipt_rtt_upper_us=60000", "max_decode_receipt_rtt_upper_us=5000")
+                tx = tx.replace("max_decode_receipt_rtt_upper_us=60000", "max_decode_receipt_rtt_upper_us=4999")
             with self.subTest(seq=seq), self.assertRaisesRegex(ValueError, error):
                 timing_report(tx, RECEIVED, False)
         # There is a post-mark echo, but only for a reordered older sequence.
@@ -161,7 +164,7 @@ status=complete bracketed=true limit=1500 queued=3 unique=3 missing=0 duplicates
         rx = copies.replace("status=", "seq=4 rx_us=100000 gap_us=5000 phase=after via=primary_copy\nstatus=")
         rx = rx.replace("unique=4 missing=1", "unique=5 missing=0")
         tx = SENT.replace("peer_missing=1 decoded_without_receipt=1", "peer_missing=0 decoded_without_receipt=2")
-        self.assertIn("seq=5 phase=after via=standby_copy decode_receipt_rtt_upper_us=unavailable",
+        self.assertIn("seq=5 slot=6 phase=after via=standby_copy send_lag_ns=1 decode_receipt_rtt_upper_us=unavailable",
                       timing_report(tx, rx, True).text)
         with self.assertRaisesRegex(ValueError, "no standby-first"):
             timing_report(tx, rx.replace("via=standby_copy", "via=primary_copy"), True)
