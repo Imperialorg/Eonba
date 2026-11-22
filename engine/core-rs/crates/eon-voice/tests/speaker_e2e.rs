@@ -1,4 +1,4 @@
-//! End-to-end speaker check with the pinned WeSpeaker ResNet34 model.
+//! End-to-end speaker check with an explicitly selected pinned speaker model.
 //!
 //! Real speech from the upstream `en.wav` fixture is split into two halves. Both halves come from the same speaker, so
 //! they must score above the gate threshold. The assistant's own Kokoro voice is a different speaker, and it must score
@@ -22,7 +22,7 @@ mod switch;
 mod private_monitor;
 
 use eon_voice::resample::{CaptureFrames, resample_mono};
-use eon_voice::speaker::{SpeakerEmbedder, SpeakerGate, cosine};
+use eon_voice::speaker::{SpeakerEmbedder, SpeakerEmbedding, SpeakerEncoder, SpeakerGate, cosine};
 use eon_voice::tts::{KokoroTts, SAMPLE_RATE_HZ as TTS_RATE};
 use eon_voice::{
     TaskId,
@@ -39,6 +39,17 @@ fn models() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../perception/models")
 }
 
+fn load_speaker() -> SpeakerEmbedder {
+    let (encoder, file) = match std::env::var("EON_SPEAKER_MODEL").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("wespeaker-resnet34") =>
+            (SpeakerEncoder::WeSpeakerResNet34LmV1, "speaker/wespeaker_resnet34.onnx"),
+        Ok("camplusplus-zh-en-advanced") =>
+            (SpeakerEncoder::CamPlusPlusZhEnAdvancedV1, "speaker/camplusplus_zh_en_advanced.onnx"),
+        _ => panic!("unknown EON_SPEAKER_MODEL; refusing to substitute another speaker encoder"),
+    };
+    SpeakerEmbedder::load_for(encoder, models().join(file)).expect("pinned speaker model must load")
+}
+
 fn fixture() -> Vec<f32> {
     common::read_pcm16_mono_16k(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/en.wav"))
 }
@@ -51,8 +62,43 @@ fn owner_recording() -> Vec<f32> {
 }
 
 #[test]
+fn mismatched_capture_encoder_is_an_error_before_vad_state_changes() {
+    let mut speaker = load_speaker();
+    let other = match speaker.encoder() {
+        SpeakerEncoder::WeSpeakerResNet34LmV1 => SpeakerEncoder::CamPlusPlusZhEnAdvancedV1,
+        SpeakerEncoder::CamPlusPlusZhEnAdvancedV1 => SpeakerEncoder::WeSpeakerResNet34LmV1,
+    };
+    let enrollment = SpeakerEmbedding::from_values(other, &vec![1.0; other.dimension()]).unwrap();
+    let signal = BargeIn::new();
+    let gate = SpeakerGate::enroll(&enrollment, 0.35).unwrap();
+    let mut coordinator = BargeInCoordinator::new(TaskId::new(), signal.clone(), gate);
+    let mut vad = SileroVad::load(models().join("vad/silero_vad.onnx")).unwrap();
+    let frame = [0.0; eon_voice::geometry::VAD_FRAME_SAMPLES];
+    let first = vad.speech_probability(&frame).unwrap();
+    let second = vad.speech_probability(&frame).unwrap();
+    assert_ne!(first, second, "the probe must distinguish recurrent VAD states");
+    let mut journal = Vec::new();
+    let (mut tx, mut rx) = pcm_ring(1);
+    for playing in [false, true] {
+        vad.reset();
+        assert_eq!(vad.speech_probability(&frame).unwrap(), first);
+        if playing {
+            tx.push_slice(&[0.1]);
+            signal.render(&mut rx, &mut [0.0]);
+        }
+        assert_eq!(signal.is_playing(), playing);
+        let result = coordinator.observe_capture(&frame, &mut vad, &mut speaker, 0, &mut journal);
+        assert!(matches!(result, Err(eon_voice::EonError::ValidationError(_))));
+        // Neither an idle reset nor an active-frame inference consumed the state.
+        assert_eq!(vad.speech_probability(&frame).unwrap(), second);
+    }
+    assert!(journal.is_empty() && coordinator.interruption().is_none() && !signal.is_muted());
+}
+
+#[test]
 fn recorded_capture_and_render_rings_make_one_auditable_owner_decision() {
-    let mut speaker = SpeakerEmbedder::load(models().join("speaker/wespeaker_resnet34.onnx")).unwrap();
+    let mut speaker = load_speaker();
+    eprintln!("recorded speaker model: {}", speaker.encoder().model_id());
     let speech = owner_recording();
     let half = speech.len() / 2;
     let gate = SpeakerGate::enroll(&speaker.embed(&speech[..half]).unwrap(), 0.35).unwrap();
@@ -146,7 +192,7 @@ fn virtual_cpal_capture_verifies_speech_and_mutes_the_reply() {
     private_monitor::require_null_sink();
     let speech = owner_recording();
     let half = speech.len() / 2;
-    let mut speaker = SpeakerEmbedder::load(models().join("speaker/wespeaker_resnet34.onnx")).unwrap();
+    let mut speaker = load_speaker();
     let owner = SpeakerGate::enroll(&speaker.embed(&speech[..half]).unwrap(), 0.35).unwrap();
     let vad = SileroVad::load(models().join("vad/silero_vad.onnx")).unwrap();
     let task = TaskId::new();
@@ -220,8 +266,7 @@ fn alternate_release_voice_does_not_interrupt_and_held_out_owner_does() {
 }
 
 fn check_assistant_voice(mut tts: KokoroTts) {
-    let mut embedder = SpeakerEmbedder::load(models().join("speaker/wespeaker_resnet34.onnx"))
-        .expect("pinned WeSpeaker model must load");
+    let mut embedder = load_speaker();
     let speech = owner_recording();
     let half = speech.len() / 2;
     let owner = embedder.embed(&speech[..half]).unwrap();
@@ -236,10 +281,10 @@ fn check_assistant_voice(mut tts: KokoroTts) {
     let assistant_16k = resample_mono(&assistant, TTS_RATE, 16_000).unwrap();
     let other_speaker = embedder.embed(&assistant_16k).unwrap();
 
-    let same = cosine(&owner, &same_speaker);
-    let other = cosine(&owner, &other_speaker);
+    let same = cosine(owner.as_slice(), same_speaker.as_slice());
+    let other = cosine(owner.as_slice(), other_speaker.as_slice());
     eprintln!("SPEAKER same={same:.3} assistant={other:.3}");
-    time_verification(&mut embedder, &speech[half..], &owner);
+    time_verification(&mut embedder, &speech[half..], owner.as_slice());
     assert!(
         same > other + 0.2,
         "same speaker {same:.3} must clearly exceed the assistant voice {other:.3}"
@@ -336,16 +381,17 @@ fn time_verification(speaker: &mut SpeakerEmbedder, held_out: &[f32], owner: &[f
     for elapsed in &mut cosine_times {
         let start = Instant::now();
         for _ in 0..1000 {
-            black_box(cosine(black_box(owner), black_box(&candidate)));
+            black_box(cosine(black_box(owner), black_box(candidate.as_slice())));
         }
         *elapsed = start.elapsed() / 1000;
     }
     cosine_times.sort_unstable();
     embed_times.sort_unstable();
     eprintln!(
-        "256-d cosine (21 x 1000, per-call batch mean) median {:?}, p95 {:?}; \
-         WeSpeaker gate-window embed (9 warm calls) median {:?}, max {:?}",
-        cosine_times[10], cosine_times[19], embed_times[4], embed_times[8],
+        "{}-d cosine (21 x 1000, per-call batch mean) median {:?}, p95 {:?}; \
+         {} gate-window embed (9 warm calls) median {:?}, max {:?}",
+        speaker.encoder().dimension(), cosine_times[10], cosine_times[19], speaker.encoder().model_id(),
+        embed_times[4], embed_times[8],
     );
     assert!(cosine_times[19] < Duration::from_millis(2));
 }
@@ -354,7 +400,7 @@ fn power(pcm: &[f32]) -> f32 {
     pcm.iter().map(|s| s * s).sum::<f32>() / pcm.len() as f32
 }
 
-fn check_competing_speech(reply: &[f32], competing: &[f32], owner: &[f32], held_out: &[f32]) {
+fn check_competing_speech(reply: &[f32], competing: &[f32], owner: &SpeakerEmbedding, held_out: &[f32]) {
     use eon_voice::delay::DelayLine;
     // All three streams start on the same 24 kHz sample clock. Both device
     // rings use the production 24 -> 16 kHz readers. Nothing opens a device.
@@ -380,7 +426,7 @@ fn check_competing_speech(reply: &[f32], competing: &[f32], owner: &[f32], held_
     let coordinator = BargeInCoordinator::new(task.clone(), signal.clone(), SpeakerGate::enroll(owner, 0.35).unwrap());
     let audit = coordinator.audit();
     let vad = SileroVad::load(models().join("vad/silero_vad.onnx")).unwrap();
-    let speaker = SpeakerEmbedder::load(models().join("speaker/wespeaker_resnet34.onnx")).unwrap();
+    let speaker = load_speaker();
     let mut reflex = DuplexReflex::new(coordinator, vad, speaker, Some(30)).unwrap();
     // Different delay and a second reflection, fixed before running this scene.
     let mut direct = DelayLine::new(3 * BLOCK);

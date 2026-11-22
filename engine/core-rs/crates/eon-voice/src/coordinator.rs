@@ -15,7 +15,7 @@ use crate::geometry::{AEC_BLOCK_SAMPLES, SAMPLE_RATE_HZ, VAD_FRAME_SAMPLES};
 use crate::linear_echo::NlmsCanceller;
 use crate::resample::CaptureFrames;
 use crate::ring::{PcmConsumer, PcmProducer, pcm_ring};
-use crate::speaker::{SpeakerEmbedder, SpeakerGate};
+use crate::speaker::{SpeakerEmbedder, SpeakerEmbedding, SpeakerGate};
 use crate::vad::SileroVad;
 
 /// Shortest whole number of Silero frames giving WeSpeaker 50 complete analysis windows.
@@ -41,6 +41,7 @@ impl DuplexReflex {
         speaker: SpeakerEmbedder,
         delay_ms: Option<u16>,
     ) -> EonResult<Self> {
+        coordinator.check_encoder(&speaker)?;
         Ok(Self {
             aec: AcousticEchoCanceller::new(SAMPLE_RATE_HZ, delay_ms)?,
             linear: NlmsCanceller::new(1024, 0.2),
@@ -308,7 +309,14 @@ impl BargeInCoordinator {
         self.audit.clone()
     }
 
-    /// Verifies sustained Silero speech using a real WeSpeaker embedding of those same
+    fn check_encoder(&self, speaker: &SpeakerEmbedder) -> EonResult<()> {
+        if self.owner.encoder() != speaker.encoder() {
+            return Err(EonError::ValidationError("enrollment and candidate speaker encoders differ".into()));
+        }
+        Ok(())
+    }
+
+    /// Verifies sustained Silero speech using a speaker embedding of those same
     /// frames. A successful decision latches playback mute *before* journal I/O.
     /// `token_offset` is the current reply cursor, not the capture sample position.
     pub fn observe_capture(
@@ -319,6 +327,7 @@ impl BargeInCoordinator {
         token_offset: usize,
         journal: &mut impl Write,
     ) -> EonResult<bool> {
+        self.check_encoder(speaker)?;
         let interrupted = self.observe(frame, vad, speaker, token_offset)?;
         if interrupted {
             self.persist(journal)?;
@@ -357,7 +366,7 @@ impl BargeInCoordinator {
         vad.reset();
     }
 
-    fn on_candidate(&mut self, candidate: &[f32], token_offset: usize) -> bool {
+    fn on_candidate(&mut self, candidate: &SpeakerEmbedding, token_offset: usize) -> bool {
         if !self.owner.accepts(candidate) {
             self.rejected_candidates = self.rejected_candidates.saturating_add(1);
             return false;
@@ -396,6 +405,11 @@ impl BargeInCoordinator {
 #[cfg(test)]
 mod barge_in_tests {
     use super::*;
+    use crate::{ring::pcm_ring, speaker::{EMBEDDING_DIM, SpeakerEncoder}};
+
+    fn embedding(values: &[f32]) -> SpeakerEmbedding {
+        SpeakerEmbedding::from_values(SpeakerEncoder::WeSpeakerResNet34LmV1, values).unwrap()
+    }
 
     #[test]
     fn a_stalled_audit_flush_does_not_block_render_and_is_not_replayed_after_failure() {
@@ -415,7 +429,7 @@ mod barge_in_tests {
                 Err(std::io::Error::other("flush failed after write"))
             }
         }
-        let owner = [1.0; EMBEDDING_DIM];
+        let owner = embedding(&[1.0; EMBEDDING_DIM]);
         let signal = BargeIn::new();
         let mut coordinator =
             BargeInCoordinator::new(TaskId::new(), signal.clone(), SpeakerGate::enroll(&owner, 0.5).unwrap());
@@ -441,7 +455,7 @@ mod barge_in_tests {
 
     #[test]
     fn a_full_journal_cannot_delay_or_undo_mute() {
-        let candidate = [1.0; EMBEDDING_DIM];
+        let candidate = embedding(&[1.0; EMBEDDING_DIM]);
         let signal = BargeIn::new();
         let mut coordinator = BargeInCoordinator::new(
             TaskId::new(),
@@ -463,13 +477,13 @@ mod barge_in_tests {
         assert!(reader.append_if_present(&mut other).is_err());
         assert!(other.is_empty());
     }
-    use crate::{ring::pcm_ring, speaker::EMBEDDING_DIM};
 
     // Decision/render boundary only; this does not test either neural model.
     #[test]
     fn only_a_matching_candidate_during_playback_mutes_and_records_once() {
         let mut owner = [0.0; EMBEDDING_DIM];
         owner[0] = 1.0;
+        let owner = embedding(&owner);
         let task = TaskId::new();
         let signal = BargeIn::new();
         let mut coordinator =
@@ -483,9 +497,9 @@ mod barge_in_tests {
         assert_eq!(out, [0.4; 4]);
         let mut other = [0.0; EMBEDDING_DIM];
         other[1] = 1.0;
-        for invalid in [&other[..], &owner[..1], &[f32::NAN; EMBEDDING_DIM]] {
-            assert!(!coordinator.on_candidate(invalid, 2));
-        }
+        assert!(!coordinator.on_candidate(&embedding(&other), 2));
+        let wrong_encoder = SpeakerEmbedding::from_values(SpeakerEncoder::CamPlusPlusZhEnAdvancedV1, &[1.0; 192]).unwrap();
+        assert!(!coordinator.on_candidate(&wrong_encoder, 2));
         assert!(journal.is_empty());
         assert!(coordinator.on_candidate(&owner, 7));
         coordinator.persist(&mut journal).unwrap();

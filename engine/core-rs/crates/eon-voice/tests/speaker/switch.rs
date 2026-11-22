@@ -2,12 +2,12 @@
 
 use std::path::PathBuf;
 
-use super::{common, fixture, models};
+use super::{common, fixture, load_speaker, models};
 use eon_voice::TaskId;
 use eon_voice::barge_in::BargeIn;
 use eon_voice::coordinator::{BargeInCoordinator, CANDIDATE_SAMPLES, DuplexReflex};
 use eon_voice::ring::pcm_ring;
-use eon_voice::speaker::{SpeakerEmbedder, SpeakerGate};
+use eon_voice::speaker::{SpeakerEmbedding, SpeakerGate};
 use eon_voice::vad::SileroVad;
 
 const BLOCK: usize = 160;
@@ -20,18 +20,18 @@ fn rms(pcm: &[f32]) -> f32 {
 // history. The rule is the same for both recordings and uses no identity scores.
 fn speech_onset(pcm: &[f32]) -> &[f32] {
     let floor = rms(pcm);
-    let block = pcm.chunks_exact(BLOCK).position(|x| rms(x) >= floor).unwrap();
+    let block = pcm.as_chunks::<BLOCK>().0.iter().position(|x| rms(x) >= floor).unwrap();
     &pcm[block * BLOCK..]
 }
 
 // Owner -> stranger -> held-out owner, with uninterrupted render and a single
 // VAD, echo path, speaker gate and audit slot across both splices.
-fn handoff(owner: &[f32], prelude: &[f32], stranger: &[f32], returning: &[f32]) -> Option<(u64, u64, usize)> {
+fn handoff(owner: &SpeakerEmbedding, prelude: &[f32], stranger: &[f32], returning: &[f32]) -> Option<(u64, u64, usize)> {
     let signal = BargeIn::new();
     let gate = SpeakerGate::enroll(owner, 0.35).unwrap();
     let coordinator = BargeInCoordinator::new(TaskId::new(), signal.clone(), gate);
     let audit = coordinator.audit();
-    let speaker = SpeakerEmbedder::load(models().join("speaker/wespeaker_resnet34.onnx")).unwrap();
+    let speaker = load_speaker();
     let vad = SileroVad::load(models().join("vad/silero_vad.onnx")).unwrap();
     let mut reflex = DuplexReflex::new(coordinator, vad, speaker, Some(0)).unwrap();
     let (mut tx, mut rx) = pcm_ring(BLOCK);
@@ -79,7 +79,7 @@ fn active_speaker_switches_do_not_credit_a_departed_owner() {
     let owner = fixture();
     let stranger = common::read_pcm16_mono_16k(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/0.wav"));
     let half = owner.len() / 2;
-    let mut embedder = SpeakerEmbedder::load(models().join("speaker/wespeaker_resnet34.onnx")).unwrap();
+    let mut embedder = load_speaker();
     let enrollment = embedder.embed(&owner[..half]).unwrap();
     let returning = speech_onset(&owner[half..]);
     let stranger = speech_onset(&stranger);

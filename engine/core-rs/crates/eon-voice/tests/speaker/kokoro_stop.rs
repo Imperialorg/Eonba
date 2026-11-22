@@ -5,14 +5,14 @@ use std::sync::atomic::Ordering;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::{kokoro_release, models, owner_recording, private_monitor};
+use super::{kokoro_release, load_speaker, models, owner_recording, private_monitor};
 use eon_voice::barge_in::BargeIn;
 use eon_voice::commitment::ReplyRenderer;
 use eon_voice::coordinator::{BargeInCoordinator, DuplexReflex};
 use eon_voice::device::play_default_output_with_reference;
 use eon_voice::resample::CaptureFrames;
 use eon_voice::ring::pcm_ring;
-use eon_voice::speaker::{SpeakerEmbedder, SpeakerGate};
+use eon_voice::speaker::SpeakerGate;
 use eon_voice::vad::SileroVad;
 use eon_voice::{LeaseId, TaskId};
 
@@ -133,7 +133,7 @@ fn private_monitor_stop() {
     let server = private_monitor::require_null_sink();
     let speech = owner_recording();
     let (enrollment, held_out) = speech.split_at(speech.len() / 2);
-    let mut speaker = SpeakerEmbedder::load(models().join("speaker/wespeaker_resnet34.onnx")).unwrap();
+    let mut speaker = load_speaker();
     let owner = SpeakerGate::enroll(&speaker.embed(enrollment).unwrap(), 0.35).unwrap();
     let vad = SileroVad::load(models().join("vad/silero_vad.onnx")).unwrap();
     let signal = BargeIn::new();

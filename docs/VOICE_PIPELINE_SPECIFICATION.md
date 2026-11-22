@@ -27,7 +27,7 @@ EON utilizes an **end-to-end streaming, chunked, duplex audio pipeline** where s
                │ Speech Active
                ▼
 ┌─────────────────────────────────┐
-│ Biometric Speaker ID (WeSpeaker)│ ──► [Score >= 0.78: Authorized Operator Confirmed]
+│ Enrolled speaker check (§2.3)   │ ──► [Match current speech before interrupting playback]
 └──────────────┬──────────────────┘
                │ Authorized Audio Stream
                ▼
@@ -74,13 +74,11 @@ To prevent EON from barging in on her own voice when speaking through open speak
   - `end_speech_silence_duration`: 250ms of continuous silence below 0.35 confidence.
   - Dynamically lowers to 180ms when the user pauses after a complete syntactic sentence structure.
 
-### 2.3 Biometric Speaker Verification (WeSpeaker)
-To prevent accidental wakeups or interruptions from background TV audio, crowd speech, or third parties:
-- **Model**: `wespeaker-voxceleb-resnet34` (quantized INT8 ONNX, ~6.0 MB).
-- **Extraction**: Evaluates a 256-dimensional speaker voiceprint embedding on the first 120ms of detected speech (< 2ms evaluation on CPU).
-- **Cosine Verification**:
-  $$\text{CosineSimilarity}(\vec{e}_{\text{live}}, \vec{e}_{\text{owner}}) \ge 0.78$$
-  If similarity is below threshold, speech is tagged as ambient environmental noise and ignored.
+### 2.3 Enrolled speaker verification
+
+The native duplex path requires 17 consecutive 32 ms voiced frames with an active playback reference. It compares that window with a local enrollment from the same encoder; VAD alone cannot mute playback. The recorded acceptance gate uses a cosine threshold of 0.35. Its 544 ms decision window is not a time-to-first-audio measurement.
+
+`SpeakerEmbedder::load` uses the pinned WeSpeaker ResNet34-LM encoder (256 dimensions). For a new enrollment, `SpeakerEmbedder::load_for` can explicitly select `SpeakerEncoder::CamPlusPlusZhEnAdvancedV1` (192 dimensions). The loader checks the weights before opening the ONNX session. A voiceprint from a different encoder or feature pipeline needs fresh enrollment, not padding or truncation. See [the recorded comparisons](implementation/06_VERIFICATION_BENCHMARKS_AND_PHASED_PLAYBOOK.md#37-recorded-speaker-decisions-in-synthetic-noise-task-106) for results on competing speech and speaker changes.
 
 ### 2.4 Streaming ASR Engine
 - **Engine**: `sherpa-onnx` runtime with pre-packaged **int8 Streaming Zipformer**.

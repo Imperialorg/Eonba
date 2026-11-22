@@ -292,6 +292,15 @@
       "license": "OpenMDW"
     },
     {
+      "id": "camplusplus-zh-en-advanced",
+      "dest": "perception/models/speaker/camplusplus_zh_en_advanced.onnx",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
+      "sha256": "53cab20ba8f2eb2f6e2d89ecc18e88ef3222169b61b4419cbc13666744a4574b",
+      "size_bytes": 28281165,
+      "license": "Apache-2.0",
+      "notes": "Opt-in sherpa-onnx conversion of https://modelscope.cn/models/iic/speech_campplus_sv_zh_en_16k-common_advanced. Requires a new enrollment; not compatible with WeSpeaker vectors."
+    },
+    {
       "id": "wespeaker-resnet34",
       "dest": "perception/models/speaker/wespeaker_resnet34.onnx",
       "url": "https://huggingface.co/wespeaker/wespeaker-voxceleb-resnet34-LM/resolve/main/voxceleb_resnet34_LM.onnx",

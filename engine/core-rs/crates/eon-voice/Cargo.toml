@@ -11,7 +11,7 @@ default = ["native"]
 onnx-speech = ["dep:kaldi-native-fbank", "dep:ort", "eon-primitives/onnx-runtime"]
 # Local, preinstalled Sherpa SDK; does not enable ort-sys or fetch binaries.
 sherpa-onnx = ["dep:cc", "dep:sha2", "dep:serde_json"]
-native = ["onnx-speech", "dep:cpal", "dep:serde_json", "dep:webrtc-audio-processing", "dep:webrtc-audio-processing-config"]
+native = ["onnx-speech", "dep:cpal", "dep:serde_json", "dep:sha2", "dep:webrtc-audio-processing", "dep:webrtc-audio-processing-config"]
 
 [dependencies]
 cpal = { version = "0.18", optional = true }

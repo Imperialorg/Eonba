@@ -4,6 +4,7 @@ import io
 import json
 import math
 from pathlib import Path
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -111,21 +112,37 @@ class ReportingTests(unittest.TestCase):
         self.assertFalse(result["duplex_check_passed"])
         self.assertIsNone(result["owner_decision_audio_ms"])
 
+    def test_require_confirmation_from_selected_encoder_before_reporting_decisions(self):
+        model = "camplusplus-zh-en-advanced"
+        for markers, expected in (([], False), ([bench.BASELINE_MODEL], False),
+                                  ([model, model], False), ([model], True)):
+            stderr = "".join(f"recorded speaker model: {m}\n" for m in markers) + self.rejected + self.verified
+            completed = subprocess.CompletedProcess([], 0, "test recorded ... ok\n" + self.ok, stderr)
+            with (patch.object(bench.subprocess, "run", return_value=completed) as run,
+                  contextlib.redirect_stderr(io.StringIO())):
+                row = bench.evaluate(bench.CLEAN, "owner.wav", "other.wav", model)
+            self.assertEqual(run.call_args.kwargs["env"]["EON_SPEAKER_MODEL"], model)
+            self.assertEqual(row["duplex_check_passed"], expected)
+            if not expected:
+                self.assertIn("unavailable", row)
+                self.assertIsNone(row["non_owner_interruptions"])
+
     def test_missing_speech_and_rumble_failure_do_not_skip_traffic(self):
         with tempfile.TemporaryDirectory(dir=bench.ROOT) as work:
             wav = Path(work) / "input.wav"
             bench.write_pcm(wav, (2500, -3000) * 5000)
             paths = dict.fromkeys(("voice-test-sensevoice-en", "voice-test-zipformer-0"), wav)
-            def simulated(label, owner, other):
+            def simulated(label, owner, other, model):
                 return bench.observations(self.rejected, 101) if label == bench.RUMBLE else (
                     bench.observations(self.rejected + self.verified + self.ok, 0))
             with (patch.object(bench, "ROOT", Path(work)), patch.object(bench, "pinned_inputs", return_value=(paths, {})),
                   patch.object(bench, "speech_tracks", side_effect=FileNotFoundError("missing speech archive")),
                   patch.object(bench, "evaluate", side_effect=simulated) as evaluate,
                   contextlib.redirect_stdout(io.StringIO()) as output):
-                self.assertEqual(bench.main(), 2)
+                self.assertEqual(bench.main([]), 2)
             rows = [json.loads(line) for line in output.getvalue().splitlines()]
             self.assertEqual([row["condition"] for row in rows], list(bench.CONDITIONS))
+            self.assertTrue(all(row["speaker_model"] == bench.BASELINE_MODEL for row in rows))
             self.assertEqual([call.args[0] for call in evaluate.call_args_list], [bench.CLEAN, bench.RUMBLE, bench.STREET])
             self.assertEqual(rows[1]["non_owner_interruptions"], 0)
             self.assertTrue(rows[3]["duplex_check_passed"])

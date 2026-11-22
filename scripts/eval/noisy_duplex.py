@@ -1,12 +1,13 @@
 """Offline speaker decisions on two controls and three synthetic 0 dB scenes.
 
-Requires the prepared speaker_e2e target, locked recordings, Silero and
-WeSpeaker. The two speech beds also need the cached, locked SenseVoice release
+Requires the prepared speaker_e2e target, locked recordings, Silero and the
+selected speaker model. The two speech beds also need the cached, locked SenseVoice release
 archive. No downloads, devices, TTFA measurement or population error rates.
 JSONL on stdout; native failure details on stderr. Exit 0 only if every
 recorded speaker check passed; 1 for an unverified check, 2 for missing inputs.
 """
 
+import argparse
 import hashlib
 import io
 import json
@@ -29,6 +30,11 @@ TEST = "recorded_capture_and_render_rings_make_one_auditable_owner_decision"
 CLEAN, RUMBLE = "clean control", "0 dB rumble"
 BABBLE, STREET, TV = "0 dB synthetic competing babble", "0 dB synthetic street traffic", "0 dB synthetic TV dialogue"
 CONDITIONS = (CLEAN, RUMBLE, BABBLE, STREET, TV)
+BASELINE_MODEL = "wespeaker-resnet34"
+SPEAKER_MODELS = {
+    BASELINE_MODEL: "speaker/wespeaker_resnet34.onnx",
+    "camplusplus-zh-en-advanced": "speaker/camplusplus_zh_en_advanced.onnx",
+}
 INPUT_ERRORS = (OSError, EOFError, ValueError, tarfile.TarError, wave.Error, struct.error)
 
 
@@ -39,19 +45,19 @@ def verify(f, entry):
         raise ValueError(f"{f.name}: digest differs from model lock")
 
 
-def pinned_inputs():
+def pinned_inputs(speaker_model):
     lock = json.loads((ROOT / "scripts/models.lock.json").read_text())
     models = {entry["id"]: entry for entry in lock["models"]}
     paths = {}
     for key in ("voice-test-sensevoice-en", "voice-test-zipformer-0",
-                "silero-vad-v5", "wespeaker-resnet34"):
+                "silero-vad-v5", speaker_model):
         entry = models[key]
         path = ROOT / entry["dest"]
         with path.open("rb") as f:
             verify(f, entry)
         paths[key] = path
     if (paths["silero-vad-v5"] != MODELS / "vad/silero_vad.onnx"
-            or paths["wespeaker-resnet34"] != MODELS / "speaker/wespeaker_resnet34.onnx"):
+            or paths[speaker_model] != MODELS / SPEAKER_MODELS[speaker_model]):
         raise ValueError("pinned models differ from the paths opened by the voice target")
     return paths, models["voice-test-sensevoice-en"]["archive"]
 
@@ -209,34 +215,40 @@ def observations(output, returncode):
     }
 
 
-def evaluate(label, owner_wav, other_wav):
+def evaluate(label, owner_wav, other_wav, speaker_model):
     env = {
         **os.environ,
         "ORT_SKIP_DOWNLOAD": "1",
         "EON_VOICE_MODELS": str(MODELS),
+        "EON_SPEAKER_MODEL": speaker_model,
         "EON_VOICE_TEST_OWNER_WAV": str(owner_wav),
         "EON_ZIPFORMER_TEST_WAV_0": str(other_wav),
     }
     run = subprocess.run(
         ["cargo", "test", "--offline", "--locked", "-j", "4", "-p", "eon-voice",
          "--test", "speaker_e2e", "--", "--exact", TEST, "--nocapture", "--format", "pretty"],
-        cwd=ROOT / "engine/core-rs", env=env, text=True, stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, check=False,
+        cwd=ROOT / "engine/core-rs", env=env, text=True, capture_output=True, check=False,
     )
-    result = observations(run.stdout, run.returncode)
+    # libtest may print an unterminated "test ... " prefix on stdout in serial mode.
+    loaded = re.findall(r"^recorded speaker model: (\S+)$", run.stderr, re.M)
+    output = run.stdout + "\n" + run.stderr
+    if loaded == [speaker_model]:
+        result = observations(output, run.returncode)
+    else:
+        result = {**observations("", run.returncode), "unavailable": "requested speaker model was not confirmed"}
     if not result["duplex_check_passed"]:
-        print(f"{label}: recorded test not verified\n{run.stdout}", file=sys.stderr, flush=True)
+        print(f"{label}: recorded test not verified\n{output}", file=sys.stderr, flush=True)
     return result
 
 
-def run_conditions():
+def run_conditions(speaker_model=BASELINE_MODEL):
     try:
-        paths, archive = pinned_inputs()
+        paths, archive = pinned_inputs(speaker_model)
         owner_path, other_path = paths["voice-test-sensevoice-en"], paths["voice-test-zipformer-0"]
         owner, other = read_pcm(owner_path), read_pcm(other_path)
     except INPUT_ERRORS as error:
         for label in CONDITIONS:
-            yield {"condition": label, "unavailable": str(error), **observations("", None)}
+            yield {"condition": label, "speaker_model": speaker_model, "unavailable": str(error), **observations("", None)}
         return
     try:
         tracks = speech_tracks(archive)
@@ -249,6 +261,7 @@ def run_conditions():
         for label in CONDITIONS:
             row = {
                 "condition": label,
+                "speaker_model": speaker_model,
                 "owner_query_seconds": (len(owner) - len(owner) // 2) / RATE,
                 "non_owner_seconds": len(other) / RATE,
                 "mixed_owner_snr_db": None, "mixed_non_owner_snr_db": None,
@@ -265,15 +278,17 @@ def run_conditions():
                     row.update(mixed_owner_snr_db=round(owner_snr, 6), mixed_non_owner_snr_db=round(other_snr, 6))
                 for role, wav in (("owner", owner_wav), ("non_owner", other_wav)):
                     row[f"{role}_wav_sha256"] = hashlib.sha256(wav.read_bytes()).hexdigest()
-                row.update(evaluate(label, owner_wav, other_wav))
+                row.update(evaluate(label, owner_wav, other_wav, speaker_model))
             except INPUT_ERRORS as error:
                 row.update(unavailable=str(error), **observations("", None))
             yield row
 
 
-def main():
+def main(argv=None):
+    cli = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    cli.add_argument("--speaker-model", choices=SPEAKER_MODELS, default=BASELINE_MODEL)
     status = 0
-    for row in run_conditions():
+    for row in run_conditions(cli.parse_args(argv).speaker_model):
         print(json.dumps(row), flush=True)
         if not row["duplex_check_passed"]:
             status = max(status, 2 if "unavailable" in row else 1)
