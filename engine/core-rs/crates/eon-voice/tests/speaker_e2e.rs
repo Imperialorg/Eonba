@@ -22,7 +22,7 @@ mod switch;
 mod private_monitor;
 
 use eon_voice::resample::{CaptureFrames, resample_mono};
-use eon_voice::speaker::{SpeakerEmbedder, SpeakerEmbedding, SpeakerEncoder, SpeakerGate, cosine};
+use eon_voice::speaker::{SpeakerAgreement, SpeakerEmbedder, SpeakerEmbedding, SpeakerEncoder, SpeakerGate, SpeakerPolicy, cosine};
 use eon_voice::tts::{KokoroTts, SAMPLE_RATE_HZ as TTS_RATE};
 use eon_voice::{
     TaskId,
@@ -48,6 +48,42 @@ fn load_speaker() -> SpeakerEmbedder {
         _ => panic!("unknown EON_SPEAKER_MODEL; refusing to substitute another speaker encoder"),
     };
     SpeakerEmbedder::load_for(encoder, models().join(file)).expect("pinned speaker model must load")
+}
+
+enum RecordedEnrollment {
+    Single(SpeakerGate),
+    Agreement(SpeakerAgreement),
+}
+
+impl RecordedEnrollment {
+    fn confirmation() -> SpeakerEmbedder {
+        SpeakerEmbedder::load_for(SpeakerEncoder::CamPlusPlusZhEnAdvancedV1,
+            models().join("speaker/camplusplus_zh_en_advanced.onnx")).unwrap()
+    }
+
+    fn new(speaker: &mut SpeakerEmbedder, pcm: &[f32]) -> Self {
+        match std::env::var("EON_SPEAKER_CONFIRMATION").as_deref() {
+            Err(std::env::VarError::NotPresent) | Ok("none") =>
+                Self::Single(SpeakerGate::enroll(&speaker.embed(pcm).unwrap(), 0.35).unwrap()),
+            Ok("camplusplus-zh-en-advanced") if speaker.encoder() == SpeakerEncoder::WeSpeakerResNet34LmV1 =>
+                Self::Agreement(SpeakerAgreement::enroll(speaker, &mut Self::confirmation(), pcm, 0.35).unwrap()),
+            _ => panic!("unknown speaker agreement policy; no single-encoder fallback"),
+        }
+    }
+
+    fn id(&self) -> &'static str {
+        match self {
+            Self::Single(gate) => gate.encoder().model_id(),
+            Self::Agreement(_) => "wespeaker-campp-agreement",
+        }
+    }
+
+    fn policy(&self) -> SpeakerPolicy {
+        match self {
+            Self::Single(gate) => gate.clone().into(),
+            Self::Agreement(enrollment) => enrollment.policy(Self::confirmation()).unwrap(),
+        }
+    }
 }
 
 fn fixture() -> Vec<f32> {
@@ -98,10 +134,11 @@ fn mismatched_capture_encoder_is_an_error_before_vad_state_changes() {
 #[test]
 fn recorded_capture_and_render_rings_make_one_auditable_owner_decision() {
     let mut speaker = load_speaker();
-    eprintln!("recorded speaker model: {}", speaker.encoder().model_id());
     let speech = owner_recording();
     let half = speech.len() / 2;
-    let gate = SpeakerGate::enroll(&speaker.embed(&speech[..half]).unwrap(), 0.35).unwrap();
+    let enrollment = RecordedEnrollment::new(&mut speaker, &speech[..half]);
+    let gate = enrollment.policy();
+    eprintln!("recorded speaker model: {}", enrollment.id());
     let task = TaskId::new();
     let signal = BargeIn::new();
     let coordinator = BargeInCoordinator::new(task.clone(), signal.clone(), gate);

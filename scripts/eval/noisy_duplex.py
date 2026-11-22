@@ -35,6 +35,23 @@ SPEAKER_MODELS = {
     BASELINE_MODEL: "speaker/wespeaker_resnet34.onnx",
     "camplusplus-zh-en-advanced": "speaker/camplusplus_zh_en_advanced.onnx",
 }
+AGREEMENT = "wespeaker-campp-agreement"
+POLICIES = (*SPEAKER_MODELS, AGREEMENT)
+
+
+def policy_models(policy):
+    if policy == AGREEMENT:
+        return BASELINE_MODEL, "camplusplus-zh-en-advanced"
+    if policy not in SPEAKER_MODELS:
+        raise ValueError("unknown speaker policy")
+    return policy, "none"
+
+
+def policy_env(policy):
+    primary, confirmation = policy_models(policy)
+    return {"EON_SPEAKER_MODEL": primary, "EON_SPEAKER_CONFIRMATION": confirmation}
+
+
 INPUT_ERRORS = (OSError, EOFError, ValueError, tarfile.TarError, wave.Error, struct.error)
 
 
@@ -65,9 +82,10 @@ def verified_paths(models, keys):
 
 
 def verify_native_models(models, speaker_model):
-    paths = verified_paths(models, ("silero-vad-v5", speaker_model))
+    encoders = tuple(k for k in policy_models(speaker_model) if k != "none")
+    paths = verified_paths(models, ("silero-vad-v5", *encoders))
     if (paths["silero-vad-v5"] != MODELS / "vad/silero_vad.onnx"
-            or paths[speaker_model] != MODELS / SPEAKER_MODELS[speaker_model]):
+            or any(paths[k] != MODELS / SPEAKER_MODELS[k] for k in encoders)):
         raise ValueError("pinned models differ from the paths opened by the voice target")
 
 
@@ -235,7 +253,7 @@ def evaluate(label, owner_wav, other_wav, speaker_model):
         **os.environ,
         "ORT_SKIP_DOWNLOAD": "1",
         "EON_VOICE_MODELS": str(MODELS),
-        "EON_SPEAKER_MODEL": speaker_model,
+        **policy_env(speaker_model),
         "EON_VOICE_TEST_OWNER_WAV": str(owner_wav),
         "EON_ZIPFORMER_TEST_WAV_0": str(other_wav),
     }
@@ -301,7 +319,7 @@ def run_conditions(speaker_model=BASELINE_MODEL):
 
 def main(argv=None):
     cli = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    cli.add_argument("--speaker-model", choices=SPEAKER_MODELS, default=BASELINE_MODEL)
+    cli.add_argument("--speaker-model", choices=POLICIES, default=BASELINE_MODEL)
     status = 0
     for row in run_conditions(cli.parse_args(argv).speaker_model):
         print(json.dumps(row), flush=True)

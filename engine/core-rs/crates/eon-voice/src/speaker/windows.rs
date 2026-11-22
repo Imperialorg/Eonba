@@ -1,6 +1,6 @@
 //! Only samples in the current short voiced interval may identify the speaker.
 
-use super::{SpeakerEmbedding, SpeakerEncoder};
+use super::SpeakerEncoder;
 use crate::geometry::VAD_FRAME_SAMPLES;
 use eon_primitives::EonResult;
 
@@ -30,11 +30,11 @@ impl SpeakerWindows {
         self.phase = 0;
     }
 
-    pub(crate) fn candidate(
+    pub(crate) fn candidate<T>(
         &mut self,
         frame: &[f32],
-        embed: impl FnOnce(&[f32]) -> EonResult<SpeakerEmbedding>,
-    ) -> EonResult<Option<SpeakerEmbedding>> {
+        evaluate: impl FnOnce(&[f32]) -> EonResult<T>,
+    ) -> EonResult<Option<T>> {
         // The VAD validated the frame geometry before admission.
         debug_assert_eq!(frame.len(), VAD_FRAME_SAMPLES);
         self.pcm.extend_from_slice(frame);
@@ -42,7 +42,7 @@ impl SpeakerWindows {
             return Ok(None);
         }
         debug_assert_eq!(self.pcm.len(), CANDIDATE_SAMPLES);
-        let result = embed(&self.pcm);
+        let result = evaluate(&self.pcm);
         if result.is_err() {
             self.clear();
         } else {
@@ -59,6 +59,7 @@ impl SpeakerWindows {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::speaker::SpeakerEmbedding;
     use eon_primitives::EonError;
 
     #[test]
@@ -97,7 +98,7 @@ mod tests {
         let mut windows = SpeakerWindows::new(encoder);
         for i in 1..=FRAMES {
             let result = windows.candidate(&[1.; VAD_FRAME_SAMPLES], |_| {
-                Err(EonError::ValidationError("inference failed".into()))
+                Err::<(), _>(EonError::ValidationError("inference failed".into()))
             });
             assert_eq!(result.is_err(), i == FRAMES);
         }
@@ -105,7 +106,7 @@ mod tests {
             for _ in 0..FRAMES - 1 {
                 assert!(
                     windows
-                        .candidate(&[sample; VAD_FRAME_SAMPLES], |_| panic!("stale samples"))
+                        .candidate::<()>(&[sample; VAD_FRAME_SAMPLES], |_| panic!("stale samples"))
                         .unwrap()
                         .is_none()
                 );

@@ -80,7 +80,9 @@ During active playback, the native duplex path compares the **latest 17 consecut
 
 `SpeakerEmbedder::load` uses the pinned WeSpeaker ResNet34-LM encoder (256 dimensions). For a new enrollment, `SpeakerEmbedder::load_for` can explicitly select `SpeakerEncoder::CamPlusPlusZhEnAdvancedV1` (192 dimensions). The loader checks the weights before opening the ONNX session. A voiceprint from a different encoder or feature pipeline needs fresh enrollment, not padding or truncation. See [the recorded comparisons](implementation/06_VERIFICATION_BENCHMARKS_AND_PHASED_PLAYBOOK.md#37-recorded-speaker-decisions-in-synthetic-noise-task-106) for results on competing speech and speaker changes.
 
-The worker retains at most 8,704 PCM samples and computes one embedding per probe: every 256 or 288 ms during sustained voiced playback, versus every 544 ms with disjoint windows. These intervals describe fixture audio, not physical latency.
+The worker retains at most 8,704 candidate PCM samples. With a single encoder it computes one embedding per probe: every 256 or 288 ms during sustained voiced playback, versus every 544 ms with disjoint windows. These intervals describe fixture audio, not physical latency.
+
+`SpeakerAgreement::enroll` is an opt-in two-encoder policy, not the default. It builds a separate template for each encoder from up to eight evenly spaced, nonoverlapping 544 ms excerpts of the same authorized enrollment. It skips digital silence and normalizes the sum of unit embeddings; it does not choose the best-scoring excerpt. A primary match triggers the second encoder on **the same candidate samples**, not earlier audio. Both must accept before mute. No measured improvement is claimed.
 
 ### 2.4 Streaming ASR Engine
 - **Engine**: `sherpa-onnx` runtime with pre-packaged **int8 Streaming Zipformer**.

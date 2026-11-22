@@ -10,6 +10,13 @@ import speaker_handoffs as handoffs
 
 
 class SpeakerHandoffTests(unittest.TestCase):
+    def test_agreement_handoff_is_not_evidence_for_the_shipping_policy(self):
+        policy = handoffs.duplex.AGREEMENT
+        result = subprocess.CompletedProcess([], 0, f"test {handoffs.TEST} ... ok\n"
+            "test result: ok. 1 passed; 0 failed; 0 ignored;", f"handoff speaker model: {policy}\n")
+        self.assertEqual(handoffs.observation(result, policy)[0], "passed")
+        self.assertEqual(handoffs.observation(result)[0], "unavailable")
+
     def test_requires_named_test_and_confirmed_shipping_encoder(self):
         marker = "handoff speaker model: wespeaker-resnet34\n"
         test = f"test {handoffs.TEST} ... "

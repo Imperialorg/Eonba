@@ -14,6 +14,8 @@ use sha2::{Digest, Sha256};
 use crate::features::{NUM_MEL_BINS, camplusplus_fbank, wespeaker_fbank};
 
 pub(crate) mod windows;
+mod agreement;
+pub use agreement::{SpeakerAgreement, SpeakerPolicy};
 
 /// Dimension of the original WeSpeaker ResNet34-LM embedding.
 pub const EMBEDDING_DIM: usize = 256;
@@ -199,6 +201,7 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Accepts only comparable, current candidate evidence above the configured threshold.
+#[derive(Clone)]
 pub struct SpeakerGate {
     owner: SpeakerEmbedding,
     threshold: f32,

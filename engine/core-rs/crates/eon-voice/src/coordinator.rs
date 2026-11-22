@@ -15,7 +15,7 @@ use crate::geometry::{AEC_BLOCK_SAMPLES, SAMPLE_RATE_HZ, VAD_FRAME_SAMPLES};
 use crate::linear_echo::NlmsCanceller;
 use crate::resample::CaptureFrames;
 use crate::ring::{PcmConsumer, PcmProducer, pcm_ring};
-use crate::speaker::{SpeakerEmbedder, SpeakerEmbedding, SpeakerGate};
+use crate::speaker::{SpeakerEmbedder, SpeakerEmbedding, SpeakerPolicy};
 use crate::speaker::windows::SpeakerWindows;
 use crate::vad::SileroVad;
 
@@ -153,7 +153,7 @@ pub struct DeviceDuplex {
 impl DeviceDuplex {
     pub fn open_default(
         task: TaskId,
-        owner: SpeakerGate,
+        owner: impl Into<SpeakerPolicy>,
         vad: SileroVad,
         speaker: SpeakerEmbedder,
         delay_ms: Option<u16>,
@@ -264,7 +264,7 @@ impl InterruptionAudit {
 pub struct BargeInCoordinator {
     playback: BargeIn,
     task: TaskId,
-    owner: SpeakerGate,
+    owner: SpeakerPolicy,
     windows: SpeakerWindows,
     rejected_candidates: u64,
     audit: InterruptionAudit,
@@ -275,7 +275,7 @@ impl BargeInCoordinator {
     /// post-render reference ring for the perception worker.
     pub fn start_default_output(
         task: TaskId,
-        owner: SpeakerGate,
+        owner: impl Into<SpeakerPolicy>,
         pcm: PcmConsumer,
         reference: PcmProducer,
     ) -> EonResult<(Self, PlaybackHandle)> {
@@ -289,7 +289,8 @@ impl BargeInCoordinator {
     }
 
     /// `playback` must be the same reply's signal passed to the output driver.
-    pub fn new(task: TaskId, playback: BargeIn, owner: SpeakerGate) -> Self {
+    pub fn new(task: TaskId, playback: BargeIn, owner: impl Into<SpeakerPolicy>) -> Self {
+        let owner = owner.into();
         Self {
             playback,
             task,
@@ -327,7 +328,10 @@ impl BargeInCoordinator {
         token_offset: usize,
         journal: &mut impl Write,
     ) -> EonResult<bool> {
-        self.check_encoder(speaker)?;
+        if let Err(error) = self.check_encoder(speaker) {
+            self.windows.clear(); // A later retry cannot bridge the frame that was refused.
+            return Err(error);
+        }
         let interrupted = self.observe(frame, vad, speaker, token_offset)?;
         if interrupted {
             self.persist(journal)?;
@@ -362,8 +366,8 @@ impl BargeInCoordinator {
         embed: impl FnOnce(&[f32]) -> EonResult<SpeakerEmbedding>,
         token_offset: usize,
     ) -> EonResult<bool> {
-        let current = self.windows.candidate(frame, embed)?;
-        Ok(current.is_some_and(|candidate| self.on_candidate(&candidate, token_offset)))
+        let current = self.windows.candidate(frame, |pcm| self.owner.verify(&embed(pcm)?, pcm))?;
+        Ok(current.is_some_and(|accepted| self.on_verification(accepted, token_offset)))
     }
 
     fn reset_candidate(&mut self, vad: &mut SileroVad) {
@@ -371,8 +375,8 @@ impl BargeInCoordinator {
         vad.reset();
     }
 
-    fn on_candidate(&mut self, candidate: &SpeakerEmbedding, token_offset: usize) -> bool {
-        if !self.owner.accepts(candidate) {
+    fn on_verification(&mut self, accepted: bool, token_offset: usize) -> bool {
+        if !accepted {
             self.rejected_candidates = self.rejected_candidates.saturating_add(1);
             return false;
         }
@@ -410,7 +414,14 @@ impl BargeInCoordinator {
 #[cfg(test)]
 mod barge_in_tests {
     use super::*;
-    use crate::{ring::pcm_ring, speaker::{EMBEDDING_DIM, SpeakerEncoder}};
+    use crate::{ring::pcm_ring, speaker::{EMBEDDING_DIM, SpeakerEncoder, SpeakerGate}};
+
+    impl BargeInCoordinator {
+        fn on_candidate(&mut self, candidate: &SpeakerEmbedding, token_offset: usize) -> bool {
+            let accepted = self.owner.verify(candidate, &[]).unwrap();
+            self.on_verification(accepted, token_offset)
+        }
+    }
 
     fn embedding(values: &[f32]) -> SpeakerEmbedding {
         SpeakerEmbedding::from_values(SpeakerEncoder::WeSpeakerResNet34LmV1, values).unwrap()

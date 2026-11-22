@@ -1,6 +1,8 @@
 """Run the native active-switch regression on the locked pair and 12 LibriSpeech pairs."""
 
+import argparse
 import io
+import json
 import os
 from pathlib import Path
 import re
@@ -63,10 +65,10 @@ def write_clip(path, pcm):
         wav.writeframes(pcm)
 
 
-def observation(run):
+def observation(run, speaker_model=duplex.BASELINE_MODEL):
     model = re.findall(r"^handoff speaker model: (\S+)$", run.stderr, re.M)
-    if model != [duplex.BASELINE_MODEL]:
-        return "unavailable", "shipping encoder not confirmed"
+    if model != [speaker_model]:
+        return "unavailable", "requested speaker policy not confirmed"
     lines = run.stdout.splitlines()
     if (run.returncode == 0 and f"test {TEST} ... ok" in lines
             and any(s.startswith("test result: ok. 1 passed; 0 failed; 0 ignored;") for s in lines)):
@@ -79,28 +81,28 @@ def observation(run):
     return "unavailable", "native handoff result not confirmed"
 
 
-def evaluate(pair, owner, stranger):
+def evaluate(pair, owner, stranger, speaker_model):
     env = {**os.environ, "ORT_SKIP_DOWNLOAD": "1", "EON_VOICE_MODELS": str(duplex.MODELS),
-           "EON_SPEAKER_MODEL": duplex.BASELINE_MODEL, "EON_HANDOFF_OWNER_WAV": str(owner),
+           **duplex.policy_env(speaker_model), "EON_HANDOFF_OWNER_WAV": str(owner),
            "EON_HANDOFF_STRANGER_WAV": str(stranger)}
     run = subprocess.run(["cargo", "test", "--offline", "--locked", "-p", "eon-voice", "--test", "speaker_e2e",
                           "--", "--exact", TEST, "--nocapture", "--format", "pretty"],
                          cwd=duplex.ROOT / "engine/core-rs", env=env, text=True, capture_output=True)
-    status, reason = observation(run)
+    status, reason = observation(run, speaker_model)
     if status != "passed":
         print(f"{pair}: {reason}\n{run.stdout}\n{run.stderr}", file=sys.stderr, flush=True)
-    return {"pair": pair, "status": status, "reason": reason, "native_exit_code": run.returncode}
+    return {"pair": pair, "speaker_model": speaker_model, "status": status, "reason": reason, "native_exit_code": run.returncode}
 
 
-def run_pairs():
+def run_pairs(speaker_model=duplex.BASELINE_MODEL):
     models = duplex.locked_models()
-    duplex.verify_native_models(models, duplex.BASELINE_MODEL)
+    duplex.verify_native_models(models, speaker_model)
     try:
         paths = duplex.verified_paths(models, duplex.RECORDINGS)
     except duplex.INPUT_ERRORS as error:
-        yield {"pair": "locked", "status": "unavailable", "reason": str(error), "native_exit_code": None}
+        yield {"pair": "locked", "speaker_model": speaker_model, "status": "unavailable", "reason": str(error), "native_exit_code": None}
     else:
-        yield evaluate("locked", paths["voice-test-sensevoice-en"], paths["voice-test-zipformer-0"])
+        yield evaluate("locked", paths["voice-test-sensevoice-en"], paths["voice-test-zipformer-0"], speaker_model)
     clips = reader_clips()
     with tempfile.TemporaryDirectory(prefix="eon-handoff-") as tmp:
         work = Path(tmp).resolve()
@@ -110,5 +112,23 @@ def run_pairs():
             negative_id, other = clips[negative][1]
             write_clip(owner, enroll + query)
             write_clip(stranger, other)
-            yield {**evaluate(f"{reader}:{negative}", owner, stranger),
+            yield {**evaluate(f"{reader}:{negative}", owner, stranger, speaker_model),
                    "utterances": [enroll_id, query_id, negative_id]}
+
+
+def main(argv=None):
+    cli = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    cli.add_argument("--speaker-model", choices=duplex.POLICIES, default=duplex.BASELINE_MODEL)
+    status = 0
+    try:
+        for row in run_pairs(cli.parse_args(argv).speaker_model):
+            print(json.dumps(row), flush=True)
+            status = max(status, {"passed": 0, "failed": 1, "unavailable": 2}[row["status"]])
+    except INPUT_ERRORS as error:
+        print(error, file=sys.stderr)
+        return 2
+    return status
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

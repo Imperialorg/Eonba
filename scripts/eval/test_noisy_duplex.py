@@ -83,6 +83,21 @@ class ReportingTests(unittest.TestCase):
     verified = "recorded owner: verified after 500 ms of fixture audio\n"
     ok = "test result: ok. 1 passed; 0 failed; 0 ignored;"
 
+    def test_agreement_requires_both_pins_and_cannot_inherit_a_single_model_pass(self):
+        with patch.object(bench, "verified_paths", return_value={
+                "silero-vad-v5": bench.MODELS / "vad/silero_vad.onnx",
+                **{k: bench.MODELS / v for k, v in bench.SPEAKER_MODELS.items()}}) as pins:
+            bench.verify_native_models({}, bench.AGREEMENT)
+        self.assertEqual(pins.call_args.args[1], ("silero-vad-v5", bench.BASELINE_MODEL, "camplusplus-zh-en-advanced"))
+        run = subprocess.CompletedProcess([], 0, self.ok, f"recorded speaker model: {bench.BASELINE_MODEL}\n"
+                                          + self.rejected + self.verified)
+        with patch.object(bench.subprocess, "run", return_value=run) as invoke, contextlib.redirect_stderr(io.StringIO()):
+            self.assertIn("unavailable", bench.evaluate(bench.CLEAN, "a", "b", bench.AGREEMENT))
+        env = invoke.call_args.kwargs["env"]
+        self.assertEqual((env["EON_SPEAKER_MODEL"], env["EON_SPEAKER_CONFIRMATION"]),
+                         (bench.BASELINE_MODEL, "camplusplus-zh-en-advanced"))
+        self.assertEqual(bench.policy_env(bench.BASELINE_MODEL)["EON_SPEAKER_CONFIRMATION"], "none")
+
     def test_rejection_survives_owner_failure_but_missing_observations_stay_null(self):
         result = bench.observations(self.rejected, 101)
         self.assertEqual(result["non_owner_embeddings_rejected"], 3)

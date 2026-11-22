@@ -2,12 +2,11 @@
 
 use std::path::PathBuf;
 
-use super::{common, load_speaker, models};
+use super::{RecordedEnrollment, common, load_speaker, models};
 use eon_voice::TaskId;
 use eon_voice::barge_in::BargeIn;
 use eon_voice::coordinator::{BargeInCoordinator, CANDIDATE_SAMPLES, DuplexReflex};
 use eon_voice::ring::pcm_ring;
-use eon_voice::speaker::{SpeakerEmbedding, SpeakerGate};
 use eon_voice::vad::SileroVad;
 
 const BLOCK: usize = 160;
@@ -26,12 +25,11 @@ fn speech_onset(pcm: &[f32]) -> &[f32] {
 
 // Owner -> stranger -> held-out owner, with uninterrupted render and a single
 // VAD, echo path, speaker gate and audit slot across both splices.
-fn handoff(owner: &SpeakerEmbedding, prelude: &[f32], stranger: &[f32], returning: &[f32]) -> Option<(u64, u64, usize)> {
+fn handoff(enrollment: &RecordedEnrollment, prelude: &[f32], stranger: &[f32], returning: &[f32]) -> Option<(u64, u64, usize)> {
     let signal = BargeIn::new();
-    let gate = SpeakerGate::enroll(owner, 0.35).unwrap();
-    let coordinator = BargeInCoordinator::new(TaskId::new(), signal.clone(), gate);
-    let audit = coordinator.audit();
     let speaker = load_speaker();
+    let coordinator = BargeInCoordinator::new(TaskId::new(), signal.clone(), enrollment.policy());
+    let audit = coordinator.audit();
     let vad = SileroVad::load(models().join("vad/silero_vad.onnx")).unwrap();
     let mut reflex = DuplexReflex::new(coordinator, vad, speaker, Some(0)).unwrap();
     let (mut tx, mut rx) = pcm_ring(BLOCK);
@@ -107,9 +105,8 @@ fn active_speaker_switches_do_not_credit_a_departed_owner() {
     let owner = common::read_pcm16_mono_16k(&owner);
     let stranger = common::read_pcm16_mono_16k(&stranger);
     let half = owner.len() / 2;
-    let mut embedder = load_speaker();
-    eprintln!("handoff speaker model: {}", embedder.encoder().model_id());
-    let enrollment = embedder.embed(&owner[..half]).unwrap();
+    let enrollment = RecordedEnrollment::new(&mut load_speaker(), &owner[..half]);
+    eprintln!("handoff speaker model: {}", enrollment.id());
     let returning = speech_onset(&owner[half..]);
     let stranger = speech_onset(&stranger);
     // Equal-energy broadband noise on both sides of the switch, normalized by
