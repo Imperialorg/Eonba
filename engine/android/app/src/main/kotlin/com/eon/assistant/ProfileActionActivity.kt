@@ -22,6 +22,7 @@ import uniffi.eon_uniffi.selectModelProfile
 class ProfileActionActivity : Activity() {
     private lateinit var outcome: TextView
     private var resumed = false
+    private var awaitingStart = false
     internal var review: ProfileActionReview? = null
         private set
 
@@ -51,7 +52,7 @@ class ProfileActionActivity : Activity() {
         })
     }
 
-    internal fun activePage() = resumed && !isInMultiWindowMode &&
+    internal fun activePage() = resumed && !isFinishing && !isDestroyed && !isInMultiWindowMode &&
         !isInPictureInPictureMode && selectedAndUnlocked(this)
 
     private fun showOutcome(message: Int?) {
@@ -69,6 +70,7 @@ class ProfileActionActivity : Activity() {
         showOutcome(null)
         val next = ProfileActionReview(this, binding)
         review = next
+        awaitingStart = true
         try {
             startLocalVoiceInteraction(next.issue())
             outcome.postDelayed({
@@ -87,8 +89,10 @@ class ProfileActionActivity : Activity() {
         super.onLocalVoiceInteractionStarted()
         val r = review
         val interactor = voiceInteractor
+        awaitingStart = false
         if (r == null || !r.valid() || r.endShowing == null || interactor == null || !r.attach(interactor)) {
             cancel()
+            finish()
             return
         }
         // The OS inserts this activity's own task ID and assist token into the notification.
@@ -129,6 +133,9 @@ class ProfileActionActivity : Activity() {
         if (review !== old) return
         review = null
         old.forget()
+        // Android owns ActivityRecord.pendingVoiceInteractionStart. A failed/missing ACK
+        // can leave it set even after our ticket is gone. Never retry using that record.
+        if (awaitingStart) finish()
     }
 
     private fun cancel() {
@@ -136,7 +143,7 @@ class ProfileActionActivity : Activity() {
         val end = old.endShowing
         release(old)
         // Finish only the session that accepted this ticket, never a replacement interaction.
-        end?.invoke()
+        end?.invoke(true)
     }
 
     override fun onLocalVoiceInteractionStopped() {
@@ -159,7 +166,7 @@ internal class ProfileActionReview(val source: ProfileActionActivity, private va
     private val deadline = SystemClock.elapsedRealtime() + TIMEOUT
     private var preparedId: Int? = null
     private var interactor: VoiceInteractor? = null
-    var endShowing: (() -> Unit)? = null
+    var endShowing: ((finishSession: Boolean) -> Unit)? = null
     var permitted: (() -> Boolean)? = null
     var discovering = false
     var offered = false
@@ -181,21 +188,24 @@ internal class ProfileActionReview(val source: ProfileActionActivity, private va
     private fun matchesShow(flags: Int, args: Bundle?) = try {
         flags == VoiceInteractionSession.SHOW_SOURCE_ACTIVITY && valid() && args?.getBinder(KEY) === token
     } catch (_: RuntimeException) { false }
+    private fun currentPreparation() = Build.VERSION.SDK_INT < 34 ||
+        (binding.preparedProfile === this && preparedId != null && preparedId == binding.latestLocalShowId)
     fun beginPerform(): Bundle? {
-        if (!offered || completed || performToken != null) return null
+        if (!currentPreparation() || !offered || completed || performToken != null) return null
         // The ticket sent in the original show options cannot authorize a perform callback.
         return Bundle().apply { putBinder(KEY, Binder().also { performToken = it }) }
     }
     fun consumePerform(args: Bundle): Boolean {
         val expected = performToken ?: return false
         val actual = try { args.getBinder(KEY) } catch (_: RuntimeException) { null }
-        if (actual !== expected) return false
+        if (!currentPreparation() || actual !== expected) return false
         performToken = null
         completed = true
         return true
     }
     fun forget() {
         if (pending === this) pending = null
+        if (binding.preparedProfile === this) binding.preparedProfile = null
         preparedId = null
         performToken = null
         permitted = null
@@ -208,22 +218,33 @@ internal class ProfileActionReview(val source: ProfileActionActivity, private va
         const val ACTION = "com.eon.assistant.CHECK_MODEL_PROFILE"
         const val RESULT = "profile"
         private var pending: ProfileActionReview? = null
-        private fun showId(args: Bundle?) = try {
+        fun showId(args: Bundle?) = try {
             args?.getInt(VoiceInteractionSession.KEY_SHOW_SESSION_ID, -1)?.takeIf { it > 0 }
         } catch (_: RuntimeException) { null }
         fun prepared(owner: VoiceHudRegistry.Binding, flags: Int, args: Bundle) {
+            if (owner !== voiceHud.binding) return
+            // Every preparation supersedes the previous show, including a gesture with
+            // no pending ticket. Read only the OS ID for local shows; not foreground data.
+            owner.latestLocalShowId = if (flags == VoiceInteractionSession.SHOW_SOURCE_ACTIVITY) showId(args) else null
+            owner.preparedProfile?.let { old ->
+                val end = old.endShowing
+                old.source.release(old)
+                end?.invoke(false) // Android may reuse this session for the replacement
+            }
             val r = pending ?: return
-            if (r.binding === owner && r.preparedId == null && r.matchesShow(flags, args)) {
-                r.preparedId = showId(args)
+            if (r.binding === owner && owner.latestLocalShowId != null && r.matchesShow(flags, args)) {
+                r.preparedId = owner.latestLocalShowId
+                owner.preparedProfile = r // stays bound to this preparation after take()
             }
         }
         // Deliberately refuse to reuse a session with assist callbacks from an earlier showing.
         fun candidate() = pending
         fun take(candidate: ProfileActionReview?, flags: Int, args: Bundle?): ProfileActionReview? {
             val r = pending ?: return null
+            if (!r.matchesShow(flags, args) || !r.currentPreparation() ||
+                (Build.VERSION.SDK_INT >= 34 && r.preparedId != showId(args))) return null
             pending = null
-            return r.takeIf { r === candidate && r.matchesShow(flags, args) &&
-                (Build.VERSION.SDK_INT < 34 || (r.preparedId != null && r.preparedId == showId(args))) }
+            return r.takeIf { it === candidate }
         }
     }
 }

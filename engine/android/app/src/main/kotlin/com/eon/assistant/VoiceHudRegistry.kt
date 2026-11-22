@@ -26,7 +26,10 @@ internal sealed interface TaskSample {
 
 /** Main-thread only. A window belongs to one OS binding; neither survives a process restart. */
 internal class VoiceHudRegistry {
-    class Binding
+    class Binding {
+        var latestLocalShowId: Int? = null
+        var preparedProfile: ProfileActionReview? = null
+    }
     var binding: Binding? = null
         private set
     private var visible: Surface? = null

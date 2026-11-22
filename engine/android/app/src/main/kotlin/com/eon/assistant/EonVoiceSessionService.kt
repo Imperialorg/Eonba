@@ -42,7 +42,8 @@ internal inline fun ownedContextAllowed(userDisabled: () -> Int, assistRestricte
 }
 
 private class EonVoiceSession(context: Context) : VoiceInteractionSession(context) {
-    private val surface = voiceHud.Surface(voiceHud.binding, ::closeHud)
+    private val binding = voiceHud.binding
+    private val surface = voiceHud.Surface(binding, ::closeHud)
     private val main = Handler(Looper.getMainLooper())
     private var hud: VoiceHudView? = null
     private var work: FutureTask<ProfileCheck.Complete>? = null
@@ -109,7 +110,14 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
         val allowed = surface.show(review != null || ticket != null || userInvokedVoiceHud(showFlags), eligible)
         if (allowed && review != null) {
             actionReview = review
-            review.endShowing = { if (actionReview === review) closeHud() }
+            review.endShowing = { finishSession ->
+                if (actionReview === review) {
+                    if (finishSession) closeHud() else {
+                        clearShowing()
+                        setUiEnabled(false)
+                    }
+                }
+            }
         }
         if (allowed && ticket != null) {
             contextDisplay = ticket
@@ -121,6 +129,18 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
     }
 
     override fun onShow(args: Bundle?, showFlags: Int) {
+        if (showFlags == SHOW_SOURCE_ACTIVITY && !surface.canUse(eligible())) {
+            clearShowing()
+            setUiEnabled(false)
+            // doShow sends the OS local-start acknowledgement only after onShow returns.
+            // Leave this rejected show headless; release it only if it wasn't replaced.
+            val id = if (Build.VERSION.SDK_INT >= 34) ProfileActionReview.showId(args) else null
+            main.postDelayed({
+                if (binding != null && voiceHud.binding === binding &&
+                    (Build.VERSION.SDK_INT < 34 || (id != null && id == binding.latestLocalShowId))) closeHud()
+            }, ProfileActionReview.TIMEOUT)
+            return
+        }
         if (!requireVisible()) return
         FloatingHudService.stopFrom(context)
         InspectionAccess.cancel()

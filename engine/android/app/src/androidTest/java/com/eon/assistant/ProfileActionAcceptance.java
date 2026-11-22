@@ -18,7 +18,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 
-/** External observer; no grants, context injection, global window queries or permission dialogs. */
+/** External observer; no grants, context injection, foreign UI trees or permission dialogs. */
 public final class ProfileActionAcceptance extends Instrumentation {
     private static final String APP = "com.eon.assistant";
     private static final String COMPLETED =
@@ -51,22 +51,44 @@ public final class ProfileActionAcceptance extends Instrumentation {
 
     private static void require(boolean value) { if (!value) throw new AssertionError(); }
 
+    private void requireShellField(String script, String expected) throws Exception {
+        ParcelFileDescriptor[] pipes = ui.executeShellCommandRw("sh");
+        try (BufferedReader fields = new BufferedReader(new InputStreamReader(
+                new ParcelFileDescriptor.AutoCloseInputStream(pipes[0]), StandardCharsets.US_ASCII))) {
+            try (ParcelFileDescriptor.AutoCloseOutputStream input = new ParcelFileDescriptor.AutoCloseOutputStream(pipes[1])) {
+                input.write(script.getBytes(StandardCharsets.US_ASCII));
+            }
+            String field = fields.readLine();
+            require(field != null && expected.equals(field.trim()) && fields.readLine() == null);
+        }
+    }
+
     private void bindingClosed() throws Exception {
         step = "active-service";
         require(VoiceInteractionService.isActiveService(getTargetContext(),
                 new ComponentName(APP, APP + ".EonVoiceInteractionService")));
         step = "closed-collection";
-        // UiAutomation executes an argv, not a shell pipeline. Filter inside the device shell.
-        ParcelFileDescriptor[] pipes = ui.executeShellCommandRw("sh");
-        try (BufferedReader fields = new BufferedReader(new InputStreamReader(
-                new ParcelFileDescriptor.AutoCloseInputStream(pipes[0]), StandardCharsets.US_ASCII))) {
-            try (ParcelFileDescriptor.AutoCloseOutputStream script = new ParcelFileDescriptor.AutoCloseOutputStream(pipes[1])) {
-                script.write("dumpsys voiceinteraction | grep -E '^[[:space:]]*mDisabledShowContext='\n"
-                        .getBytes(StandardCharsets.US_ASCII));
-            }
-            String field = fields.readLine();
-            require(field != null && "mDisabledShowContext=3".equals(field.trim()) && fields.readLine() == null);
+        requireShellField("dumpsys voiceinteraction | grep -E '^[[:space:]]*mDisabledShowContext='\n",
+                "mDisabledShowContext=3");
+    }
+
+    private void bootstrapOwnedFocus() throws Exception {
+        long until = SystemClock.elapsedRealtime() + 1_000;
+        while (SystemClock.elapsedRealtime() < until) {
+            AccessibilityNodeInfo r = root;
+            if (r != null && r.refresh() && TextUtils.equals(APP, r.getPackageName())
+                    && (!r.findAccessibilityNodeInfosByViewId(APP + ":id/profile_action_open").isEmpty()
+                    || !r.findAccessibilityNodeInfosByViewId(APP + ":id/profile_action_status").isEmpty())) return;
+            SystemClock.sleep(50);
         }
+        step = "owned-window-focus";
+        // Bringing an already-foreground task forward need not generate an event. Tab moves
+        // keyboard focus without activating a control. Send it once, only on the verified
+        // default display; return no window titles or UI data to the observer from dumpsys.
+        requireShellField("dumpsys window displays | sed -nE '/^ *Display: mDisplayId=0( |$)/,"
+                + "/^ *Display: mDisplayId=/p' | grep -Eq '^ *mCurrentFocus=Window\\{[0-9a-f]+ u0 "
+                + "com\\.eon\\.assistant/(com\\.eon\\.assistant)?\\.(AssistantActivity|ProfileActionActivity)\\}$' "
+                + "&& input -d 0 keyevent KEYCODE_TAB && echo owned\n", "owned");
     }
 
     private static AccessibilityNodeInfo ownedRoot(AccessibilityNodeInfo n) {
@@ -189,8 +211,9 @@ public final class ProfileActionAcceptance extends Instrumentation {
                 if (r != null) root = r;
             });
             if (deathPhase != null) {
-                shell("am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER"
+                shell("am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER"
                         + " -f 0x10000000 -n com.eon.assistant/.AssistantActivity");
+                bootstrapOwnedFocus();
                 observeDeathPhase();
                 result.putString("profileDeath", "arm".equals(deathPhase) ? "ARMED-visible-action" : "PASS-fresh-consent");
                 finish(Activity.RESULT_OK, result);
