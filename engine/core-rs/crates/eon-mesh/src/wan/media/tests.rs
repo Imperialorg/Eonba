@@ -67,6 +67,30 @@ async fn iroh_and_qos_tests_primary_capture_rejects_a_copy_before_arming() {
 }
 
 #[test]
+fn iroh_and_qos_tests_copy_id_cannot_acknowledge_two_different_challenges() {
+    let window = Mutex::new(Window::default());
+    let encode = |seq: i64| {
+        let mut bytes = vec![COPY_ID_KEY];
+        bytes.extend_from_slice(&7u64.to_le_bytes());
+        AudioPcmChunk {
+            sequence_number: seq,
+            pcm_data: vec![seq as u8; 16],
+            ..Default::default()
+        }
+        .encode_raw(&mut bytes);
+        Bytes::from(bytes)
+    };
+    assert_eq!(
+        decode_copy(encode(1), &window)
+            .unwrap()
+            .unwrap()
+            .sequence_number,
+        1
+    );
+    assert!(decode_copy(encode(2), &window).unwrap().is_none());
+}
+
+#[test]
 fn iroh_and_qos_tests_media_window_reorder_replay_floor_and_large_jump() {
     let mut w = Window::default();
     for (id, expected) in [
@@ -388,6 +412,12 @@ async fn iroh_and_qos_tests_bound_media_is_explicit_deduped_and_independent_of_s
         (pcm.clone(), Arrival::PrimaryCopy)
     );
     left.conn.close(0u8.into(), b"test primary loss");
+    // Close between dequeue and provenance check: do not discard the
+    // primary packet or allow an already-dequeued standby copy to substitute.
+    let packet = Bytes::from_static(b"dequeued");
+    let (primary, standby) = after_dequeue(&left.conn, packet.clone(), false).unwrap();
+    assert!(!standby && primary == packet);
+    assert!(after_dequeue(&left.conn, packet, true).is_err());
     assert!(left.send_redundant_audio(&pcm).is_err());
     assert!(left.recv_audio().await.is_err());
     tokio::join!(left.close(), right.close());

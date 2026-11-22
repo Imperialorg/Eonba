@@ -4,7 +4,10 @@ from unittest.mock import patch
 from wan_field_timing_report import timing_report
 
 
-SENT = """eon_continuity_timing_v2 clock=sender_monotonic
+CAPTURE = "1a" * 32
+TX_HEADER = f"eon_continuity_timing_v3 clock=sender_monotonic mode=primary capture_id={CAPTURE}"
+RX_HEADER = f"eon_continuity_v2 clock=receiver_monotonic mode=primary capture_id={CAPTURE}"
+SENT = TX_HEADER + """
 seq=1 slot=1 send_lag_ns=1000 decode_receipt_rtt_ns=4998000
 seq=2 slot=2 send_lag_ns=1000 decode_receipt_rtt_ns=60000000
 seq=3 slot=4 send_lag_ns=1 decode_receipt_rtt_ns=4999000
@@ -12,7 +15,7 @@ seq=4 slot=5 send_lag_ns=1 decode_receipt_rtt_ns=unavailable
 seq=5 slot=6 send_lag_ns=1 decode_receipt_rtt_ns=unavailable
 status=complete timing=observed limit=1500 queued=5 skipped=1495 acknowledged=3 unacknowledged=2 peer_missing=1 decoded_without_receipt=1 max_decode_receipt_rtt_upper_us=60000 invalid_returns=0
 """
-RECEIVED = """eon_continuity_v1 clock=receiver_monotonic
+RECEIVED = RX_HEADER + """
 mark=begin rx_us=30000
 mark=end rx_us=70000
 seq=1 rx_us=1000 gap_us=unknown phase=before
@@ -24,6 +27,29 @@ status=complete bracketed=true limit=1500 queued=5 unique=4 missing=1 duplicates
 
 
 class FieldTimingReportTests(unittest.TestCase):
+    def test_capture_and_negotiated_mode_must_match_both_logs_and_request(self):
+        with self.assertRaisesRegex(ValueError, "different captures"):
+            timing_report(SENT, RECEIVED.replace(CAPTURE, "2b" * 32), False)
+        for sender, receiver, media in [
+            (SENT, RECEIVED.replace("mode=primary", "mode=bound_copies"), False),
+            (SENT, RECEIVED, True),
+        ]:
+            with self.assertRaisesRegex(ValueError, "negotiated mode"):
+                timing_report(sender, receiver, media)
+
+    def test_only_disjoint_sender_intervals_constrain_receiver_order(self):
+        # seq=3 decodes before seq=2. Even equality on the sender clock
+        # doesn't prove an ordering if observations fell on the same tick.
+        def with_rtt(ns):
+            return (SENT.replace("decode_receipt_rtt_ns=60000000", f"decode_receipt_rtt_ns={ns}")
+                    .replace("slot=2 send_lag_ns=1000", "slot=2 send_lag_ns=1400")
+                    .replace("max_decode_receipt_rtt_upper_us=60000", "max_decode_receipt_rtt_upper_us=39999"))
+        timing_report(with_rtt(39_998_601), RECEIVED, False)
+        # One ns earlier means 2's echo preceded 3's send. Its upper bound
+        # prints in the same us bucket; check raw ns, not rounded bounds.
+        with self.assertRaisesRegex(ValueError, "receiver order contradicts"):
+            timing_report(with_rtt(39_998_600), RECEIVED, False)
+
     def test_join_uses_sequence_not_arrival_order_or_sender_phase(self):
         result = timing_report(SENT, RECEIVED, False)
         rows = result.text.splitlines()
@@ -51,13 +77,13 @@ class FieldTimingReportTests(unittest.TestCase):
         self.assertIn("phase=all sequences=5 proven_under_5ms=0 bound_ge_5ms_inconclusive=3 ", report)
 
     def test_strict_proof_requires_every_nominal_slot_not_just_every_queued_sequence(self):
-        tx = """eon_continuity_timing_v2 clock=sender_monotonic
+        tx = TX_HEADER + """
 seq=1 slot=1 send_lag_ns=0 decode_receipt_rtt_ns=1000000
 seq=2 slot=2 send_lag_ns=0 decode_receipt_rtt_ns=4999000
 seq=3 slot=3 send_lag_ns=1000 decode_receipt_rtt_ns=4000000
 status=complete timing=observed limit=1500 queued=3 skipped=1497 acknowledged=3 unacknowledged=0 peer_missing=0 decoded_without_receipt=0 max_decode_receipt_rtt_upper_us=4999 invalid_returns=0
 """
-        rx = """eon_continuity_v1 clock=receiver_monotonic
+        rx = RX_HEADER + """
 mark=begin rx_us=2000
 mark=end rx_us=3000
 seq=1 rx_us=1000 gap_us=unknown phase=before
@@ -88,7 +114,8 @@ status=complete bracketed=true limit=1500 queued=3 unique=3 missing=0 duplicates
 
     def test_missing_or_inconsistent_sender_evidence_fails(self):
         for old, new in [
-            ("eon_continuity_timing_v2", "eon_continuity_timing_v1"),
+            ("eon_continuity_timing_v3", "eon_continuity_timing_v2"),
+            (CAPTURE, "unavailable"),
             ("seq=4 slot=5 send_lag_ns=1 decode_receipt_rtt_ns=unavailable\n", ""),
             ("slot=2 send_lag_ns=1000", "slot=2 send_lag_ns=999"),
             ("slot=4 ", "slot=2 "),
@@ -158,20 +185,22 @@ status=complete bracketed=true limit=1500 queued=3 unique=3 missing=0 duplicates
                 return ""
             return " via=standby_copy" if line.startswith("seq=5 ") else " via=primary_copy"
 
-        copies = "\n".join(line + lane(line) for line in RECEIVED.splitlines())
+        tx = SENT.replace("mode=primary", "mode=bound_copies")
+        copies = "\n".join(line + lane(line) for line in RECEIVED.splitlines()).replace("mode=primary", "mode=bound_copies")
         with self.assertRaisesRegex(ValueError, "missing decodes"):
-            timing_report(SENT, copies, True)
+            timing_report(tx, copies, True)
         rx = copies.replace("status=", "seq=4 rx_us=100000 gap_us=5000 phase=after via=primary_copy\nstatus=")
         rx = rx.replace("unique=4 missing=1", "unique=5 missing=0")
-        tx = SENT.replace("peer_missing=1 decoded_without_receipt=1", "peer_missing=0 decoded_without_receipt=2")
+        tx = tx.replace("peer_missing=1 decoded_without_receipt=1", "peer_missing=0 decoded_without_receipt=2")
         self.assertIn("seq=5 slot=6 phase=after via=standby_copy send_lag_ns=1 decode_receipt_rtt_upper_us=unavailable",
                       timing_report(tx, rx, True).text)
         with self.assertRaisesRegex(ValueError, "no standby-first"):
             timing_report(tx, rx.replace("via=standby_copy", "via=primary_copy"), True)
         with self.assertRaisesRegex(ValueError, "lane"):
-            timing_report(tx, rx, False)
+            timing_report(tx.replace("mode=bound_copies", "mode=primary"),
+                          rx.replace("mode=bound_copies", "mode=primary"), False)
         with self.assertRaisesRegex(ValueError, "lane"):
-            timing_report(SENT, RECEIVED, True)
+            timing_report(tx, RECEIVED.replace("mode=primary", "mode=bound_copies"), True)
 
 
 if __name__ == "__main__":

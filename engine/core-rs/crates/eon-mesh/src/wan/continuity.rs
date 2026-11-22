@@ -124,9 +124,54 @@ struct SentProbe {
     bound: Option<Duration>,
 }
 
+struct ReportBinding {
+    id: blake3::Hash,
+    mode: &'static str,
+}
+
+impl ReportBinding {
+    fn new(ep: &WanEndpoint, plan: CapturePlan) -> Result<Self, &'static str> {
+        // Capture consumes the authenticated primary, so the TLS session is
+        // fresh per capture. Publish a hash, never export bytes or peer IDs.
+        let [hi, lo] = plan.seconds.to_be_bytes();
+        let mut material = [0; 32];
+        ep.conn
+            .export_keying_material(
+                &mut material,
+                b"EXPORTER-eon-continuity-public-report-v1",
+                &[u8::from(plan.copies), hi, lo],
+            )
+            .map_err(|_| "report_binding_failed")?;
+        Ok(Self {
+            id: blake3::hash(&material),
+            mode: if plan.copies {
+                "bound_copies"
+            } else {
+                "primary"
+            },
+        })
+    }
+}
+
+impl fmt::Display for ReportBinding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "mode={} capture_id={}", self.mode, self.id)
+    }
+}
+
+type Return = super::EonResult<Option<AudioPcmChunk>>;
+
+fn plain_return(packet: Bytes) -> Return {
+    if super::media::tagged(&packet) {
+        return Err(super::invalid("unexpected copy in primary timing plan"));
+    }
+    super::wire::decode_audio(packet).map(Some)
+}
+
 /// Sender-local timing evidence for this endpoint only, including partial runs.
 pub struct Transmission {
     status: Result<(), &'static str>,
+    binding: Option<ReportBinding>,
     limit: u32,
     queued: u32,
     // Indexed by sequence - 1. Only allocated for an agreed timed run.
@@ -140,10 +185,11 @@ impl Transmission {
         self.status.map(|()| self.queued)
     }
 
-    fn record_echo(&mut self, packet: super::EonResult<Bytes>, now: Instant) {
-        if let Ok(packet) = packet
-            && !super::media::tagged(&packet)
-            && let Ok(pcm) = super::wire::decode_audio(packet)
+    fn record_echo(&mut self, packet: Return, now: Instant) {
+        if let Ok(None) = packet {
+            return; // duplicate or expired bound copy ID
+        }
+        if let Ok(Some(pcm)) = packet
             && pcm.timestamp_ms == 0
             && let Ok(seq) = usize::try_from(pcm.sequence_number)
             && let Some(probe) = seq.checked_sub(1).and_then(|i| self.samples.get_mut(i))
@@ -165,7 +211,7 @@ impl Transmission {
     // deadline or reliable exchange first; don't cancel a partially read stream.
     async fn observe_until<T>(
         &mut self,
-        mut read_return: impl AsyncFnMut() -> Option<super::EonResult<Bytes>>,
+        mut read_return: impl AsyncFnMut() -> Option<Return>,
         until: impl Future<Output = T>,
     ) -> T {
         if self.samples.is_empty() {
@@ -188,7 +234,12 @@ impl Transmission {
 
 impl fmt::Display for Transmission {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "eon_continuity_timing_v2 clock=sender_monotonic")?;
+        write!(f, "eon_continuity_timing_v3 clock=sender_monotonic ")?;
+        if let Some(binding) = &self.binding {
+            writeln!(f, "{binding}")?;
+        } else {
+            writeln!(f, "mode=unnegotiated capture_id=unavailable")?;
+        }
         // Round up so the printed upper bound never understates the RTT.
         let upper_us = |rtt: Option<Duration>| {
             rtt.map_or_else(
@@ -236,6 +287,7 @@ impl fmt::Display for Transmission {
 pub async fn transmit_observed(ep: WanEndpoint, plan: CapturePlan) -> Transmission {
     let mut out = Transmission {
         status: Ok(()),
+        binding: None,
         limit: plan.limit(),
         queued: 0,
         samples: Vec::with_capacity(if plan.timing {
@@ -274,16 +326,9 @@ pub async fn transmit_observed(ep: WanEndpoint, plan: CapturePlan) -> Transmissi
         }
         let read_return = async || {
             let packet = if plan.copies {
-                let lane = ep.media.as_ref()?;
-                let packet = match lane.read_packet(&ep.conn).await {
-                    Ok((packet, _)) => packet,
-                    // Primary close revokes standby reads. Already buffered
-                    // primary returns can still be accounted for at shutdown.
-                    Err(_) => ep.conn.read_datagram().await.ok()?,
-                };
-                super::media::unpack_copy(packet).map(|(_, payload)| payload)
+                ep.media.as_ref()?.read_return(&ep.conn).await?
             } else {
-                Ok(ep.conn.read_datagram().await.ok()?)
+                plain_return(ep.conn.read_datagram().await.ok()?)
             };
             ep.budget.observe(TrafficClass::Audio);
             Some(packet)
@@ -296,6 +341,7 @@ pub async fn transmit_observed(ep: WanEndpoint, plan: CapturePlan) -> Transmissi
             return Err("invalid_ready_or_plan");
         }
         if plan.timing {
+            let binding = ReportBinding::new(&ep, plan)?;
             timeout(CONTROL_WAIT, ep.send(&plan.timed_start()))
                 .await
                 .map_err(|_| "start_timeout")?
@@ -307,6 +353,7 @@ pub async fn transmit_observed(ep: WanEndpoint, plan: CapturePlan) -> Transmissi
             if started != control(STARTED, plan.limit()) {
                 return Err("invalid_started_or_plan");
             }
+            out.binding = Some(binding);
         }
         // One sender-local epoch after the peer's application-level barrier.
         let start = Instant::now();
@@ -411,7 +458,7 @@ pub async fn transmit_observed(ep: WanEndpoint, plan: CapturePlan) -> Transmissi
 pub struct Capture {
     status: &'static str,
     limit: u32,
-    timing: bool,
+    binding: Option<ReportBinding>,
     queued: Option<u32>,
     // First PCM decode of each unique sequence, in local arrival order.
     receipts: Vec<(u32, Duration, Arrival)>,
@@ -449,7 +496,11 @@ impl Capture {
 
 impl fmt::Display for Capture {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "eon_continuity_v1 clock=receiver_monotonic")?;
+        if let Some(binding) = &self.binding {
+            writeln!(f, "eon_continuity_v2 clock=receiver_monotonic {binding}")?;
+        } else {
+            writeln!(f, "eon_continuity_v1 clock=receiver_monotonic")?;
+        }
         for (name, t) in ["begin", "end"].iter().zip(&self.marks) {
             writeln!(f, "mark={name} rx_us={}", t.as_micros())?;
         }
@@ -492,7 +543,7 @@ impl fmt::Display for Capture {
             value(max_gap),
             value(marked_gap),
             value(self.queued.map(|n| self.limit - n)),
-            if self.timing {
+            if self.binding.is_some() {
                 "see_sender"
             } else {
                 "unavailable"
@@ -528,7 +579,7 @@ pub async fn receive(
     let mut out = Capture {
         status: "timeout",
         limit,
-        timing: false,
+        binding: None,
         queued: None,
         receipts: Vec::with_capacity(limit as usize),
         duplicates: 0,
@@ -543,18 +594,21 @@ pub async fn receive(
                 .await
                 .map_err(|_| "start_timeout")?
                 .map_err(|_| "start_failed")?;
-            (start == plan.timed_start())
-                .then_some(())
-                .ok_or("invalid_start_or_plan")
+            if start != plan.timed_start() {
+                return Err("invalid_start_or_plan");
+            }
+            ReportBinding::new(&ep, plan)
         }
         .await;
-        if let Err(status) = negotiated {
-            out.status = status;
-            let _ = timeout(CONTROL_WAIT, ep.close()).await;
-            return out;
-        }
+        out.binding = match negotiated {
+            Ok(binding) => Some(binding),
+            Err(status) => {
+                out.status = status;
+                let _ = timeout(CONTROL_WAIT, ep.close()).await;
+                return out;
+            }
+        };
         origin = Instant::now(); // validated START, not time spent negotiating
-        out.timing = true;
     }
     let mut seen = vec![false; limit as usize + 1];
     let mut echo = plan.timing.then(|| AudioPcmChunk {
@@ -687,6 +741,7 @@ mod timing_tests {
         let start = Instant::now();
         let mut out = Transmission {
             status: Ok(()),
+            binding: None,
             limit: 50,
             queued: 3,
             samples: (1..=3)
@@ -707,7 +762,7 @@ mod timing_tests {
             ..Default::default()
         };
         let at = start + Duration::from_nanos(5_000_001);
-        let packet = |pcm: &AudioPcmChunk| Ok(Bytes::from(pcm.encode_to_vec()));
+        let packet = |pcm: &AudioPcmChunk| plain_return(Bytes::from(pcm.encode_to_vec()));
         for seq in [-1, 0, 4, i64::MAX] {
             pcm.sequence_number = seq;
             out.record_echo(packet(&pcm), at);
@@ -720,7 +775,7 @@ mod timing_tests {
             pcm.pcm_data = wrong;
             out.record_echo(packet(&pcm), at);
         }
-        out.record_echo(Ok(Bytes::from_static(&[0xff])), at); // undecodable wire
+        out.record_echo(plain_return(Bytes::from_static(&[0xff])), at); // undecodable wire
         assert!(out.to_string().contains("timing=unavailable"));
         assert_eq!(out.invalid_returns, 10);
 
@@ -740,6 +795,7 @@ mod timing_tests {
     async fn iroh_and_qos_tests_continuity_bad_wire_does_not_end_pending_receipt_poll() {
         let mut out = Transmission {
             status: Ok(()),
+            binding: None,
             limit: 50,
             queued: 1,
             samples: vec![SentProbe {
@@ -765,7 +821,7 @@ mod timing_tests {
             if packet.is_none() {
                 done.take().unwrap().send(()).unwrap();
             }
-            packet.map(Ok)
+            packet.map(plain_return)
         };
         timeout(Duration::from_secs(1), out.observe_until(read, wait))
             .await

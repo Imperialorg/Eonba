@@ -26,15 +26,18 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def split_report(text, header):
+def split_report(text, header, media):
     lines = text.splitlines()
-    require(len(lines) >= 2 and lines[0] == header, f"expected {header}")
+    require(len(lines) >= 2, f"expected {header}")
+    binding = re.fullmatch(re.escape(header) + r" mode=(primary|bound_copies) capture_id=([0-9a-f]{64})", lines[0])
+    require(binding, f"missing or invalid binding in {header}")
+    require((binding[1] == "bound_copies") == media, "negotiated mode disagrees with requested copy mode")
     summary = {}
     for token in lines[-1].split():
         key, sep, value = token.partition("=")
         require(sep and key not in summary, "malformed or duplicate summary field")
         summary[key] = value
-    return lines[1:-1], summary
+    return lines[1:-1], summary, binding[2]
 
 
 def check_summary(role, actual, **expected):
@@ -47,6 +50,10 @@ class Send(NamedTuple):
     slot: int
     lag_ns: int
     rtt_ns: int | None
+
+    @property
+    def send_ns(self):
+        return (self.slot - 1) * PERIOD_NS + self.lag_ns
 
     @property
     def rtt_upper_us(self):
@@ -69,12 +76,12 @@ def sender_samples(lines):
         require(seq == len(samples) + 1, f"missing or out-of-order sender seq={seq}")
         require(previous_slot < slot <= LIMIT, f"invalid or duplicate nominal slot={slot}")
         require(lag < PERIOD_NS, f"launch outside nominal slot={slot}")
-        send_ns = (slot - 1) * PERIOD_NS + lag
-        require(previous_send is None or send_ns - previous_send >= PERIOD_NS,
+        sample = Send(slot, lag, None if row[4] == "unavailable" else int(row[4]))
+        require(previous_send is None or sample.send_ns - previous_send >= PERIOD_NS,
                 f"compressed inter-send interval at slot={slot}")
-        samples[seq] = Send(slot, lag, None if row[4] == "unavailable" else int(row[4]))
+        samples[seq] = sample
         previous_slot = slot
-        previous_send = send_ns
+        previous_send = sample.send_ns
     require(samples, "missing sender samples")
     return samples
 
@@ -119,14 +126,23 @@ def receiver_decodes(lines, queued, media):
 
 
 def timing_report(sender, receiver, media):
-    tx_rows, tx = split_report(sender, "eon_continuity_timing_v2 clock=sender_monotonic")
-    rx_rows, rx = split_report(receiver, "eon_continuity_v1 clock=receiver_monotonic")
+    tx_rows, tx, capture = split_report(sender, "eon_continuity_timing_v3 clock=sender_monotonic", media)
+    rx_rows, rx, rx_capture = split_report(receiver, "eon_continuity_v2 clock=receiver_monotonic", media)
+    require(rx_capture == capture, "reports belong to different captures")
     samples = sender_samples(tx_rows)
     queued = len(samples)
     decodes, max_gap, marked_gap = receiver_decodes(rx_rows, queued, media)
     before = [seq for seq, (phase, _) in decodes.items() if phase == "before"]
     ack = {seq for seq, sample in samples.items() if sample.rtt_upper_us is not None}
     require(ack <= decodes.keys(), "acknowledgment without a receiver decode for that sequence")
+    # In receiver row order, every preceding decode's send must already
+    # have happened by this decode's observed return. Compare sender ns only.
+    latest_send = 0
+    for seq in decodes:
+        sample = samples[seq]
+        require(sample.rtt_ns is None or sample.send_ns + sample.rtt_ns >= latest_send,
+                f"seq={seq}: receiver order contradicts sender receipt")
+        latest_send = max(latest_send, sample.send_ns)
     require(ack.intersection(before), "no acknowledged decode before removal")
     highest_before = max(before)
     require(any(seq > highest_before and decodes[seq][0] == "after" for seq in ack),
@@ -151,7 +167,7 @@ def timing_report(sender, receiver, media):
                   invalid_returns=0)
 
     counts = {phase: Counter() for phase in (*PHASES, "no_decode", "all")}
-    out = [f"eon_field_timing_join_v3 threshold_us=5000 redundant_media={int(media)}"]
+    out = [f"eon_field_timing_join_v4 threshold_us=5000 redundant_media={int(media)} capture_id={capture}"]
     for seq, sample in samples.items():
         phase, via = decodes.get(seq, ("no_decode", "none"))
         bound = sample.slot_upper_us

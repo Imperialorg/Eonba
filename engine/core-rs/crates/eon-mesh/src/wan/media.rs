@@ -15,12 +15,17 @@ pub(super) fn tagged(packet: &[u8]) -> bool {
     packet.first() == Some(&COPY_ID_KEY)
 }
 
-pub(super) fn unpack_copy(packet: Bytes) -> EonResult<(u64, Bytes)> {
+fn decode_copy(packet: Bytes, window: &Mutex<Window>) -> EonResult<Option<AudioPcmChunk>> {
     if !tagged(&packet) || !(PREFIX..=MAX_AUDIO).contains(&packet.len()) {
         return Err(invalid("invalid redundant datagram"));
     }
     let id = u64::from_le_bytes(packet[1..PREFIX].try_into().unwrap());
-    Ok((id, packet.slice(PREFIX..)))
+    let payload = packet.slice(PREFIX..);
+    if tagged(&payload) {
+        return Err(invalid("nested media copy tag"));
+    }
+    let pcm = wire::decode_audio(payload)?;
+    Ok(window.lock().unwrap().admit(id).then_some(pcm))
 }
 
 /// Which local DATAGRAM queues accepted an explicitly duplicated frame.
@@ -65,6 +70,14 @@ fn check_open(primary: &Connection) -> EonResult<()> {
         Some(e) => Err(transport_error(e)),
         None => Ok(()),
     }
+}
+
+fn after_dequeue(primary: &Connection, packet: Bytes, standby: bool) -> EonResult<(Bytes, bool)> {
+    // Primary closure revokes the standby, not data already read from the primary.
+    if standby {
+        check_open(primary)?;
+    }
+    Ok((packet, standby))
 }
 
 // The fully handshaken media TLS connection provides a fresh shared nonce.
@@ -240,7 +253,7 @@ impl MediaLane {
         self.endpoint.close().await;
     }
 
-    pub(super) async fn read_packet(&self, primary: &Connection) -> EonResult<(Bytes, bool)> {
+    async fn read_packet(&self, primary: &Connection) -> EonResult<(Bytes, bool)> {
         loop {
             check_open(primary)?;
             let (packet, standby) = tokio::select! {
@@ -251,9 +264,20 @@ impl MediaLane {
                     (p, true)
                 }
             };
-            check_open(primary)?;
-            return Ok((packet, standby));
+            return after_dequeue(primary, packet, standby);
         }
+    }
+
+    pub(super) async fn read_return(
+        &self,
+        primary: &Connection,
+    ) -> Option<EonResult<Option<AudioPcmChunk>>> {
+        let packet = match self.read_packet(primary).await {
+            Ok((packet, _)) => packet,
+            // Drain buffered primary returns only, never a revoked standby.
+            Err(_) => primary.read_datagram().await.ok()?,
+        };
+        Some(decode_copy(packet, &self.received))
     }
 
     pub(super) async fn recv(&self, primary: &Connection) -> EonResult<(AudioPcmChunk, Arrival)> {
@@ -265,9 +289,7 @@ impl MediaLane {
                 }
                 return Ok((wire::decode_audio(packet)?, Arrival::Primary));
             }
-            let (id, payload) = unpack_copy(packet)?;
-            let pcm = wire::decode_audio(payload)?;
-            if self.received.lock().unwrap().admit(id) {
+            if let Some(pcm) = decode_copy(packet, &self.received)? {
                 return Ok((
                     pcm,
                     if standby {

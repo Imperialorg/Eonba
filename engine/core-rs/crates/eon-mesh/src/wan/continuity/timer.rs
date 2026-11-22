@@ -15,7 +15,10 @@ impl SlotTimer {
             TimerfdClockId::Monotonic,
             TimerfdFlags::NONBLOCK | TimerfdFlags::CLOEXEC,
         )?;
-        Ok(Self(AsyncFd::with_interest(fd, Interest::READABLE)?))
+        // SAFETY: AsyncFd takes the sole OwnedFd. SlotTimer only borrows it
+        // for settime/read and never closes or replaces it while registered.
+        let timer = unsafe { AsyncFd::register_with_interest(fd, Interest::READABLE) }?;
+        Ok(Self(timer))
     }
 
     pub(super) async fn wait(&self, due: Instant) -> io::Result<()> {

@@ -54,6 +54,19 @@ async fn continuity_pair(timing: bool) -> EonResult<()> {
     assert!(text.contains("phase=during") && text.contains(&format!("queued={sent} ")));
     if timing {
         let report = sender.to_string();
+        let binding = report
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix(
+                "eon_continuity_timing_v3 clock=sender_monotonic mode=primary capture_id=",
+            )
+            .unwrap();
+        assert_eq!(binding.len(), 64);
+        assert!(binding.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(text.starts_with(&format!(
+            "eon_continuity_v2 clock=receiver_monotonic mode=primary capture_id={binding}\n"
+        )));
         assert!(
             report.contains("status=complete timing=observed"),
             "{report}"
