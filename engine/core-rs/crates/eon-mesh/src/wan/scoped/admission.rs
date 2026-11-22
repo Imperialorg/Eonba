@@ -14,7 +14,7 @@ pub(in crate::wan) async fn open(conn: &Connection, priority: i32) -> EonResult<
     let mut paths = conn.paths_stream();
     let mut was_direct = paths.next().await.is_some_and(|ps| {
         ps.iter()
-            .any(|p| p.is_selected() && p.remote_addr().is_custom())
+            .any(|p| p.is_selected() && (p.remote_addr().is_custom() || p.remote_addr().is_ip()))
     });
     loop {
         let (mut tx, mut rx) = conn.open_bi().await.map_err(transport_error)?;

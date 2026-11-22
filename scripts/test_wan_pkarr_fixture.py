@@ -14,7 +14,8 @@ def run(parent, expected):
         raise RuntimeError("requires the unprivileged, isolated relay role")
 
     peers = {"10.77.0.2": "a", "10.77.0.3": "b"}
-    paths, records, substituted, reads = {}, {}, set(), set()
+    paths, records, substituted, stale, reads = {}, {}, set(), set(), set()
+    dialer = min(peers.values(), key=lambda s: Path(f"keys/{s}.pub").read_text().strip())
     non_relay_publication = False
     for side in peers.values():
         key = bytes.fromhex(Path(f"keys/{side}.pub").read_text().strip())
@@ -52,23 +53,28 @@ def run(parent, expected):
 
         def do_GET(self):
             side, caller = paths.get(self.path), peers.get(self.client_address[0])
-            if caller is None or side is None or caller == side or len(records) != 2:
+            if caller != dialer or side is None or caller == side or len(records) != 2:
                 self.send_error(404)
                 return
             # First return a valid record under the WRONG signing identity.
-            # The real product must discard it, then fetch the pinned record.
-            if caller in substituted:
-                payload = records[side]
-                reads.add(caller)
-            else:
+            # Next serve a correctly signed, stale default relay. Only a new
+            # lookup after an unsuccessful dial can obtain the current record.
+            if caller not in substituted:
                 payload = records[caller]
                 substituted.add(caller)
+            elif caller not in stale:
+                payload = Path(f"keys/stale-{side}.pkt").read_bytes()
+                stale.add(caller)
+            else:
+                payload = records[side]
+                reads.add(caller)
             self.send_response(200)
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
 
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
     context.load_cert_chain("keys/leaf.pem", "keys/leaf.key")
     # HTTPServer also calls getfqdn() at bind time; no system DNS in this role.
     with TCPServer(("10.77.0.4", 8445), Store) as server:
@@ -79,8 +85,8 @@ def run(parent, expected):
             server.handle_request()
     if not Path("abort").exists():
         assert not non_relay_publication, "non-relay record published"
-        assert set(records) == reads == substituted == {"a", "b"}
-        print("private HTTPS pkarr: both resolved the pin after a wrong-signer response")
+        assert set(records) == {"a", "b"} and reads == substituted == stale == {dialer}
+        print("private HTTPS pkarr: elected dialer recovered after wrong signer and signed stale relay")
 
 
 if __name__ == "__main__":

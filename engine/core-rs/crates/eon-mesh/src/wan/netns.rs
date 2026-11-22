@@ -410,17 +410,39 @@ async fn peer(side: &str) -> EonResult<()> {
             TransportAddr::Custom(super::scoped::udp::address(expected(remote))),
         )
     } else if isolated_n0() {
-        // Even the authorized mirror namespace cannot opt this pair into public publication.
-        assert!(matches!(
-            WanEndpoint::open_managed_n0(me.clone(), peer, N0Provider::Public, rate, WAIT).await,
-            Err(EonError::SecurityViolation(_))
-        ));
+        let pkarr = Ipv4Addr::new(10, 77, 0, 4);
+        for provider in [
+            N0Provider::Public,
+            N0Provider::PrivateMirror {
+                relay: pkarr,
+                pkarr: IP,
+                root_der: ca.clone(),
+            },
+            N0Provider::PrivateMirror {
+                relay: IP,
+                pkarr,
+                root_der: fs::read("keys/leaf.der").unwrap(),
+            },
+        ] {
+            assert!(matches!(
+                WanEndpoint::open_managed_n0(me.clone(), peer, provider, rate, WAIT).await,
+                Err(EonError::SecurityViolation(_))
+            ));
+        }
+        // Published by this device, signed by the correct key, but no longer
+        // reachable. The HTTPS store never has to forge a DNS record.
+        let stale = iroh::address_lookup::EndpointInfo::new(me.public())
+            .with_relay_url(iroh::defaults::prod::default_na_west_relay().url)
+            .to_pkarr_signed_packet(&me, 30)
+            .unwrap()
+            .to_relay_payload();
+        fs::write(format!("keys/stale-{side}.pkt"), stale).unwrap();
         let ep = WanEndpoint::open_managed_n0(
             me.clone(),
             peer,
             N0Provider::PrivateMirror {
                 relay: IP,
-                pkarr: Ipv4Addr::new(10, 77, 0, 4),
+                pkarr,
                 root_der: ca.clone(),
             },
             rate,
@@ -510,7 +532,14 @@ async fn peer(side: &str) -> EonResult<()> {
             );
         }
         if side == "a" {
-            sleep(Duration::from_millis(600)).await;
+            // Also measure the former long tail after reliable recovery. Keep
+            // the cut definition, cadence and <5 ms scoring gate unchanged.
+            let watch = if interface_loss && isolated_n0() {
+                Duration::from_secs(20)
+            } else {
+                Duration::from_millis(600)
+            };
+            sleep(watch).await;
             mark("drain");
         }
         Ok(())

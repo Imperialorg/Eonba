@@ -417,7 +417,7 @@ impl WanEndpoint {
             } else {
                 self.budget.observe(lane.class());
             }
-            let (mut send, mut recv) = if self.scoped_root.is_some() {
+            let (mut send, mut recv) = if self.uses_stream_admission() {
                 scoped::admission::open(&self.conn, lane.priority()).await?
             } else {
                 self.conn.open_bi().await.map_err(transport_error)?
@@ -440,7 +440,7 @@ impl WanEndpoint {
     pub async fn recv(&self) -> EonResult<ReliableFrame> {
         let first = self.conn.accept_bi().await.map_err(transport_error)?;
         timeout(STREAM_TIMEOUT, async {
-            let (mut send, mut recv, header) = if self.scoped_root.is_some() {
+            let (mut send, mut recv, header) = if self.uses_stream_admission() {
                 scoped::admission::accept(&self.conn, first).await?
             } else {
                 let (send, mut recv) = first;
@@ -465,5 +465,13 @@ impl WanEndpoint {
         })
         .await
         .map_err(transport_error)?
+    }
+
+    fn uses_stream_admission(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if self.conn.alpn() == managed::ALPN {
+            return true;
+        }
+        self.scoped_root.is_some()
     }
 }

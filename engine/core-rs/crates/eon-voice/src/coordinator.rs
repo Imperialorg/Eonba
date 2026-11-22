@@ -353,8 +353,17 @@ impl BargeInCoordinator {
                 return result.map(|_| false);
             }
         }
-        let selected = self.windows.candidate(frame, &self.owner, |pcm| speaker.embed(pcm), &mut self.rejected_candidates)?;
-        Ok(selected.is_some_and(|candidate| self.on_candidate(&candidate, token_offset)))
+        self.observe_voiced(frame, |pcm| speaker.embed(pcm), token_offset)
+    }
+
+    fn observe_voiced(
+        &mut self,
+        frame: &[f32],
+        embed: impl FnOnce(&[f32]) -> EonResult<SpeakerEmbedding>,
+        token_offset: usize,
+    ) -> EonResult<bool> {
+        let current = self.windows.candidate(frame, embed)?;
+        Ok(current.is_some_and(|candidate| self.on_candidate(&candidate, token_offset)))
     }
 
     fn reset_candidate(&mut self, vad: &mut SileroVad) {
@@ -405,6 +414,29 @@ mod barge_in_tests {
 
     fn embedding(values: &[f32]) -> SpeakerEmbedding {
         SpeakerEmbedding::from_values(SpeakerEncoder::WeSpeakerResNet34LmV1, values).unwrap()
+    }
+
+    #[test]
+    fn a_long_point_eight_cannot_authorize_after_zero_current_evidence() {
+        let mut v = [0.; EMBEDDING_DIM];
+        v[0] = 1.;
+        let gate = SpeakerGate::enroll(&embedding(&v), 0.35).unwrap();
+        let signal = BargeIn::new();
+        let mut coordinator = BargeInCoordinator::new(TaskId::new(), signal.clone(), gate);
+        let (mut tx, mut rx) = pcm_ring(8);
+        tx.push_slice(&[0.2; 8]);
+        signal.render(&mut rx, &mut [0.; 2]);
+        for i in 1..=8 * CANDIDATE_SAMPLES / VAD_FRAME_SAMPLES {
+            let interrupted = coordinator.observe_voiced(&[i as f32; VAD_FRAME_SAMPLES], |pcm| {
+                // Old 4-window cosine: .8. Every short/double window: zero.
+                (v[0], v[1]) = if pcm.len() == 4 * CANDIDATE_SAMPLES { (0.8, 0.6) } else { (0., 1.) };
+                Ok(embedding(&v))
+            }, i).unwrap();
+            assert!(!interrupted, "old audio authorized a negative current speaker at frame {i}");
+        }
+        assert!(coordinator.rejected_candidates > 0);
+        assert!(signal.is_playing() && !signal.is_muted());
+        assert!(coordinator.interruption().is_none());
     }
 
     #[test]

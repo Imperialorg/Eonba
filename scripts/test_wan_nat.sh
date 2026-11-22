@@ -111,7 +111,12 @@ openssl pkcs8 -topk8 -nocrypt -in keys/leaf.key -outform DER -out keys/leaf.pk8
 prefix="eon-wan-$$-$RANDOM"
 a="$prefix-a" b="$prefix-b" na="$prefix-na" nb="$prefix-nb" relay="$prefix-relay"
 if [[ $discovery == n0 ]]; then
-    grant_name() { printf 'eon-n0-mirror-%s' "$(printf '%s:%s' "$(<"keys/$1.pub")" "$(<"keys/$2.pub")" | sha256sum | cut -d' ' -f1)"; }
+    ca_digest=$(sha256sum keys/ca.der | cut -d' ' -f1)
+    grant_name() {
+        local policy
+        policy=$(printf '%s:%s:relay=10.77.0.1:pkarr=10.77.0.4:ca=%s' "$(<"keys/$1.pub")" "$(<"keys/$2.pub")" "$ca_digest")
+        printf 'eon-n0-mirror-%s' "$(printf '%s' "$policy" | sha256sum | cut -d' ' -f1)"
+    }
     a=$(grant_name a b)
     b=$(grant_name b a)
 fi

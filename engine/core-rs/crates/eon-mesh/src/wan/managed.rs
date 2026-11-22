@@ -9,6 +9,7 @@ use iroh::{
     },
     dns::{BoxIter, DnsError, DnsResolver, Resolver, TxtRecordData},
 };
+use n0_watcher::Watcher;
 use std::{
     fs,
     net::{Ipv4Addr, Ipv6Addr},
@@ -16,7 +17,7 @@ use std::{
     pin::Pin,
 };
 
-pub(super) const ALPN: &[u8] = b"eon/mesh/managed-qos/1";
+pub(super) const ALPN: &[u8] = b"eon/mesh/managed-qos/2";
 
 /// Select explicitly on every open. There is no environment-selected
 /// staging, DNS TXT, public fallback from a mirror, or implicit publisher.
@@ -34,10 +35,25 @@ pub enum N0Provider {
 }
 
 impl N0Provider {
-    fn kind(&self) -> &'static str {
+    fn grant_name(&self, local: EndpointId, peer: EndpointId) -> String {
+        fn digest(data: &[u8]) -> String {
+            ring::digest::digest(&ring::digest::SHA256, data)
+                .as_ref()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        }
+        let pair = format!("{local}:{peer}");
         match self {
-            Self::Public => "public",
-            Self::PrivateMirror { .. } => "mirror",
+            Self::Public => format!("eon-n0-public-{}", digest(pair.as_bytes())),
+            Self::PrivateMirror {
+                relay,
+                pkarr,
+                root_der,
+            } => {
+                let policy = format!("{pair}:relay={relay}:pkarr={pkarr}:ca={}", digest(root_der));
+                format!("eon-n0-mirror-{}", digest(policy.as_bytes()))
+            }
         }
     }
 }
@@ -51,9 +67,7 @@ fn grant(local: EndpointId, peer: EndpointId, provider: &N0Provider) -> EonResul
     if !meta.is_dir() || meta.uid() != 0 || meta.mode() & 0o022 != 0 {
         return Err(denied());
     }
-    let hash = ring::digest::digest(&ring::digest::SHA256, format!("{local}:{peer}").as_bytes());
-    let pair: String = hash.as_ref().iter().map(|b| format!("{b:02x}")).collect();
-    let name = format!("eon-n0-{}-{pair}", provider.kind());
+    let name = provider.grant_name(local, peer);
     let grant = fs::symlink_metadata(dir.join(name)).map_err(|_| denied())?;
     if !grant.is_file() || grant.uid() != 0 || grant.mode() & 0o022 != 0 {
         return Err(denied());
@@ -120,6 +134,81 @@ fn bootstrap(info: &EndpointInfo, pinned: EndpointId) -> EonResult<Option<Endpoi
     Ok((!addr.addrs.is_empty()).then_some(addr))
 }
 
+async fn dial(
+    ep: &Endpoint,
+    pinned: EndpointId,
+    wait: Duration,
+) -> EonResult<(Connection, RelayUrl)> {
+    // No unfiltered resolver is installed on the endpoint. Every retry
+    // re-verifies the peer's signed record and its approved bootstrap origins.
+    let lookup = PkarrResolver::builder(
+        N0_DNS_PKARR_RELAY_PROD
+            .parse()
+            .expect("built-in pkarr origin"),
+    )
+    .into_address_lookup(ep)
+    .map_err(transport_error)?;
+    let mut backoff = Duration::from_millis(250);
+    let mut attempt = (wait / 3).min(Duration::from_secs(3));
+    loop {
+        let mut records = lookup
+            .resolve(pinned)
+            .ok_or_else(|| invalid("no pkarr resolver"))?;
+        if let Some(Ok(record)) = records.next().await
+            && let Some(peer) = bootstrap(record.endpoint_info(), pinned)?
+        {
+            let relay = peer
+                .relay_urls()
+                .next()
+                .expect("filtered bootstrap relay")
+                .clone();
+            if let Ok(Ok(conn)) = timeout(attempt, ep.connect(peer, ALPN)).await {
+                if conn.remote_id() != pinned || conn.alpn() != ALPN {
+                    conn.close(1u8.into(), b"unpaired");
+                    return Err(EonError::SecurityViolation("unpaired managed peer".into()));
+                }
+                return Ok((conn, relay));
+            }
+            attempt = (attempt * 2).min(Duration::from_secs(10));
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (2 * backoff).min(Duration::from_secs(2));
+    }
+}
+
+async fn listen(
+    ep: &Endpoint,
+    pinned: EndpointId,
+    mirror: bool,
+) -> EonResult<(Connection, RelayUrl)> {
+    let mut homes = ep.home_relay_status();
+    let defaults = RelayMode::Default.relay_map();
+    let mirror_home = iroh::defaults::prod::default_na_east_relay().url;
+    loop {
+        let incoming = ep
+            .accept()
+            .await
+            .ok_or_else(|| transport_error("endpoint closed"))?;
+        if let IncomingAddr::Relay { url, endpoint_id } = incoming.remote_addr()
+            && endpoint_id == pinned
+            && defaults.contains(&url)
+            && (!mirror || url == mirror_home)
+            && homes
+                .get()
+                .iter()
+                .any(|h| h.is_connected() && h.url() == &url)
+        {
+            let Ok(conn) = incoming.await else { continue };
+            if conn.remote_id() == pinned && conn.alpn() == ALPN {
+                return Ok((conn, url));
+            }
+            conn.close(1u8.into(), b"unpaired");
+        } else {
+            incoming.refuse();
+        }
+    }
+}
+
 impl WanEndpoint {
     /// Opt into ID-only rendezvous using the default iroh relay map, QAD and
     /// signed pkarr service. Both peers must explicitly open within `wait`.
@@ -169,6 +258,7 @@ impl WanEndpoint {
             .transport_config(qos_transport(QuicTransportConfig::builder(), 8))
             .secret_key(secret)
             .alpns(vec![ALPN.to_vec()]);
+        let mirror = matches!(provider, N0Provider::PrivateMirror { .. });
         builder = match provider {
             N0Provider::Public => builder.dns_resolver(
                 DnsResolver::builder()
@@ -193,31 +283,14 @@ impl WanEndpoint {
         timeout(wait, async {
             let ep = builder.bind().await.map_err(transport_error)?;
             ep.online().await;
-            let relay = ep
-                .addr()
-                .relay_urls()
-                .next()
-                .cloned()
-                .ok_or_else(|| invalid("no home relay"))?;
-            // Do not install an unfiltered resolver on the live endpoint. Look
-            // up only the pin, retrying missing/empty records within this open.
-            let lookup = PkarrResolver::builder(origin())
-                .into_address_lookup(&ep)
-                .map_err(transport_error)?;
-            let mut backoff = Duration::from_millis(250);
-            let addr = loop {
-                let mut records = lookup
-                    .resolve(pinned)
-                    .ok_or_else(|| invalid("no pkarr resolver"))?;
-                if let Some(Ok(record)) = records.next().await
-                    && let Some(addr) = bootstrap(record.endpoint_info(), pinned)?
-                {
-                    break addr;
-                }
-                tokio::time::sleep(backoff).await;
-                backoff = (2 * backoff).min(Duration::from_secs(2));
+            // iroh registers these endpoints on their home relays. Elect one
+            // dialer so that independently retried dials cannot yield two
+            // different application connections. One deadline covers both roles.
+            let (conn, relay) = if ep.id() < pinned {
+                dial(&ep, pinned, wait).await?
+            } else {
+                listen(&ep, pinned, mirror).await?
             };
-            let conn = rendezvous_at(&ep, addr, &relay, ALPN, None).await?;
             Ok(Self {
                 endpoint: ep,
                 conn,
@@ -235,6 +308,26 @@ impl WanEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iroh_and_qos_tests_mirror_grant_binds_the_pair_service_roles_and_ca() {
+        let (a, b) = (
+            SecretKey::generate().public(),
+            SecretKey::generate().public(),
+        );
+        let x = Ipv4Addr::new(10, 0, 0, 1);
+        let y = Ipv4Addr::new(10, 0, 0, 2);
+        let mirror = |relay, pkarr, byte| N0Provider::PrivateMirror {
+            relay,
+            pkarr,
+            root_der: vec![byte],
+        };
+        let expected = mirror(x, y, 1).grant_name(a, b);
+        assert_ne!(expected, mirror(y, x, 1).grant_name(a, b));
+        assert_ne!(expected, mirror(x, y, 2).grant_name(a, b));
+        assert_ne!(expected, mirror(x, y, 1).grant_name(b, a));
+        assert_ne!(expected, N0Provider::Public.grant_name(a, b));
+    }
 
     #[test]
     fn iroh_and_qos_tests_managed_bootstrap_uses_only_pinned_default_relays() {

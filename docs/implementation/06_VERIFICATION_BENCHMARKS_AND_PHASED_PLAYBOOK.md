@@ -282,17 +282,19 @@ Run `python3 scripts/eval/noisy_duplex.py`. Each JSON line records one condition
 
 By default, enrollment and query use the [upstream WeSpeaker ResNet34 front end](https://github.com/wenet-e2e/wespeaker/tree/master/runtime/core/frontend): PCM16 units, complete 25 ms Hamming windows every 10 ms and per-utterance mean normalization. Do not reuse enrollment vectors computed with the old ASR features. Seventeen consecutive 32 ms Silero frames supply ≥50 complete fbank frames. The original VAD and cosine thresholds and both echo-cancellation paths apply to every condition.
 
-**Current shipping WeSpeaker: 5/5; former disjoint-window baseline: 2/5.** Each cell gives rejected non-owner embeddings / held-out owner decision time. More rejections reflect more candidate probes, not more distinct negative trials. Neither build interrupted during the negative or stale-capture intervals.
+**Shipping WeSpeaker: 3/5, not a pass of the speaker gate.** Each cell gives rejected non-owner embeddings / held-out owner decision time. More rejections reflect more candidate probes, not more distinct negative trials. None of these three builds interrupted during these five negative or stale-capture intervals.
 
-| Condition | Former 544 ms baseline | Shipping multiscale WeSpeaker |
-|---|---|---|
-| Clean control | 10 / 830 ms | 34 / 830 ms |
-| Rumble control (0 dB) | 10 / 1,380 ms | 28 / 1,380 ms |
-| Competing babble (0 dB) | 12 / missed | 39 / 2,370 ms |
-| Street traffic (0 dB) | 10 / missed | 38 / 800 ms |
-| TV dialogue (0 dB) | 11 / missed | 38 / 1,310 ms |
+| Condition | Former disjoint baseline | Rejected multiscale experiment | Shipping: latest 544 ms only |
+|---|---|---|---|
+| Clean control | 10 / 830 ms | 34 / 830 ms | 20 / 830 ms |
+| Rumble control (0 dB) | 10 / 1,380 ms | 28 / 1,380 ms | 18 / 1,380 ms |
+| Competing babble (0 dB) | 12 / missed | 39 / 2,370 ms | 23 / missed |
+| Street traffic (0 dB) | 10 / missed | 38 / 800 ms | 20 / 800 ms |
+| TV dialogue (0 dB) | 11 / missed | 38 / 1,310 ms | 21 / missed |
 
-Acceptance still requires a real negative embedding decision and verified owner interruption at the original 0.35 cosine threshold in **each** condition, including post-decision mute and audit. The shipping build uses [staggered, trailing-half-checked windows](../VOICE_PIPELINE_SPECIFICATION.md#23-enrolled-speaker-verification); it does not change the model, enrollment, VAD, cutoff or fixture. The suite exited 0. One frozen native executable repeated all five decisions on the same WAV digests, passed `switch::active_speaker_switches_do_not_credit_a_departed_owner` (returning owner at 540–570 ms of fixture audio), and ran the independent reader trials below. These are decisions on recorded inputs, **not** acoustic latency measurements.
+Acceptance requires a real negative embedding decision and verified owner interruption at the original 0.35 cosine threshold in **each** condition, including post-decision mute and audit. The shipping build uses [two staggered short-window probes](../VOICE_PIPELINE_SPECIFICATION.md#23-enrolled-speaker-verification); it does not change the encoder, enrollment, VAD, cutoff or fixtures. It rejected 13 owner candidates in babble and nine in TV. The same frozen native executable repeated all five decisions on the original WAV digests, passed `switch::active_speaker_switches_do_not_credit_a_departed_owner` (returning owner at 540–570 ms of fixture audio), and ran the independent reader trials below. These are recorded decisions, **not** acoustic latency measurements.
+
+**Why the measured 5/5 multiscale result is not shipping.** Its trailing-half comparison admitted a long cosine of 0.8 when *every* short and double cosine was zero. Equal scores did not establish that the current speaker matched the owner. Regression `a_long_point_eight_cannot_authorize_after_zero_current_evidence` reproduced the authorization at frame 68; shipping never submits a long embedding, and the same input leaves playback running with no audit record.
 
 **Former baseline and rejected experiments.** Silero admitted candidates in all three formerly missed scenes. The best baseline owner scores were 0.262 (babble), 0.307 (traffic) and 0.208 (TV). An unguarded two-second rolling-context experiment passed these scenes but failed a speaker-switch control: 210 ms after a non-owner took over, retained context scored 0.414 and muted playback; the current window scored 0.048. That approach was not adopted. Requiring adjacent segments to match each other at the owner threshold did not improve either corpus. The trailing-half checks with a single probe schedule reached 4/5 (traffic missed) and 7/12 competing readers.
 
@@ -311,7 +313,7 @@ The enrollment centroid recovered babble at 2,660 ms and traffic at 1,090 ms but
 
 For the independent controls, the unchanged recorded native test used [LibriSpeech dev-clean](https://www.openslr.org/12) (Panayotov et al., CC BY 4.0; archive SHA-256 `76f87d090650617fca0cac8f88b9416e0ebf80350acb97b343a85fa903728ab3`). Take the six lowest numeric reader IDs of each sex. Use the first 4 s of each of their first two distinct, lexically ordered utterances lasting at least 4 s, one for enrollment and one for query; use the next reader's query as the negative, cycling within each group. Repeat with a 0 dB two-reader speech bed on the query and negative only: use the seventh reader from each group, equally RMS-weighted, first utterances for query and second for negative. These 24 trials check additional identities and distinct utterances, not a population error rate.
 
-Shipping WeSpeaker preserved **12/12 clean** and improved from **3/12 to 7/12 competing**, recovering four readers and losing none. Every negative interval reached the speaker gate; no wrong or stale interruptions were observed. Five competing owners were still missed.
+Shipping WeSpeaker passed **12/12 clean and 3/12 competing** (the same readers as the disjoint baseline). All 24 negative intervals reached the gate, with no wrong or stale interruptions. The rejected multiscale experiment measured 12/12 clean and 7/12 competing, but failed the counterexample above. A denser four-phase short-only alternative passed 12/12 clean and 4/12 competing but interrupted one wrong reader during a competing trial; it was not adopted.
 
 **Opt-in CAM++ for a new enrollment.** Provision `camplusplus-zh-en-advanced` with `python3 scripts/download_models.py --ids camplusplus-zh-en-advanced`. This is the sherpa-onnx conversion of the bilingual [3D-Speaker model](https://modelscope.cn/models/iic/speech_campplus_sv_zh_en_16k-common_advanced). The runtime checks the graph digest and uses normalized PCM, Povey windows, utterance mean normalization and a 192-dimensional vector. An existing WeSpeaker enrollment cannot authorize CAM++.
 
