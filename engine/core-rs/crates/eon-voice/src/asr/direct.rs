@@ -13,7 +13,7 @@ use super::{DECODER_FILE, ENCODER_FILE, JOINER_FILE, TOKENS_FILE};
 use crate::features::{NUM_MEL_BINS, SAMPLE_RATE_HZ, online_fbank};
 use kaldi_native_fbank::OnlineFeature;
 use ort::session::{Session, SessionInputValue};
-use ort::value::{DynValue, Tensor, TensorElementType, ValueType};
+use ort::value::{DynValue, Tensor, TensorElementType, TensorRef, ValueType};
 
 const CHUNK_FRAMES: usize = 45;
 const CHUNK_SHIFT: usize = 32;
@@ -128,6 +128,11 @@ impl Model {
             caches: None,
             features: online_fbank()?,
             next_frame: 0,
+            chunk: Tensor::from_array((
+                [1usize, CHUNK_FRAMES, NUM_MEL_BINS],
+                vec![0.0f32; CHUNK_FRAMES * NUM_MEL_BINS],
+            ))
+            .map_err(|e| onnx_err("input", e))?,
             context,
             decoder_out,
             tokens: Vec::new(),
@@ -143,6 +148,7 @@ pub(super) struct Stream<'a> {
     caches: Option<Vec<DynValue>>,
     features: OnlineFeature,
     next_frame: usize,
+    chunk: Tensor<f32>,
     context: [i64; CONTEXT_SIZE],
     decoder_out: Vec<f32>,
     tokens: Vec<i64>,
@@ -153,7 +159,7 @@ impl Stream<'_> {
     pub fn push(&mut self, samples: &[f32]) -> EonResult<Option<String>> {
         self.features.accept_waveform(SAMPLE_RATE_HZ, samples);
         let old_len = self.tokens.len();
-        self.decode_ready()?;
+        self.decode_ready(0)?;
         Ok((self.tokens.len() > old_len).then(|| self.model.detokenize(&self.tokens)))
     }
 
@@ -163,19 +169,28 @@ impl Stream<'_> {
 
     pub fn finish(mut self) -> EonResult<(String, Vec<i64>)> {
         self.features.input_finished();
-        self.features
-            .features
-            .extend(std::iter::repeat_with(|| vec![0.0; NUM_MEL_BINS]).take(CHUNK_FRAMES));
-        self.decode_ready()?;
+        self.decode_ready(CHUNK_FRAMES)?;
         Ok((self.model.detokenize(&self.tokens), self.tokens))
     }
 
-    fn decode_ready(&mut self) -> EonResult<()> {
-        while self.next_frame + CHUNK_FRAMES <= self.features.num_frames_ready() {
-            let chunk = self.features.features[self.next_frame..self.next_frame + CHUNK_FRAMES].concat();
-            let (encoded, frames) = self.run_encoder(&chunk)?;
-            let dim = encoded.len() / frames;
-            for frame in encoded.chunks_exact(dim) {
+    fn decode_ready(&mut self, padding: usize) -> EonResult<()> {
+        let ready = self.features.num_frames_ready();
+        while self.next_frame + CHUNK_FRAMES <= ready + padding {
+            let end = (self.next_frame + CHUNK_FRAMES).min(ready);
+            let rows = &self.features.features[self.next_frame..end];
+            let (_, chunk) = self.chunk.extract_tensor_mut();
+            for (dest, src) in chunk.as_chunks_mut::<NUM_MEL_BINS>().0.iter_mut().zip(rows) {
+                dest.copy_from_slice(src);
+            }
+            // Exactly the old right-context padding, without allocating synthetic feature rows.
+            chunk[rows.len() * NUM_MEL_BINS..].fill(0.);
+            let encoded = self.run_encoder()?;
+            let (shape, values) = encoded.try_extract_tensor::<f32>().map_err(|e| onnx_err("encoder_out", e))?;
+            let dim = match &shape[..] {
+                [1, frames, width] if *frames > 0 && *width > 0 => *width as usize,
+                _ => return Err(onnx_err("encoder_out", "expected [1, frames, width]")),
+            };
+            for frame in values.chunks_exact(dim) {
                 let token = self.model.run_joiner(frame, &self.decoder_out)?;
                 if token != BLANK_ID {
                     self.tokens.push(token);
@@ -183,29 +198,27 @@ impl Stream<'_> {
                     self.decoder_out = self.model.run_decoder(self.context)?;
                 }
             }
+            // OnlineFeature uses its row count as the absolute frame cursor. Release only the
+            // consumed row contents, keeping the overlapping right context for the next chunk.
+            for row in &mut self.features.features[self.next_frame..(self.next_frame + CHUNK_SHIFT).min(ready)] {
+                *row = Vec::new();
+            }
             self.next_frame += CHUNK_SHIFT;
         }
         Ok(())
     }
 
-    /// Returns the flattened encoder output and its frame count, and advances the caches.
-    fn run_encoder(&mut self, chunk: &[f32]) -> EonResult<(Vec<f32>, usize)> {
+    fn run_encoder(&mut self) -> EonResult<DynValue> {
         let inputs = &self.model.cache_inputs;
         let mut feed: Vec<(&str, SessionInputValue<'_>)> = Vec::with_capacity(inputs.len() + 1);
-        let features = Tensor::from_array(([1usize, CHUNK_FRAMES, NUM_MEL_BINS], chunk.to_vec()))
-            .map_err(|e| onnx_err("input", e))?;
-        feed.push(("x", features.into()));
+        feed.push(("x", (&self.chunk).into()));
         for (i, input) in inputs.iter().enumerate() {
             let value = self.caches.as_ref().map_or(&input.zero, |values| &values[i]);
             feed.push((&input.name, value.into()));
         }
 
         let mut outputs = self.model.encoder.run(feed).map_err(|e| onnx_err("encoder", e))?;
-        let (shape, encoder_out) = outputs["encoder_out"]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| onnx_err("encoder_out", e))?;
-        let frames = shape[1] as usize;
-        let encoder_out = encoder_out.to_vec();
+        let encoder_out = outputs.remove("encoder_out").ok_or_else(|| onnx_err("encoder_out", "missing output"))?;
 
         let mut caches = Vec::with_capacity(inputs.len());
         for input in inputs {
@@ -221,7 +234,7 @@ impl Stream<'_> {
             caches.push(next);
         }
         self.caches = Some(caches);
-        Ok((encoder_out, frames))
+        Ok(encoder_out)
     }
 }
 
@@ -239,9 +252,9 @@ impl Model {
     }
 
     fn run_joiner(&mut self, encoder_frame: &[f32], decoder_out: &[f32]) -> EonResult<i64> {
-        let encoder = Tensor::from_array(([1usize, encoder_frame.len()], encoder_frame.to_vec()))
+        let encoder = TensorRef::from_array_view(([1usize, encoder_frame.len()], encoder_frame))
             .map_err(|e| onnx_err("joiner", e))?;
-        let decoder = Tensor::from_array(([1usize, decoder_out.len()], decoder_out.to_vec()))
+        let decoder = TensorRef::from_array_view(([1usize, decoder_out.len()], decoder_out))
             .map_err(|e| onnx_err("joiner", e))?;
         let outputs = self
             .joiner
