@@ -115,7 +115,9 @@ fn service(secret: &SecretKey, socket: SocketAddrV4, seq: u64) -> EonResult<Serv
 ///
 /// `local_ip` selects a host interface (default: first active private/link-local IPv4,
 /// excluding loopback). `seq` is the publisher's announcement sequence. `wait` bounds
-/// setup, not the subsequent 15 ms election. Keep the returned endpoint with the session.
+/// setup, including a readiness marker from each application on the dedicated
+/// `eon/mesh/lan-election/1` protocol. Both LAN peers must support that protocol.
+/// The subsequent 15 ms election is unchanged. Keep the returned endpoint with the session.
 pub async fn open_election(
     secret: SecretKey,
     pinned: EndpointId,
@@ -163,6 +165,10 @@ pub async fn open_election(
                 }
             }
         };
+        drop(mdns);
+        // QUIC connected on this side need not mean the other application has
+        // finished discovery. Keep that skew in setup, not in the first turn.
+        election.confirm_lan_ready().await?;
         Ok((node, election))
     })
     .await

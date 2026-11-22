@@ -92,7 +92,10 @@ async fn established_trial(
         .expect("paired election deadline");
         assert_eq!(turn, 1);
         let expected = if initiator { node.addr().id } else { peer };
-        assert_eq!(result.unwrap().node_id, expected.to_string());
+        assert_eq!(
+            result.expect("no matching peer claim inside the 15 ms election window").node_id,
+            expected.to_string()
+        );
         assert_eq!(link.play_if_leader(turn, || {}), initiator);
     };
     let slowest = if let Some(responder) = responder {

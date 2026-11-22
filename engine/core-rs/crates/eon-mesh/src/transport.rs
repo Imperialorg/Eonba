@@ -20,6 +20,7 @@ use iroh::{EndpointAddr, EndpointId, RelayMode, SecretKey};
 /// Application protocol identifier. Peers that do not offer it are refused during the handshake.
 pub const ALPN: &[u8] = b"eon/mesh/1";
 pub(crate) const PAIRED_ALPN: &[u8] = b"eon/mesh/paired/4";
+const LAN_ELECTION_ALPN: &[u8] = b"eon/mesh/lan-election/1";
 
 /// Largest request or reply accepted on one stream. Larger frames are refused rather than buffered.
 pub const MAX_FRAME_BYTES: usize = 1 << 20;
@@ -61,7 +62,7 @@ impl PeerNode {
                 BindOpts::default().set_prefix_len(local.prefixlen).set_is_default_route(false),
             )
             .map_err(|e| transport_err("bind", e))?;
-        let mut node = Self::bind(builder, PAIRED_ALPN, Some(secret), Some(remote)).await?;
+        let mut node = Self::bind(builder, LAN_ELECTION_ALPN, Some(secret), Some(remote)).await?;
         node.lan = Some(local.clone());
         match node.endpoint.bound_sockets().as_slice() {
             [SocketAddr::V4(addr)] if *addr.ip() == local.ip => Ok((node, *addr)),
@@ -168,7 +169,13 @@ impl PeerNode {
         }) {
             return Err(EonError::SecurityViolation("off-link mesh destination".into()));
         }
-        let alpn = if self.paired.is_some() { PAIRED_ALPN } else { ALPN };
+        let alpn = if self.lan.is_some() {
+            LAN_ELECTION_ALPN
+        } else if self.paired.is_some() {
+            PAIRED_ALPN
+        } else {
+            ALPN
+        };
         self.endpoint
             .connect(peer, alpn)
             .await
