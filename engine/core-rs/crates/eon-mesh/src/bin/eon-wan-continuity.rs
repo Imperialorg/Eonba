@@ -11,9 +11,10 @@ mod linux {
         continuity::{CapturePlan, receive, transmit},
     };
     use std::{
-        io::{IsTerminal, Read},
+        io::IsTerminal,
         net::Ipv4Addr,
         num::NonZeroU32,
+        os::fd::AsFd,
         path::Path,
         sync::mpsc,
         time::{Duration, Instant},
@@ -22,22 +23,29 @@ mod linux {
     const USAGE: &str =
         "usage: eon-wan-continuity <send|receive> <profile-directory> <seconds:1..120>";
 
+    fn fresh_enter(input: &impl AsFd, prompt: &str) -> Option<Instant> {
+        eprintln!("{prompt}");
+        // Discard input queued through issuance of *this* prompt. Read the fd
+        // directly: a buffered stdin reader could retain the next mark in userspace.
+        rustix::termios::tcflush(input, rustix::termios::QueueSelector::IFlush).ok()?;
+        let mut byte = [0];
+        (rustix::io::read(input, &mut byte[..]).ok()? == 1 && byte[0] == b'\n').then(Instant::now)
+    }
+
     fn arm() -> mpsc::Receiver<Instant> {
         let (tx, rx) = mpsc::sync_channel(2);
         // A missing operator must not block capture, runtime shutdown or close.
         std::thread::spawn(move || {
-            let mut input = std::io::stdin().lock();
+            let input = std::io::stdin();
             for prompt in [
                 "Press Enter at the BEGINNING of the actual transition.",
                 "Press Enter when the actual transition ENDS.",
             ] {
-                eprintln!("{prompt}");
-                let mut byte = [0];
-                if input.read_exact(&mut byte).is_err() || byte[0] != b'\n' {
-                    eprintln!("Marker input ended or was not an empty line.");
+                let Some(at) = fresh_enter(&input, prompt) else {
+                    eprintln!("Could not read a fresh empty line from the terminal.");
                     break;
-                }
-                if tx.send(Instant::now()).is_err() {
+                };
+                if tx.send(at).is_err() {
                     break;
                 }
             }
@@ -99,6 +107,42 @@ mod linux {
             println!("queued={}", transmit(endpoint, plan).await?);
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use rustix::{
+            io::ioctl_fionread,
+            pty::{OpenptFlags, ioctl_tiocgptpeer, openpt, unlockpt},
+        };
+        use std::{fs::File, io::Write, thread};
+
+        #[test]
+        fn each_mark_discards_buffered_pty_enters() {
+            let flags = OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC;
+            let mut terminal = File::from(openpt(flags).unwrap());
+            unlockpt(&terminal).unwrap();
+            let input = File::from(ioctl_tiocgptpeer(&terminal, flags).unwrap());
+            let wait_queue = |empty| {
+                let stop = Instant::now() + Duration::from_secs(3);
+                while (ioctl_fionread(&input).unwrap() == 0) != empty {
+                    assert!(Instant::now() < stop, "PTY queue did not change");
+                    thread::sleep(Duration::from_millis(1));
+                }
+            };
+            terminal.write_all(b"\n\n").unwrap(); // typed before first decode
+            for (prompt, fresh) in [("BEGIN", &b"\n\n\n"[..]), ("END", &b"\n"[..])] {
+                // The extra BEGIN newlines are stale by the END prompt.
+                wait_queue(false);
+                let tty = input.try_clone().unwrap();
+                let reader = thread::spawn(move || fresh_enter(&tty, prompt));
+                wait_queue(true);
+                let not_before = Instant::now();
+                terminal.write_all(fresh).unwrap();
+                assert!(reader.join().unwrap().unwrap() >= not_before);
+            }
+        }
     }
 }
 

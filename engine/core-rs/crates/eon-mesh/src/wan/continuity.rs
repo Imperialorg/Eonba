@@ -22,7 +22,8 @@ impl CapturePlan {
         (1..=120).contains(&seconds).then_some(Self(seconds))
     }
 
-    fn span(self) -> Duration {
+    /// Agreed probe interval, excluding rendezvous and the final drain.
+    pub fn span(self) -> Duration {
         Duration::from_secs(self.0.into())
     }
 
@@ -211,11 +212,12 @@ pub async fn receive(
                 biased;
                 _ = sleep_until(deadline.into()) => break if out.queued.is_some() { "complete" } else { "timeout" },
                 result = &mut finish, if out.queued.is_none() => match result {
-                    Ok(n) if !seen[n as usize + 1..].contains(&true) => {
+                    Ok(n) if seen[n as usize + 1..].contains(&true) => break "inconsistent_finish",
+                    Ok(_) if origin.elapsed() < plan.span() => break "early_finish",
+                    Ok(n) => {
                         out.queued = Some(n);
                         deadline = Instant::now() + DRAIN;
                     }
-                    Ok(_) => break "inconsistent_finish",
                     Err(status) => break status,
                 },
                 sample = ep.recv_audio() => {

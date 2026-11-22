@@ -68,6 +68,7 @@ async fn iroh_and_qos_tests_continuity_missing_and_late_tail() -> EonResult<()> 
         started.await.unwrap();
         // Inject a duplicate, reordered tail after FINISH, and an absent seq=3.
         tx.send_audio(&chunk(2))?;
+        sleep(plan.span()).await;
         tx.send(&ReliableFrame::Bulk {
             index: 3,
             bytes: b"eon/continuity/1/queued".to_vec(),
@@ -97,6 +98,45 @@ async fn iroh_and_qos_tests_continuity_missing_and_late_tail() -> EonResult<()> 
     );
     assert!(text.contains("seq=2 ") && text.contains("seq=1 "));
     tx.close().await;
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test]
+async fn iroh_and_qos_tests_continuity_early_finish_keeps_partial_receipts() -> EonResult<()> {
+    let (server, tx, rx) = pair().await?;
+    let plan = CapturePlan::new(60).unwrap();
+    let (first, started) = oneshot::channel();
+    let peer = async {
+        tx.recv().await?;
+        tx.send_audio(&chunk(1))?;
+        started.await.unwrap();
+        // A consistent count, but far too soon for the agreed capture interval.
+        let _ = tx
+            .send(&ReliableFrame::Bulk {
+                index: 1,
+                bytes: b"eon/continuity/1/queued".to_vec(),
+            })
+            .await;
+        assert!(tx.recv().await.is_err()); // no DRAINED confirmation
+        tx.close().await;
+        EonResult::Ok(())
+    };
+    let (res, capture) = tokio::time::timeout(super::WAIT, async {
+        tokio::join!(
+            peer,
+            receive(rx, plan, || {
+                first.send(()).unwrap();
+                mpsc::channel().1
+            })
+        )
+    })
+    .await
+    .expect("reject instead of waiting out the agreed span");
+    res?;
+    let text = capture.to_string();
+    assert!(text.contains("status=early_finish bracketed=false"));
+    assert!(text.contains("queued=unknown unique=1 missing=unknown"));
     server.shutdown().await.unwrap();
     Ok(())
 }
