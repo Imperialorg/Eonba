@@ -9,7 +9,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use eon_primitives::{EonError, EonResult, TaskId};
 
 use crate::aec::AcousticEchoCanceller;
-use crate::barge_in::BargeIn;
+use crate::barge_in::{BargeIn, PlaybackRun};
 use crate::device::{CaptureHandle, PlaybackHandle, capture_default_frames, play_default_output_with_reference};
 use crate::geometry::{AEC_BLOCK_SAMPLES, SAMPLE_RATE_HZ, VAD_FRAME_SAMPLES};
 use crate::linear_echo::NlmsCanceller;
@@ -266,6 +266,7 @@ pub struct BargeInCoordinator {
     task: TaskId,
     owner: SpeakerPolicy,
     windows: SpeakerWindows,
+    run: Option<PlaybackRun>,
     rejected_candidates: u64,
     audit: InterruptionAudit,
 }
@@ -295,6 +296,7 @@ impl BargeInCoordinator {
             playback,
             task,
             windows: SpeakerWindows::new(owner.encoder()),
+            run: None,
             owner,
             rejected_candidates: 0,
             audit: InterruptionAudit::default(),
@@ -346,9 +348,13 @@ impl BargeInCoordinator {
         speaker: &mut SpeakerEmbedder,
         token_offset: usize,
     ) -> EonResult<bool> {
-        if !self.playback.is_playing() {
+        let Some(run) = self.playback.playing_run() else {
             self.reset_candidate(vad);
             return Ok(false);
+        };
+        if self.run != Some(run) {
+            self.reset_candidate(vad);
+            self.run = Some(run);
         }
         match vad.speech_probability(frame) {
             Ok(p) if (0.5..=1.0).contains(&p) => (),
@@ -357,31 +363,33 @@ impl BargeInCoordinator {
                 return result.map(|_| false);
             }
         }
-        self.observe_voiced(frame, |pcm| speaker.embed(pcm), token_offset)
+        self.observe_voiced(run, frame, |pcm| speaker.embed(pcm), token_offset)
     }
 
     fn observe_voiced(
         &mut self,
+        run: PlaybackRun,
         frame: &[f32],
         embed: impl FnOnce(&[f32]) -> EonResult<SpeakerEmbedding>,
         token_offset: usize,
     ) -> EonResult<bool> {
         let current = self.windows.candidate(frame, |pcm| self.owner.verify(&embed(pcm)?, pcm))?;
-        Ok(current.is_some_and(|accepted| self.on_verification(accepted, token_offset)))
+        Ok(current.is_some_and(|accepted| self.on_verification(run, accepted, token_offset)))
     }
 
     fn reset_candidate(&mut self, vad: &mut SileroVad) {
+        self.run = None;
         self.windows.clear();
         vad.reset();
     }
 
-    fn on_verification(&mut self, accepted: bool, token_offset: usize) -> bool {
+    fn on_verification(&mut self, run: PlaybackRun, accepted: bool, token_offset: usize) -> bool {
         if !accepted {
             self.rejected_candidates = self.rejected_candidates.saturating_add(1);
             return false;
         }
         let decision = Instant::now();
-        if !self.playback.interrupt_playing() {
+        if !self.playback.interrupt_playing(run) {
             return false;
         }
         let event = Interruption {
@@ -418,8 +426,9 @@ mod barge_in_tests {
 
     impl BargeInCoordinator {
         fn on_candidate(&mut self, candidate: &SpeakerEmbedding, token_offset: usize) -> bool {
+            let Some(run) = self.playback.playing_run() else { return false };
             let accepted = self.owner.verify(candidate, &[]).unwrap();
-            self.on_verification(accepted, token_offset)
+            self.on_verification(run, accepted, token_offset)
         }
     }
 
@@ -438,7 +447,7 @@ mod barge_in_tests {
         tx.push_slice(&[0.2; 8]);
         signal.render(&mut rx, &mut [0.; 2]);
         for i in 1..=8 * CANDIDATE_SAMPLES / VAD_FRAME_SAMPLES {
-            let interrupted = coordinator.observe_voiced(&[i as f32; VAD_FRAME_SAMPLES], |pcm| {
+            let interrupted = coordinator.observe_voiced(signal.playing_run().unwrap(), &[i as f32; VAD_FRAME_SAMPLES], |pcm| {
                 // Old 4-window cosine: .8. Every short/double window: zero.
                 (v[0], v[1]) = if pcm.len() == 4 * CANDIDATE_SAMPLES { (0.8, 0.6) } else { (0., 1.) };
                 Ok(embedding(&v))
@@ -448,6 +457,31 @@ mod barge_in_tests {
         assert!(coordinator.rejected_candidates > 0);
         assert!(signal.is_playing() && !signal.is_muted());
         assert!(coordinator.interruption().is_none());
+    }
+
+    #[test]
+    fn matching_inference_that_outlives_playback_cannot_mute_a_restarted_run() {
+        let owner = embedding(&[1.; EMBEDDING_DIM]);
+        let signal = BargeIn::new();
+        let mut c = BargeInCoordinator::new(TaskId::new(), signal.clone(), SpeakerGate::enroll(&owner, 0.35).unwrap());
+        let (mut tx, mut rx) = pcm_ring(2);
+        tx.push_slice(&[0.5]);
+        signal.render(&mut rx, &mut [0.; 1]);
+        let run = signal.playing_run().unwrap();
+        for _ in 0..CANDIDATE_SAMPLES / VAD_FRAME_SAMPLES {
+            let muted = c.observe_voiced(run, &[0.2; VAD_FRAME_SAMPLES], |_| {
+                // An empty render callback, then new PCM while an encoder is working.
+                assert_eq!(signal.render(&mut rx, &mut [0.; 1]).samples, 0);
+                tx.push_slice(&[0.5]);
+                assert_eq!(signal.render(&mut rx, &mut [0.; 1]).samples, 1);
+                Ok(owner.clone())
+            }, 3).unwrap();
+            assert!(!muted);
+        }
+        assert!(signal.is_playing() && signal.playing_run() != Some(run));
+        assert!(c.interruption().is_none());
+        assert!(c.on_candidate(&owner, 4));
+        assert_eq!(c.interruption().unwrap().token_offset, 4);
     }
 
     #[test]

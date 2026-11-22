@@ -5,16 +5,24 @@
 //! so it never blocks the audio thread.
 
 use std::future::poll_fn;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Poll, Waker};
 
 use crate::ring::PcmConsumer;
 
-const IDLE: u8 = 0;
-const PLAYING: u8 = 1;
-const REQUESTED: u8 = 2;
-const MUTED: u8 = 3;
+// Even: idle, odd: playing. A new run gets a new number, even if it starts and
+// stops between two observations on the inference worker. The top two are terminal.
+const REQUESTED: u64 = u64::MAX - 1;
+const MUTED: u64 = u64::MAX;
+
+fn is_running(state: u64) -> bool {
+    state < REQUESTED && state & 1 != 0
+}
+
+#[cfg(feature = "native")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlaybackRun(u64);
 // rtrb's discard walks slots in debug builds. Silencing must never depend on the queue depth.
 const DISCARD_BUDGET: usize = 1024;
 
@@ -27,7 +35,7 @@ pub struct BargeIn {
 
 #[derive(Debug, Default)]
 struct Signal {
-    state: AtomicU8,
+    state: AtomicU64,
     // Not on the render callback path. Serializes an individual transport
     // submission poll with revocation; never held across an async wait.
     observer: Mutex<Option<Observer>>,
@@ -86,10 +94,10 @@ impl BargeIn {
     }
 
     #[cfg(feature = "native")]
-    pub(crate) fn interrupt_playing(&self) -> bool {
+    pub(crate) fn interrupt_playing(&self, run: PlaybackRun) -> bool {
         self.revoke(|state| {
             state
-                .compare_exchange(PLAYING, REQUESTED, Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange(run.0, REQUESTED, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
         })
     }
@@ -98,7 +106,7 @@ impl BargeIn {
         self.inner.observer.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn revoke(&self, transition: impl FnOnce(&AtomicU8) -> bool) -> bool {
+    fn revoke(&self, transition: impl FnOnce(&AtomicU64) -> bool) -> bool {
         let waker = {
             let mut slot = self.observer();
             if !transition(&self.inner.state) {
@@ -146,26 +154,32 @@ impl BargeIn {
     }
 
     pub fn is_playing(&self) -> bool {
-        self.inner.state.load(Ordering::Acquire) == PLAYING
+        is_running(self.inner.state.load(Ordering::Acquire))
+    }
+
+    #[cfg(feature = "native")]
+    pub(crate) fn playing_run(&self) -> Option<PlaybackRun> {
+        let state = self.inner.state.load(Ordering::Acquire);
+        is_running(state).then_some(PlaybackRun(state))
+    }
+
+    fn set_playing(&self, playing: bool) {
+        let old = self.inner.state.load(Ordering::Acquire);
+        if old < REQUESTED && (old & 1 != 0) != playing {
+            // A concurrent revocation always wins. No locks or retry on the audio thread.
+            let _ = self.inner.state.compare_exchange(old, old + 1, Ordering::AcqRel, Ordering::Acquire);
+        }
     }
 
     #[cfg(feature = "native")]
     pub(crate) fn playback_stopped(&self) {
-        let _ = self
-            .inner
-            .state
-            .compare_exchange(PLAYING, IDLE, Ordering::AcqRel, Ordering::Acquire);
+        self.set_playing(false);
     }
 
     /// The mono portion of the real render callback, also usable by non-CPAL drivers.
     pub fn render(&self, consumer: &mut PcmConsumer, out: &mut [f32]) -> Rendered {
         let samples = if self.is_muted() { 0 } else { consumer.pop_slice(out) };
-        let (from, to) = if samples > 0 { (IDLE, PLAYING) } else { (PLAYING, IDLE) };
-        // Never overwrite a simultaneous detection. Check again after copying samples.
-        let _ = self
-            .inner
-            .state
-            .compare_exchange(from, to, Ordering::AcqRel, Ordering::Acquire);
+        self.set_playing(samples > 0);
         if self.is_muted() {
             out.fill(0.0);
             return Rendered {
