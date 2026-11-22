@@ -119,15 +119,16 @@ def run_pairs(speaker_model=duplex.BASELINE_MODEL):
 def main(argv=None):
     cli = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     cli.add_argument("--speaker-model", choices=duplex.POLICIES, default=duplex.BASELINE_MODEL)
-    status = 0
+    pairs, states = [], set()
     try:
         for row in run_pairs(cli.parse_args(argv).speaker_model):
             print(json.dumps(row), flush=True)
-            status = max(status, {"passed": 0, "failed": 1, "unavailable": 2}[row["status"]])
+            pairs.append(row["pair"])
+            states.add(row["status"])
     except INPUT_ERRORS as error:
         print(error, file=sys.stderr)
-        return 2
-    return status
+        states.add("unavailable")
+    return duplex.speaker_exit(states, pairs == EXPECTED)
 
 
 if __name__ == "__main__":

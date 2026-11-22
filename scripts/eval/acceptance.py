@@ -65,15 +65,7 @@ def speaker_checks():
         rows.extend(noisy_duplex.run_conditions())
     except noisy_duplex.INPUT_ERRORS as error:
         reason = str(error)
-    states = []
-    for row in rows:
-        if row["duplex_check_passed"]:
-            states.append("passed")
-        elif row["owner_missed"] or row["non_owner_interruptions"] or row["stale_capture_interrupted"] or (
-                row["non_owner_embeddings_rejected"] == 0):
-            states.append("failed")
-        else:
-            states.append("unavailable")
+    states = [noisy_duplex.condition_status(row) for row in rows]
     if reason is not None or [r["condition"] for r in rows] != list(noisy_duplex.CONDITIONS):
         states.append("unavailable")
     handoffs = []

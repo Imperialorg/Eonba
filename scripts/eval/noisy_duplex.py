@@ -317,15 +317,30 @@ def run_conditions(speaker_model=BASELINE_MODEL):
             yield row
 
 
+def condition_status(row):
+    if row["duplex_check_passed"]:
+        return "passed"
+    if (row["owner_missed"] or row["non_owner_interruptions"] or row["stale_capture_interrupted"]
+            or row["non_owner_embeddings_rejected"] == 0):
+        return "failed"
+    return "unavailable"
+
+
+def speaker_exit(states, complete):
+    if "failed" in states:
+        return 1
+    return 0 if complete and states == {"passed"} else 2
+
+
 def main(argv=None):
     cli = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     cli.add_argument("--speaker-model", choices=POLICIES, default=BASELINE_MODEL)
-    status = 0
+    conditions, states = [], set()
     for row in run_conditions(cli.parse_args(argv).speaker_model):
         print(json.dumps(row), flush=True)
-        if not row["duplex_check_passed"]:
-            status = max(status, 2 if "unavailable" in row else 1)
-    return status
+        conditions.append(row["condition"])
+        states.add(condition_status(row))
+    return speaker_exit(states, conditions == list(CONDITIONS))
 
 
 if __name__ == "__main__":

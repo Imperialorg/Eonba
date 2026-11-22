@@ -1,3 +1,4 @@
+import contextlib
 import io
 import subprocess
 import tarfile
@@ -10,6 +11,16 @@ import speaker_handoffs as handoffs
 
 
 class SpeakerHandoffTests(unittest.TestCase):
+    def test_cli_keeps_measured_failure_even_if_corpus_is_missing(self):
+        def partial(status):
+            yield {"pair": "locked", "status": status}
+            raise FileNotFoundError("no corpus")
+
+        for status, code in [("failed", 1), ("passed", 2)]:
+            with (patch.object(handoffs, "run_pairs", return_value=partial(status)),
+                  contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO())):
+                self.assertEqual(handoffs.main([]), code)
+
     def test_agreement_handoff_is_not_evidence_for_the_shipping_policy(self):
         policy = handoffs.duplex.AGREEMENT
         result = subprocess.CompletedProcess([], 0, f"test {handoffs.TEST} ... ok\n"
