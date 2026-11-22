@@ -144,8 +144,10 @@ The test does not elevate, change policy or use the platform's boot-time BPF loa
 to EON's own provider if enabled. It neither starts a trace nor monitors other
 providers. A native Windows run must independently read the private ETL with
 [`review_etw.ps1`](../engine/core-rs/crates/eon-cyber/tests/review_etw.ps1)
-and find exactly the opted-in process's marker and no payload. Submission,
-cross-linking and source inspection are not evidence of delivery.
+and find exactly one marker from the opted-in process and none from the
+opted-out process. The test builds its reader with MSVC and the Windows SDK.
+It checks `EVENT_RECORD.UserDataLength` in the closed trace without reading
+the payload. An undecoded XML event is not proof of zero bytes.
 
 ### 3.3 Android APK & Binary Hardening
 - Validates APK signature schemes (v1, v2, v3, v4).
