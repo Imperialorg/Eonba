@@ -101,10 +101,16 @@ impl<const N: usize> CaptureFrames<N> {
         Ok(())
     }
 
-    pub fn ready(&self) -> EonResult<bool> {
+    /// Additional source samples required to produce the next complete model frame,
+    /// including any lookahead required by the streaming resampler.
+    pub fn missing_input_samples(&self) -> EonResult<usize> {
         self.check_continuity()?;
         let needed = self.conversion.as_ref().map_or(N, |(sinc, _)| sinc.input_frames_next());
-        Ok(self.pcm.available() >= needed)
+        Ok(needed.saturating_sub(self.pcm.available()))
+    }
+
+    pub fn ready(&self) -> EonResult<bool> {
+        Ok(self.missing_input_samples()? == 0)
     }
 
     pub fn try_read(&mut self) -> EonResult<Option<[f32; N]>> {

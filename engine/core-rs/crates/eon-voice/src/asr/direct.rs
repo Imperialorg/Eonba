@@ -154,12 +154,18 @@ pub(super) struct Stream<'a> {
     tokens: Vec<i64>,
 }
 
+/// A final partial chunk needs right context, but padding alone is not model input.
+fn chunk_rows(next: usize, ready: usize, finishing: bool) -> Option<std::ops::Range<usize>> {
+    let count = ready.saturating_sub(next).min(CHUNK_FRAMES);
+    (count == CHUNK_FRAMES || (finishing && count != 0)).then(|| next..next + count)
+}
+
 impl Stream<'_> {
     /// Returns the current partial transcript only when new tokens were emitted.
     pub fn push(&mut self, samples: &[f32]) -> EonResult<Option<String>> {
         self.features.accept_waveform(SAMPLE_RATE_HZ, samples);
         let old_len = self.tokens.len();
-        self.decode_ready(0)?;
+        self.decode_ready(false)?;
         Ok((self.tokens.len() > old_len).then(|| self.model.detokenize(&self.tokens)))
     }
 
@@ -169,19 +175,19 @@ impl Stream<'_> {
 
     pub fn finish(mut self) -> EonResult<(String, Vec<i64>)> {
         self.features.input_finished();
-        self.decode_ready(CHUNK_FRAMES)?;
+        self.decode_ready(true)?;
         Ok((self.model.detokenize(&self.tokens), self.tokens))
     }
 
-    fn decode_ready(&mut self, padding: usize) -> EonResult<()> {
+    fn decode_ready(&mut self, finishing: bool) -> EonResult<()> {
         let ready = self.features.num_frames_ready();
-        while self.next_frame + CHUNK_FRAMES <= ready + padding {
-            let end = (self.next_frame + CHUNK_FRAMES).min(ready);
-            let rows = &self.features.features[self.next_frame..end];
+        while let Some(range) = chunk_rows(self.next_frame, ready, finishing) {
+            let rows = &self.features.features[range];
             let (_, chunk) = self.chunk.extract_tensor_mut();
             for (dest, src) in chunk.as_chunks_mut::<NUM_MEL_BINS>().0.iter_mut().zip(rows) {
                 dest.copy_from_slice(src);
             }
+
             // Exactly the old right-context padding, without allocating synthetic feature rows.
             chunk[rows.len() * NUM_MEL_BINS..].fill(0.);
             let encoded = self.run_encoder()?;
@@ -274,5 +280,20 @@ impl Model {
             .replace(WORD_BOUNDARY, " ")
             .trim()
             .to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flushes_only_chunks_with_real_features_even_at_exact_hop_boundaries() {
+        assert_eq!(chunk_rows(0, 0, true), None);
+        assert_eq!(chunk_rows(0, CHUNK_FRAMES - 1, false), None);
+        assert_eq!(chunk_rows(0, CHUNK_FRAMES, false), Some(0..CHUNK_FRAMES));
+        assert_eq!(chunk_rows(CHUNK_SHIFT, CHUNK_FRAMES, true), Some(CHUNK_SHIFT..CHUNK_FRAMES));
+        assert_eq!(chunk_rows(CHUNK_SHIFT, CHUNK_SHIFT, true), None);
+        assert_eq!(chunk_rows(CHUNK_SHIFT, CHUNK_SHIFT + 1, true), Some(CHUNK_SHIFT..CHUNK_SHIFT + 1));
     }
 }

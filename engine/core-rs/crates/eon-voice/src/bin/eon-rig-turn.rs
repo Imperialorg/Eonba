@@ -30,7 +30,7 @@ type Frame = [f32; VAD_FRAME_SAMPLES];
 fn reply(
     input: impl Read,
     rate: u32,
-    mut vad: SileroVad,
+    vad: &mut SileroVad,
     asr: &mut ZipformerAsr,
     ready: impl FnOnce() -> Result<()>,
 ) -> Result<Option<(Bridge, u32)>> {
@@ -111,13 +111,16 @@ fn read_until_endpoint(
 ) -> Result<Option<u32>> {
     let (mut tx, rx) = pcm_ring(1 << 14);
     let mut frames = CaptureFrames::<VAD_FRAME_SAMPLES>::new(rx, rate)?;
-    let mut input = io::BufReader::new(input);
+    let mut input = input;
     let mut bytes = [0; 512];
     let mut reference_frames = 0;
     ready()?;
     loop {
         // Arbitrarily fragmented pipe reads may split an i16.
-        let mut n = input.read(&mut bytes)?;
+        // Stop at the resampler's next input boundary. A pipe read spanning
+        // two model frames must not move the reported endpoint into the next one.
+        let limit = 2 * frames.missing_input_samples()?.min(bytes.len() / 2);
+        let mut n = input.read(&mut bytes[..limit])?;
         if n == 0 {
             return Ok(None);
         }
@@ -264,7 +267,7 @@ fn main() -> Result<()> {
     }
     let id = speaker.parse()?;
     let models = Path::new(models);
-    let vad = models.join("vad/silero_vad.onnx");
+    let mut vad = SileroVad::load(models.join("vad/silero_vad.onnx"))?;
     let mut asr = ZipformerAsr::load(models.join("asr"))?;
     let mut tts = KokoroTts::load(
         models.join("tts/release/kokoro-v1.0.int8.onnx"),
@@ -274,6 +277,7 @@ fn main() -> Result<()> {
     let signal = BargeIn::new();
     let device = play_selected_output(&id, rx, signal.clone())?;
     let cache = BridgeCache::warm_for_output(&mut tts, 1., device.sample_rate)?;
+    drop(tts);
     let healthy = || -> Result<()> {
         if device.counters.driver_errors.load(Acquire) != 0 {
             return Err("selected speaker disconnected".into());
@@ -287,7 +291,7 @@ fn main() -> Result<()> {
         &mut io::stdout().lock(),
         rate,
         |pcm, output| {
-            let decision = reply(&mut *pcm, rate, SileroVad::load(&vad)?, &mut asr, || {
+            let decision = reply(&mut *pcm, rate, &mut vad, &mut asr, || {
                 healthy()?;
                 status(output, b'3')
             })?;
@@ -312,6 +316,45 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn endpoint_counts_only_the_source_samples_needed_for_the_deciding_frame() -> Result<()> {
+        // One-sample reads are the independent reference. Different rates include
+        // non-integral resampling and its startup lookahead, not just 512-sample hops.
+        for rate in [16_000, 44_100, 48_000, 96_000] {
+            let read_to_decision = |fragment: usize| -> Result<u32> {
+                let mut source = io::repeat(0).take(u64::from(rate) * 2);
+                let mut input = Fragmented { source: &mut source, fragment };
+                let mut observed = 0;
+                let end = read_until_endpoint(&mut input, rate, || Ok(()), |_| {
+                    observed += 1;
+                    Ok(observed == 4)
+                })?.ok_or("no endpoint")?;
+                assert_eq!(u64::from(end) * 2, u64::from(rate) * 2 - source.limit());
+                Ok(end)
+            };
+            let required = read_to_decision(2)?;
+            if rate == 16_000 {
+                assert_eq!(required, (4 * VAD_FRAME_SAMPLES) as u32);
+            }
+            for fragment in [1, 71, 254, 511, 8192] {
+                assert_eq!(read_to_decision(fragment)?, required);
+            }
+        }
+        Ok(())
+    }
+
+    struct Fragmented<R> {
+        source: R,
+        fragment: usize,
+    }
+
+    impl<R: Read> Read for Fragmented<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let limit = self.fragment.min(buf.len());
+            self.source.read(&mut buf[..limit])
+        }
+    }
 
     #[test]
     fn revised_partial_selects_the_tier_on_the_exact_frame_being_scored() -> Result<()> {
@@ -479,6 +522,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let models = root.join("../../../../perception/models");
         let mut asr = ZipformerAsr::load(models.join("asr"))?;
+        let mut vad = SileroVad::load(models.join("vad/silero_vad.onnx"))?;
         let mut tts = KokoroTts::load(
             models.join("tts/release/kokoro-v1.0.int8.onnx"),
             models.join("tts/voices/af_heart.bin"),
@@ -508,7 +552,7 @@ mod tests {
             let decision = reply(
                 &mut *pcm,
                 16000,
-                SileroVad::load(models.join("vad/silero_vad.onnx"))?,
+                &mut vad,
                 &mut asr,
                 || status(output, b'3'),
             )?;
@@ -533,7 +577,7 @@ mod tests {
             reply(
                 &[1u8][..],
                 44100,
-                SileroVad::load(models.join("vad/silero_vad.onnx"))?,
+                &mut vad,
                 &mut asr,
                 || Ok(())
             )

@@ -1,4 +1,4 @@
-"""Fixed recorded inputs for the software render benchmark. No devices or network."""
+"""Full software render gate by default; --recorded-pair is diagnostic only. No devices or network."""
 
 import argparse
 from array import array
@@ -21,6 +21,7 @@ COUNT = 100
 LEAD = RATE // 5
 TAIL = RATE * 2
 SCENES = ("clean", "babble-0db", "traffic-0db", "tv-0db")
+NOISY_LIMIT_US = 200_000  # exclusive
 CORPUS = "voice-test-librispeech-dev-clean"
 MEMBER = re.compile(r"LibriSpeech/dev-clean/(\d+)/(\d+)/(\1-\2-\d+)\.flac")
 MODELS = {
@@ -34,6 +35,7 @@ MODELS = {
 }
 ROW_KEYS = {"take", "status", "last_active_end_sample", "endpoint_sample", "latency_us"}
 INPUT_ERRORS = duplex.INPUT_ERRORS + (KeyError, subprocess.SubprocessError)
+PAIR_TAKES = (("silent-control", "silence"), *((key, scene) for key in duplex.RECORDINGS for scene in SCENES))
 
 
 def stream_frames(header):
@@ -127,26 +129,41 @@ def last_active(raw):
     raise ValueError("utterance has no foreground above the fixed activity threshold")
 
 
-def write_batch(file, models):
+def recorded_sources(models):
+    for key in duplex.RECORDINGS:
+        entry = models[key]
+        with (duplex.ROOT / entry["dest"]).open("rb") as wav:
+            duplex.verify(wav, entry)
+            wav.seek(0)
+            pcm = duplex.read_pcm(wav)
+        yield key, struct.pack(f"<{len(pcm)}h", *pcm), SCENES
+
+
+def corpus_sources(models):
     entry = models[CORPUS]
     with (duplex.ROOT / entry["dest"]).open("rb") as archive:
         duplex.verify(archive, entry)
         archive.seek(0)
         clips = select_clips(archive)
+    return ((key, decode(flac, n), (SCENES[i % len(SCENES)],)) for i, (key, n, flac) in enumerate(clips))
+
+
+def write_batch(file, models, *, recorded_pair=False):
+    sources = recorded_sources(models) if recorded_pair else corpus_sources(models)
     tracks = duplex.speech_tracks(models["voice-test-sensevoice-en"]["archive"])
     control = write_take(file, bytes(4 * TAIL))
     inventory = [{"id": "silent-control", "scene": "silence", "frames": control, "dry_end": None}]
     seen = set()
-    for i, (key, n, flac) in enumerate(clips):
-        raw = decode(flac, n)
+    for key, raw, scenes in sources:
         digest = hashlib.sha256(raw).hexdigest()
         if digest in seen:
             raise ValueError("duplicate source PCM under different utterance IDs")
         seen.add(digest)
-        scene = SCENES[i % len(SCENES)]
-        stereo, snr = channels(raw, scene, tracks)
-        inventory.append({"id": key, "scene": scene, "source_sha256": digest, "dry_end": last_active(raw),
-                          "frames": write_take(file, stereo), "snr_db": snr})
+        dry_end = last_active(raw)
+        for scene in scenes:
+            stereo, snr = channels(raw, scene, tracks)
+            inventory.append({"id": key, "scene": scene, "source_sha256": digest, "dry_end": dry_end,
+                              "frames": write_take(file, stereo), "snr_db": snr})
     file.write(struct.pack("<I", 0))
     file.seek(0)
     return inventory
@@ -179,17 +196,31 @@ def observation(row, take):
     return row
 
 
-def evaluate(inventory, output, native_error=None):
-    if ([t["scene"] for t in inventory] != ["silence", *(SCENES[i % len(SCENES)] for i in range(COUNT))]
+def take_check(row, scene):
+    if row["status"] == "unavailable":
+        return "unavailable"
+    if scene == "silence":
+        passed = row["status"] == "no_reply" and row["endpoint_sample"] is None
+    else:
+        passed = row["status"] == "ok" and (scene == "clean" or row["latency_us"] < NOISY_LIMIT_US)
+    return "passed" if passed else "failed"
+
+
+def evaluate(inventory, output, native_error=None, *, recorded_pair=False):
+    if recorded_pair:
+        if tuple((t["id"], t["scene"]) for t in inventory) != PAIR_TAKES:
+            raise ValueError("need silent control and both recorded sources in every scene")
+    elif ([t["scene"] for t in inventory] != ["silence", *(SCENES[i % len(SCENES)] for i in range(COUNT))]
             or len({t["id"] for t in inventory}) != COUNT + 1):
         raise ValueError("need one silent control and the complete distinct scene inventory")
-    lines = output.splitlines()
+    lines = output.splitlines(keepends=True)
     indexed, seen, errors = {}, set(), []
     silent_bridge = False
     for line in lines:
         try:
+            complete = line[-1:] in (b"\n", "\n")
             obj = json.loads(line)
-            if obj == {"startup_failure": "silent_bridge"} and len(lines) == 1 and native_error:
+            if complete and obj == {"startup_failure": "silent_bridge"} and len(lines) == 1 and native_error:
                 silent_bridge = True
                 break
             n = obj.get("take") if isinstance(obj, dict) else None
@@ -199,6 +230,8 @@ def evaluate(inventory, output, native_error=None):
                 indexed.pop(n, None)
                 raise ValueError(f"duplicate take {n}")
             seen.add(n)
+            if not complete:
+                raise ValueError(f"unterminated responder row for take {n}")
             try:
                 indexed[n] = observation(obj, inventory[n - 1])
             except ValueError as error:
@@ -210,39 +243,41 @@ def evaluate(inventory, output, native_error=None):
     rows = []
     failed = silent_bridge
     for n, take in enumerate(inventory, 1):
-        if n not in indexed:
-            rows.append({**take, "take": n, "status": "unavailable", "latency_us": None})
-            continue
-        row = indexed[n]
-        silent = take["scene"] == "silence"
-        if silent:
-            failed |= not (row["status"] == "no_reply" and row["endpoint_sample"] is None)
-        else:
-            failed |= row["status"] != "ok"
+        row = indexed.get(n, {"take": n, "status": "unavailable", "latency_us": None})
+        check = take_check(row, take["scene"])
+        failed |= check == "failed"
+        if recorded_pair:
+            row = {**row, "check": check}
+            if row["status"] == "ok":
+                # Use the same start bin as native Row::score, not its exclusive end.
+                start = (row["last_active_end_sample"] - 1) // (RATE // 1000) * (RATE // 1000)
+                endpoint_us = (row["endpoint_sample"] - start) * 1_000_000 // RATE
+                row.update(endpoint_sample_clock_us=endpoint_us, render_remainder_us=row["latency_us"] - endpoint_us)
         rows.append({**take, **row})
     measurements = [r for r in rows if r["scene"] != "silence"]
-    times = sorted(r["latency_us"] for r in measurements if r["status"] == "ok")
-    p50 = p99 = None
-    if len(times) == COUNT:
-        p50, p99 = (times[(COUNT * p + 99) // 100 - 1] for p in (50, 99))
-    # Even an incomplete run can have enough known late observations to
-    # refute a nearest-rank bound regardless of all remaining results.
-    failed |= sum(t >= 170_000 for t in times) > COUNT - (COUNT * 50 + 99) // 100
-    failed |= sum(t >= 280_000 for t in times) > COUNT - (COUNT * 99 + 99) // 100
     scenes = {}
     for name in SCENES:
         trials = [r for r in measurements if r["scene"] == name]
         ok = [r["latency_us"] for r in trials if r["status"] == "ok"]
-        if name != "clean":
-            failed |= any(t >= 200_000 for t in ok)
         scenes[name] = {"takes": len(trials), "misses": sum(r["status"] not in ("ok", "unavailable") for r in trials),
                         "unavailable": sum(r["status"] == "unavailable" for r in trials),
                         "max_us": max(ok) if len(ok) == len(trials) and ok else None}
     reason = "; ".join(filter(None, (native_error, *errors[:4])))
-    status = "failed" if failed else "unavailable" if reason or p99 is None else "passed"
-    return {"status": status, "clock": "paced-input-to-software-render", "p50_us": p50, "p99_us": p99,
-            "scenes": scenes, "takes": rows, **({"reason": reason} if reason else {}),
-            **({"startup_failure": "silent_bridge"} if silent_bridge else {})}
+    report = {"clock": "paced-input-to-software-render", "scenes": scenes, "takes": rows,
+              **({"reason": reason} if reason else {}), **({"startup_failure": "silent_bridge"} if silent_bridge else {})}
+    if recorded_pair:
+        report.update(scope="recorded-pair-diagnostic", acceptance=False, noisy_limit_us_exclusive=NOISY_LIMIT_US,
+                      render_remainder="Includes inference and scheduling after the sample-clock endpoint; not pure sink time.")
+    else:
+        times = sorted(r["latency_us"] for r in measurements if r["status"] == "ok")
+        p50 = p99 = None
+        if len(times) == COUNT:
+            p50, p99 = (times[(COUNT * p + 99) // 100 - 1] for p in (50, 99))
+        # Known late observations can refute a bound even with missing takes.
+        failed |= sum(t >= 170_000 for t in times) > COUNT - (COUNT * 50 + 99) // 100
+        failed |= sum(t >= 280_000 for t in times) > COUNT - (COUNT * 99 + 99) // 100
+        report.update(p50_us=p50, p99_us=p99)
+    return {**report, "status": "failed" if failed else "unavailable" if reason else "passed"}
 
 
 def build_responder():
@@ -258,7 +293,7 @@ def build_responder():
     return Path(artifacts[0])
 
 
-def measure():
+def measure(*, recorded_pair=False):
     try:
         models = duplex.locked_models()
         if duplex.verified_paths(models, MODELS) != {k: duplex.MODELS / v for k, v in MODELS.items()}:
@@ -267,7 +302,7 @@ def measure():
         with native.open("rb") as binary:
             digest = hashlib.file_digest(binary, "sha256").hexdigest()
         with tempfile.TemporaryFile() as batch, tempfile.TemporaryFile() as output:
-            inventory = write_batch(batch, models)
+            inventory = write_batch(batch, models, recorded_pair=recorded_pair)
             with subprocess.Popen([native, "--software-timing-session", duplex.MODELS],
                                   stdin=batch, stdout=output, start_new_session=True) as proc:
                 try:
@@ -286,15 +321,21 @@ def measure():
             data = output.read(128 * 1024 + 1)
             if len(data) > 128 * 1024:
                 reason = "responder output exceeded limit"
-            return {**evaluate(inventory, data, reason), "responder": str(native), "responder_sha256": digest}
+            return {**evaluate(inventory, data, reason, recorded_pair=recorded_pair),
+                    "responder": str(native), "responder_sha256": digest}
     except INPUT_ERRORS as error:
+        if recorded_pair:
+            planned = [{"id": key, "scene": scene} for key, scene in PAIR_TAKES]
+            return evaluate(planned, b"", str(error), recorded_pair=True)
         return {"status": "unavailable", "clock": "paced-input-to-software-render", "p50_us": None,
                 "p99_us": None, "reason": str(error)}
 
 
 def main(argv=None):
-    argparse.ArgumentParser(description=__doc__, allow_abbrev=False).parse_args(argv)
-    result = measure()
+    cli = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    cli.add_argument("--recorded-pair", action="store_true",
+                     help="diagnostic only: two locked WAVs in four scenes plus silence; not the 100-utterance gate")
+    result = measure(recorded_pair=cli.parse_args(argv).recorded_pair)
     print(json.dumps(result, indent=2))
     return {"passed": 0, "failed": 1, "unavailable": 2}[result["status"]]
 

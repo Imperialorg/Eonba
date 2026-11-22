@@ -2,8 +2,10 @@ import contextlib
 import hashlib
 import io
 import json
+from pathlib import Path
 import struct
 import tarfile
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -24,6 +26,48 @@ def archive(clips):
 
 
 class SoftwareCorpusTests(unittest.TestCase):
+    def test_recorded_pair_pins_full_sources_and_crosses_scenes_without_replacing_the_corpus(self):
+        tracks = {"ko": (0.25, -0.75), "ja": (0.5, 1, -0.5), "zh": (-1, 0.125)}
+        first, second = turns.duplex.RECORDINGS
+        with (tempfile.NamedTemporaryFile(dir=turns.duplex.ROOT) as a,
+              tempfile.NamedTemporaryFile(dir=turns.duplex.ROOT) as b,
+              patch.object(turns.duplex, "speech_tracks", return_value=tracks)):
+            models, sources = {}, {}
+            for key, path, length in ((first, Path(a.name), 1040), (second, Path(b.name), 2080)):
+                pcm = [900, -1500] * (length // 2)
+                turns.duplex.write_pcm(path, pcm)
+                models[key] = {"dest": path, "archive": {}, "size_bytes": path.stat().st_size,
+                               "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                sources[key] = pcm
+            batch = io.BytesIO()
+            inventory = turns.write_batch(batch, models, recorded_pair=True)
+            expected = [("silent-control", "silence"), *((key, scene) for key in (first, second) for scene in turns.SCENES)]
+            self.assertEqual([(t["id"], t["scene"]) for t in inventory], expected)
+            for t in inventory:
+                n, = struct.unpack("<I", batch.read(4))
+                self.assertEqual(t["frames"], n)
+                stereo = batch.read(4 * n)
+                if t["scene"] == "silence":
+                    self.assertEqual(stereo, bytes(4 * turns.TAIL))
+                    continue
+                dry, mix = zip(*struct.iter_unpack("<hh", stereo))
+                pcm = sources[t["id"]]
+                self.assertEqual(list(dry), [0] * turns.LEAD + pcm + [0] * turns.TAIL)
+                self.assertEqual(t["dry_end"], turns.LEAD + len(pcm))
+                if t["scene"] == "clean":
+                    self.assertEqual(mix, dry)
+                else:
+                    self.assertLessEqual(abs(t["snr_db"]), 0.01)
+                    self.assertTrue(any(mix[:turns.LEAD]) and any(mix[-turns.TAIL:]))
+            self.assertEqual(batch.read(), bytes(4))  # zero frame terminator, no more takes
+            for fault in ({"size_bytes": 0}, {"sha256": "0" * 64}):
+                with self.assertRaisesRegex(ValueError, "differs from model lock"):
+                    list(turns.recorded_sources({**models, second: {**models[second], **fault}}))
+            with self.assertRaisesRegex(ValueError, "duplicate source PCM"):
+                turns.write_batch(io.BytesIO(), {**models, second: models[first]}, recorded_pair=True)
+            with self.assertRaisesRegex(KeyError, turns.CORPUS):
+                turns.write_batch(io.BytesIO(), models)
+
     def test_rank_whole_eligible_utterances_not_first_archive_members(self):
         items = [(f"1-2-{i:04d}", 16_000 + i) for i in range(8)]
         expected = sorted(items, key=lambda pair: hashlib.sha256(pair[0].encode()).digest())[:3]
@@ -72,6 +116,60 @@ class SoftwareScoreTests(unittest.TestCase):
 
     def score(self, reason=None):
         return turns.evaluate(self.inventory, b"".join(json.dumps(r).encode() + b"\n" for r in self.rows), reason)
+
+    def score_recorded_pair(self, rows, tail=b"", reason=None):
+        inventory = [{**take, "id": key} for take, (key, _) in zip(self.inventory, turns.PAIR_TAKES)]
+        data = b"".join(json.dumps(r).encode() + b"\n" for r in rows) + tail
+        return turns.evaluate(inventory, data, reason, recorded_pair=True)
+
+    def test_pair_reports_native_bin_bound_and_remaining_wall_time_not_percentiles(self):
+        rows = self.rows[:9]
+        rows[1]["latency_us"] = 310_000  # no clean per-take ceiling in the full gate
+        rows[2]["latency_us"] = 199_999
+        report = self.score_recorded_pair(rows)
+        self.assertEqual((report["scope"], report["acceptance"], report["status"]),
+                         ("recorded-pair-diagnostic", False, "passed"))
+        self.assertNotIn("p50_us", report)
+        self.assertNotIn("p99_us", report)
+        self.assertNotIn("render_remainder_us", report["takes"][0])
+        noisy = report["takes"][2]
+        self.assertEqual((noisy["endpoint_sample_clock_us"], noisy["render_remainder_us"]), (32_000, 167_999))
+        rows[2]["latency_us"] = 200_000
+        report = self.score_recorded_pair(rows)
+        self.assertEqual((report["status"], report["takes"][2]["status"], report["takes"][2]["check"]),
+                         ("failed", "ok", "failed"))
+
+    def test_pair_only_attributes_complete_unique_dry_checked_rows(self):
+        rows = self.rows[:8]  # final noisy take was never flushed
+        rows[2]["last_active_end_sample"] -= 16
+        report = self.score_recorded_pair(rows + [rows[3]], b'{"take":9,"status":', "responder exited 1")
+        self.assertEqual(report["status"], "unavailable")
+        for i in (2, 3, 8):
+            self.assertEqual(report["takes"][i]["status"], "unavailable")
+            self.assertIsNone(report["takes"][i]["latency_us"])
+            self.assertNotIn("endpoint_sample_clock_us", report["takes"][i])
+        self.assertEqual(report["takes"][1]["latency_us"], 80_000)
+        report = self.score_recorded_pair(self.rows[:8], json.dumps(self.rows[8]).encode())  # missing native flush
+        self.assertEqual(report["takes"][8]["status"], "unavailable")
+        rows[1].update(status="early_endpoint", endpoint_sample=512, latency_us=None)
+        report = self.score_recorded_pair(rows, reason="responder deadline")
+        self.assertEqual((report["status"], report["takes"][1]["check"]), ("failed", "failed"))
+        self.assertNotIn("render_remainder_us", report["takes"][1])
+
+    def test_pair_missing_prerequisites_have_no_timing_evidence(self):
+        with patch.object(turns.duplex, "locked_models", side_effect=FileNotFoundError("missing lock")):
+            report = turns.measure(recorded_pair=True)
+        self.assertEqual((report["status"], report["acceptance"], len(report["takes"])), ("unavailable", False, 9))
+        self.assertTrue(all(r["status"] == "unavailable" and r["latency_us"] is None for r in report["takes"]))
+        self.assertIn("missing lock", report["reason"])
+        self.assertNotIn("p99_us", report)
+
+    def test_pair_cli_is_opt_in(self):
+        with (patch.object(turns, "measure", return_value={"status": "failed"}) as measure,
+              contextlib.redirect_stdout(io.StringIO())):
+            for args in ([], ["--recorded-pair"]):
+                self.assertEqual(turns.main(args), 1)
+                measure.assert_called_with(recorded_pair=bool(args))
 
     def test_silence_is_not_timed_and_ceilings_are_strict(self):
         self.assertEqual(self.score()["p99_us"], 80_000)

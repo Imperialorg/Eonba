@@ -84,6 +84,49 @@ fn handoff(enrollment: &RecordedEnrollment, prelude: &[f32], stranger: &[f32], r
     panic!("handoff failed: returning clean owner never interrupted");
 }
 
+// None means the owner latched before the cut; Some counts rejections before an exercised switch.
+fn check_switch_coverage<T>(
+    clean: T,
+    noise: T,
+    mut run: impl FnMut(&str, T) -> [Option<u64>; 4],
+) -> Result<(), String> {
+    // Run both sets of cuts before reporting missing exercise: a noisy cut may actually fail.
+    let observations = [("clean", clean), ("noise", noise)].map(|(label, input)| (label, run(label, input)));
+    for (label, cuts) in observations {
+        if cuts.iter().all(Option::is_none) {
+            return Err(format!("all {label} trials already latched before the cut"));
+        }
+        if !cuts.iter().flatten().any(|&pre| pre > 0) {
+            return Err(format!("no {label} switch exercised a previously rejected owner candidate"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[should_panic(expected = "handoff failed: noisy stranger interrupted")]
+fn missing_clean_exercise_does_not_mask_a_noisy_failure() {
+    check_switch_coverage((), (), |label, ()| {
+        if label == "noise" {
+            panic!("handoff failed: noisy stranger interrupted");
+        }
+        [None; 4]
+    }).unwrap();
+}
+
+#[test]
+fn rejected_owner_history_is_required_in_each_condition() {
+    let with = [None, Some(0), Some(1), None];
+    let without = [None, Some(0), Some(0), None];
+    for (clean, noise, missing) in [(without, with, "clean"), (with, without, "noise")] {
+        assert_eq!(
+            check_switch_coverage(clean, noise, |_, cuts| cuts),
+            Err(format!("no {missing} switch exercised a previously rejected owner candidate"))
+        );
+    }
+    assert_eq!(check_switch_coverage(with, with, |_, cuts| cuts), Ok(()));
+}
+
 #[test]
 fn active_speaker_switches_do_not_credit_a_departed_owner() {
     let (owner, stranger) = match (
@@ -126,29 +169,18 @@ fn active_speaker_switches_do_not_credit_a_departed_owner() {
     };
     let owner_noisy = mix(returning, &bed(returning.len()));
     let stranger_noisy = mix(stranger, &bed(stranger.len()));
-    let mut unresolved_history = false;
-    for (label, prelude, other) in [("clean", returning, stranger), ("noise", &owner_noisy, &stranger_noisy)] {
-        let mut exercised = 0;
+    check_switch_coverage((returning, stranger), (&owner_noisy, &stranger_noisy), |label, (prelude, other)| {
         // Half-window offsets: never align the identities to verification boundaries.
-        for halves in [1, 3, 5, 7] {
+        [1, 3, 5, 7].map(|halves| {
             let cut = (CANDIDATE_SAMPLES * halves / 2 / BLOCK) * BLOCK;
-            if let Some((pre, negative, owner_ms)) = handoff(&enrollment, &prelude[..cut], other, returning) {
+            handoff(&enrollment, &prelude[..cut], other, returning).map(|(pre, negative, owner_ms)| {
                 eprintln!(
                     "switch {label} after {} ms: {pre} owner embeddings before cut, \
                      {negative} rejections during stranger, returning owner at {owner_ms} ms",
                     cut / 16
                 );
-                unresolved_history |= pre > 0;
-                exercised += 1;
-            }
-        }
-        assert!(
-            exercised > 0,
-            "handoff unexercised: all {label} trials already latched before the cut"
-        );
-    }
-    assert!(
-        unresolved_history,
-        "handoff unexercised: no switch exercised a previously rejected owner candidate"
-    );
+                pre
+            })
+        })
+    }).unwrap_or_else(|reason| panic!("handoff unexercised: {reason}"));
 }
