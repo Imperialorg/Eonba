@@ -393,7 +393,8 @@ class AcceptanceTests(unittest.TestCase):
 
     def test_missing_condition_or_measured_owner_miss_cannot_pass(self):
         rows = [{"condition": c, "duplex_check_passed": True} for c in bench.noisy_duplex.CONDITIONS]
-        self.enterContext(patch.object(bench.speaker_handoffs, "run_pairs", return_value=[]))
+        pairs = [{"pair": p, "status": "passed"} for p in bench.speaker_handoffs.EXPECTED]
+        self.enterContext(patch.object(bench.speaker_handoffs, "run_pairs", return_value=pairs))
         with patch.object(bench.noisy_duplex, "run_conditions", return_value=rows[:-1]):
             self.assertEqual(bench.speaker_checks()["status"], "unavailable")
         rows[-1].update(duplex_check_passed=False, owner_missed=True)

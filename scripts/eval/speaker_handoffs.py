@@ -73,12 +73,9 @@ def observation(run):
         return "passed", None
     if run.returncode and f"test {TEST} ... FAILED" in lines:
         for line in run.stderr.splitlines():
-            if (re.fullmatch(r"playback interrupted \d+ ms into the stranger after \d+ ms of owner", line)
-                    or line in ("returning clean owner never interrupted", "stranger never reached the speaker gate")):
-                return "failed", line
-            if line == "no switch exercised a previously rejected owner candidate" or re.fullmatch(
-                    r"all (clean|noise) trials already latched before the cut", line):
-                return "unavailable", line
+            label, _, reason = line.partition(": ")
+            if reason and label in ("handoff failed", "handoff unexercised"):
+                return ("failed" if label == "handoff failed" else "unavailable"), reason
     return "unavailable", "native handoff result not confirmed"
 
 
@@ -96,11 +93,18 @@ def evaluate(pair, owner, stranger):
 
 
 def run_pairs():
-    paths, _ = duplex.pinned_inputs(duplex.BASELINE_MODEL)
-    yield evaluate("locked", paths["voice-test-sensevoice-en"], paths["voice-test-zipformer-0"])
+    models = duplex.locked_models()
+    duplex.verify_native_models(models, duplex.BASELINE_MODEL)
+    try:
+        paths = duplex.verified_paths(models, duplex.RECORDINGS)
+    except duplex.INPUT_ERRORS as error:
+        yield {"pair": "locked", "status": "unavailable", "reason": str(error), "native_exit_code": None}
+    else:
+        yield evaluate("locked", paths["voice-test-sensevoice-en"], paths["voice-test-zipformer-0"])
     clips = reader_clips()
     with tempfile.TemporaryDirectory(prefix="eon-handoff-") as tmp:
-        owner, stranger = Path(tmp).resolve() / "owner.wav", Path(tmp).resolve() / "stranger.wav"
+        work = Path(tmp).resolve()
+        owner, stranger = work / "owner.wav", work / "stranger.wav"
         for reader, negative in PAIRS:
             (enroll_id, enroll), (query_id, query) = clips[reader]
             negative_id, other = clips[negative][1]

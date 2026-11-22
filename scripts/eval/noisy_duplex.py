@@ -50,20 +50,31 @@ def locked_models():
     return {entry["id"]: entry for entry in lock["models"]}
 
 
-def pinned_inputs(speaker_model):
-    models = locked_models()
+RECORDINGS = ("voice-test-sensevoice-en", "voice-test-zipformer-0")
+
+
+def verified_paths(models, keys):
     paths = {}
-    for key in ("voice-test-sensevoice-en", "voice-test-zipformer-0",
-                "silero-vad-v5", speaker_model):
+    for key in keys:
         entry = models[key]
         path = ROOT / entry["dest"]
         with path.open("rb") as f:
             verify(f, entry)
         paths[key] = path
+    return paths
+
+
+def verify_native_models(models, speaker_model):
+    paths = verified_paths(models, ("silero-vad-v5", speaker_model))
     if (paths["silero-vad-v5"] != MODELS / "vad/silero_vad.onnx"
             or paths[speaker_model] != MODELS / SPEAKER_MODELS[speaker_model]):
         raise ValueError("pinned models differ from the paths opened by the voice target")
-    return paths, models["voice-test-sensevoice-en"]["archive"]
+
+
+def pinned_inputs(speaker_model):
+    models = locked_models()
+    verify_native_models(models, speaker_model)
+    return verified_paths(models, RECORDINGS), models["voice-test-sensevoice-en"]["archive"]
 
 
 def read_pcm(source):

@@ -14,17 +14,28 @@ class SpeakerHandoffTests(unittest.TestCase):
         marker = "handoff speaker model: wespeaker-resnet34\n"
         test = f"test {handoffs.TEST} ... "
         ok = "test result: ok. 1 passed; 0 failed; 0 ignored; 6 filtered out"
-        wrong = "playback interrupted 280 ms into the stranger after 270 ms of owner"
+        wrong = "handoff failed: playback interrupted 280 ms into the stranger after 270 ms of owner"
         for code, out, err, expected in (
                 (0, test + "ok\n" + ok, marker, "passed"),
                 (0, test + "ok\n" + ok, marker.replace("34", "221"), "unavailable"),
                 (0, ok, marker, "unavailable"), (0, test + "ignored", marker, "unavailable"),
                 (101, test + "FAILED", marker + wrong, "failed"),
-                (101, test + "FAILED", marker + "returning clean owner never interrupted", "failed"),
-                (101, test + "FAILED", marker + "no switch exercised a previously rejected owner candidate",
+                (101, test + "FAILED", marker + "handoff failed: returning clean owner never interrupted", "failed"),
+                (101, test + "FAILED", marker + "handoff failed: audible output after owner mute", "failed"),
+                (101, test + "FAILED", marker + "handoff failed: missing or incorrect owner audit", "failed"),
+                (101, test + "FAILED", marker + "handoff unexercised: no switch exercised a rejected owner probe",
                  "unavailable"), (101, test + "FAILED", marker + "input missing", "unavailable")):
             with self.subTest(code=code, out=out, err=err):
                 self.assertEqual(handoffs.observation(subprocess.CompletedProcess([], code, out, err))[0], expected)
+
+    def test_missing_stock_recording_does_not_hide_an_independent_failure(self):
+        clips = {n: [(f"{n}-1", b"\x01\x00"), (f"{n}-2", b"\x02\x00")] for n in (84, 1462)}
+        with (patch.object(handoffs.duplex, "verify_native_models"),
+              patch.object(handoffs.duplex, "verified_paths", side_effect=FileNotFoundError("stock wav")),
+              patch.object(handoffs, "PAIRS", ((84, 1462),)), patch.object(handoffs, "reader_clips", return_value=clips),
+              patch.object(handoffs, "evaluate", return_value={"pair": "84:1462", "status": "failed"})):
+            locked, reader = handoffs.run_pairs()
+        self.assertEqual((locked["status"], reader["status"]), ("unavailable", "failed"))
 
     def test_corpus_must_match_the_lock_and_uses_first_two_long_enough_ids(self):
         import hashlib

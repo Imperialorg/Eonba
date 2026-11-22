@@ -43,35 +43,47 @@ fn handoff(owner: &SpeakerEmbedding, prelude: &[f32], stranger: &[f32], returnin
         let before = reflex.rejected_candidates();
         for (i, near) in pcm.as_chunks::<BLOCK>().0.iter().enumerate() {
             assert_eq!(tx.push_slice(&tone), BLOCK);
-            assert_eq!(signal.render(&mut rx, &mut out).samples, BLOCK);
+            assert!(
+                signal.render(&mut rx, &mut out).samples == BLOCK,
+                "handoff failed: playback stopped before decision"
+            );
             let mut mic = std::array::from_fn(|j| near[j] + 0.25 * out[j]);
             if reflex.process(&out, &mut mic, phase, &mut journal).unwrap() {
                 match phase {
                     0 => return None, // Legitimate owner decision before the cut: not a negative trial.
                     1 => panic!(
-                        "playback interrupted {} ms into the stranger after {} ms of owner",
+                        "handoff failed: playback interrupted {} ms into the stranger after {} ms of owner",
                         (i + 1) * 10,
                         prelude.len() / 16
                     ),
                     _ => {
-                        assert_eq!(audit.record().unwrap().token_offset, phase);
+                        assert!(
+                            audit.record().is_some_and(|r| r.token_offset == phase),
+                            "handoff failed: missing or incorrect owner audit"
+                        );
                         assert_eq!(tx.push_slice(&tone), BLOCK);
-                        assert!(signal.render(&mut rx, &mut out).acknowledged);
-                        assert_eq!(out, [0.0; BLOCK]);
+                        assert!(
+                            signal.render(&mut rx, &mut out).acknowledged,
+                            "handoff failed: owner mute not acknowledged"
+                        );
+                        assert!(out == [0.0; BLOCK], "handoff failed: audible output after owner mute");
                         return Some((rejected[0], rejected[1], (i + 1) * 10));
                     }
                 }
             }
         }
-        assert!(audit.record().is_none() && journal.is_empty());
+        assert!(
+            audit.record().is_none() && journal.is_empty(),
+            "handoff failed: audit without interruption"
+        );
         if phase < 2 {
             rejected[phase] = reflex.rejected_candidates() - before;
             if phase == 1 {
-                assert!(rejected[1] > 0, "stranger never reached the speaker gate");
+                assert!(rejected[1] > 0, "handoff failed: stranger never reached the speaker gate");
             }
         }
     }
-    panic!("returning clean owner never interrupted");
+    panic!("handoff failed: returning clean owner never interrupted");
 }
 
 #[test]
@@ -133,10 +145,13 @@ fn active_speaker_switches_do_not_credit_a_departed_owner() {
                 exercised += 1;
             }
         }
-        assert!(exercised > 0, "all {label} trials already latched before the cut");
+        assert!(
+            exercised > 0,
+            "handoff unexercised: all {label} trials already latched before the cut"
+        );
     }
     assert!(
         unresolved_history,
-        "no switch exercised a previously rejected owner candidate"
+        "handoff unexercised: no switch exercised a previously rejected owner candidate"
     );
 }
