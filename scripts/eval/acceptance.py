@@ -11,6 +11,7 @@ import sys
 import noisy_duplex
 import physical_session
 import polyglot_repair
+import speaker_handoffs
 from repair.processes import BenchError, private_workspace
 
 
@@ -75,7 +76,19 @@ def speaker_checks():
             states.append("unavailable")
     if reason is not None or [r["condition"] for r in rows] != list(noisy_duplex.CONDITIONS):
         states.append("unavailable")
-    report = {"status": verdict(states), "conditions": rows}
+    handoffs = []
+    try:
+        handoffs.extend(speaker_handoffs.run_pairs())
+    except speaker_handoffs.INPUT_ERRORS as error:
+        handoff_error = str(error)
+    else:
+        handoff_error = None
+    states.extend(pair["status"] for pair in handoffs)
+    if handoff_error is not None or [p["pair"] for p in handoffs] != speaker_handoffs.EXPECTED:
+        states.append("unavailable")
+    report = {"status": verdict(states), "conditions": rows, "active_handoffs": handoffs}
+    if handoff_error is not None:
+        report["handoff_input_error"] = handoff_error
     if reason is not None:
         report["reason"] = reason
     return report

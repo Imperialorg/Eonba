@@ -45,9 +45,13 @@ def verify(f, entry):
         raise ValueError(f"{f.name}: digest differs from model lock")
 
 
-def pinned_inputs(speaker_model):
+def locked_models():
     lock = json.loads((ROOT / "scripts/models.lock.json").read_text())
-    models = {entry["id"]: entry for entry in lock["models"]}
+    return {entry["id"]: entry for entry in lock["models"]}
+
+
+def pinned_inputs(speaker_model):
+    models = locked_models()
     paths = {}
     for key in ("voice-test-sensevoice-en", "voice-test-zipformer-0",
                 "silero-vad-v5", speaker_model):

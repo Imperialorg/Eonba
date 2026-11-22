@@ -393,8 +393,27 @@ class AcceptanceTests(unittest.TestCase):
 
     def test_missing_condition_or_measured_owner_miss_cannot_pass(self):
         rows = [{"condition": c, "duplex_check_passed": True} for c in bench.noisy_duplex.CONDITIONS]
+        self.enterContext(patch.object(bench.speaker_handoffs, "run_pairs", return_value=[]))
         with patch.object(bench.noisy_duplex, "run_conditions", return_value=rows[:-1]):
             self.assertEqual(bench.speaker_checks()["status"], "unavailable")
         rows[-1].update(duplex_check_passed=False, owner_missed=True)
         with patch.object(bench.noisy_duplex, "run_conditions", return_value=rows):
             self.assertEqual(bench.speaker_checks()["status"], "failed")
+
+    def test_fixed_scene_success_cannot_hide_a_wrong_reader_or_missing_pair(self):
+        rows = [{"condition": c, "duplex_check_passed": True} for c in bench.noisy_duplex.CONDITIONS]
+        pairs = [{"pair": p, "status": "passed"} for p in bench.speaker_handoffs.EXPECTED]
+        with (patch.object(bench.noisy_duplex, "run_conditions", return_value=rows),
+              patch.object(bench.speaker_handoffs, "run_pairs") as native):
+            for result, expected in ((pairs, "passed"), (pairs[:-1], "unavailable"),
+                                     (pairs[:-1] + pairs[:1], "unavailable"),
+                                     (pairs[:-1] + [dict(pairs[-1], status="failed")], "failed")):
+                native.return_value = result
+                self.assertEqual(bench.speaker_checks()["status"], expected)
+            def partial():
+                yield dict(pairs[0], status="failed")
+                raise OSError("absent corpus")
+            native.return_value = partial()
+            report = bench.speaker_checks()
+            self.assertEqual(report["status"], "failed")
+            self.assertEqual(report["handoff_input_error"], "absent corpus")

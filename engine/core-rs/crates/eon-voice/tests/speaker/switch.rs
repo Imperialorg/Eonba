@@ -96,6 +96,7 @@ fn active_speaker_switches_do_not_credit_a_departed_owner() {
     let stranger = common::read_pcm16_mono_16k(&stranger);
     let half = owner.len() / 2;
     let mut embedder = load_speaker();
+    eprintln!("handoff speaker model: {}", embedder.encoder().model_id());
     let enrollment = embedder.embed(&owner[..half]).unwrap();
     let returning = speech_onset(&owner[half..]);
     let stranger = speech_onset(&stranger);
