@@ -23,6 +23,12 @@ fn is_running(state: u64) -> bool {
 #[cfg(feature = "native")]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PlaybackRun(u64);
+
+#[cfg(feature = "native")]
+impl PlaybackRun {
+    pub(crate) const FIRST: Self = Self(1);
+}
+
 // rtrb's discard walks slots in debug builds. Silencing must never depend on the queue depth.
 const DISCARD_BUDGET: usize = 1024;
 

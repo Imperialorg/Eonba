@@ -79,6 +79,18 @@ impl<const N: usize> CaptureFrames<N> {
         self.pcm.flush();
     }
 
+    /// Start at the current producer tail, including when only a partial block is queued.
+    /// Unlike startup, a playback boundary cannot excuse a gap or revive an invalid reader.
+    #[cfg(feature = "native")]
+    pub(crate) fn discard_buffered(&mut self) -> EonResult<()> {
+        self.check_continuity()?;
+        self.pcm.flush();
+        if let Some((sinc, _)) = &mut self.conversion {
+            sinc.reset();
+        }
+        self.check_continuity()
+    }
+
     fn check_continuity(&self) -> EonResult<()> {
         if self.invalidated {
             return Err(invalid("capture frame failed; restart with a fresh stream"));
@@ -227,6 +239,22 @@ mod tests {
         assert!(reader.try_read().unwrap().is_none());
         tx.push_slice(&[0.0; 2]);
         assert!(reader.try_read().is_err());
+        assert!(reader.ready().is_err());
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn boundary_discard_removes_a_fragment_and_sinc_history_but_not_an_overflow() {
+        let (mut tx, rx) = crate::ring::pcm_ring(1024);
+        let mut reader = CaptureFrames::<160>::new(rx, 48_000).unwrap();
+        tx.push_slice(&[0.75; 1024]);
+        assert!(reader.try_read().unwrap().unwrap().iter().any(|&s| s != 0.0));
+        reader.discard_buffered().unwrap();
+        assert!(!reader.ready().unwrap());
+        assert_eq!(tx.push_slice(&[0.; 1024]), 1024);
+        assert_eq!(reader.try_read().unwrap().unwrap(), [0.; 160]);
+        assert!(tx.push_slice(&[0.; 1024]) < 1024);
+        assert!(reader.discard_buffered().is_err());
         assert!(reader.ready().is_err());
     }
 

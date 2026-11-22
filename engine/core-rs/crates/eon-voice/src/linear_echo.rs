@@ -27,6 +27,14 @@ impl NlmsCanceller {
         }
     }
 
+    /// After skipping device PCM, the old delay line cannot predict echo at the new
+    /// position. Keep the learned acoustic path, not its samples.
+    #[cfg(feature = "native")]
+    pub(crate) fn discard_render_history(&mut self) {
+        self.history.fill(0.0);
+        self.power = 0.0;
+    }
+
     /// Adds one playback sample to the reference history.
     pub fn push_render(&mut self, sample: f32) {
         let taps = self.weights.len();

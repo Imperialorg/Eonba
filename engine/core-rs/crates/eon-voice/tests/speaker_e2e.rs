@@ -217,6 +217,65 @@ fn recorded_capture_and_render_rings_make_one_auditable_owner_decision() {
     eprintln!("recorded owner: verified after {} ms of fixture audio", verified_at.unwrap());
 }
 
+#[test]
+fn a_queued_owner_cannot_vote_for_the_next_playback_run() {
+    use eon_voice::coordinator::CANDIDATE_SAMPLES;
+
+    let speech = owner_recording();
+    let (enroll, owner) = speech.split_at(speech.len() / 2);
+    let mut speaker = load_speaker();
+    let gate = SpeakerGate::enroll(&speaker.embed(enroll).unwrap(), 0.35).unwrap();
+    let signal = BargeIn::new();
+    let coordinator = BargeInCoordinator::new(TaskId::new(), signal.clone(), gate);
+    let vad = SileroVad::load(models().join("vad/silero_vad.onnx")).unwrap();
+    let mut reflex = DuplexReflex::new(coordinator, vad, speaker, Some(0)).unwrap();
+    let (mut tx, mut sink) = pcm_ring(160);
+    let (mut mic, mic_rx) = pcm_ring(owner.len() + 160);
+    let (mut reference, ref_rx) = pcm_ring(owner.len() + 160);
+    let mut mic_frames = CaptureFrames::new(mic_rx, 16_000).unwrap();
+    let mut ref_frames = CaptureFrames::new(ref_rx, 16_000).unwrap();
+    let tone: [f32; 160] = std::array::from_fn(|i| (i as f32 * std::f32::consts::TAU / 40.).sin() * 0.04);
+    let mut publish = |reply: &[f32], near: &[f32]| {
+        let mut out = [0.; 160];
+        let out = &mut out[..near.len()];
+        assert_eq!(tx.push_slice(reply), reply.len());
+        assert_eq!(signal.render(&mut sink, out).samples, reply.len());
+        assert_eq!(reference.push_slice(out), out.len());
+        assert_eq!(mic.push_slice(near), near.len());
+    };
+
+    // Even the first poll must drain if the producer has already restarted.
+    publish(&tone, &owner[..160]);
+    publish(&[], &[0.]);
+    publish(&tone, &owner[..160]);
+    assert!(reflex.poll_capture(&mut mic_frames, &mut ref_frames, 0).unwrap().is_none());
+
+    for (i, near) in owner.as_chunks::<160>().0.iter().enumerate() {
+        publish(&tone, near);
+        if i < 3 {
+            // Leave 480 of 512 VAD samples in the worker, then let both rings back up.
+            assert!(reflex.poll_capture(&mut mic_frames, &mut ref_frames, 1).unwrap().is_some());
+        }
+    }
+    publish(&[], &[0.]); // A underruns; the worker never sees idle.
+    publish(&tone[..31], &owner[..31]); // The queue tail now includes part of B.
+    assert!(reflex.poll_capture(&mut mic_frames, &mut ref_frames, 2).unwrap().is_none());
+    publish(&tone[..159], &[0.; 159]);
+    assert!(!mic_frames.ready().unwrap() && !ref_frames.ready().unwrap());
+    publish(&tone[..1], &[0.]);
+    assert!(!reflex.poll_capture(&mut mic_frames, &mut ref_frames, 2).unwrap().unwrap().interrupted);
+
+    for (i, near) in owner.as_chunks::<160>().0.iter().enumerate() {
+        publish(&tone, near);
+        let block = reflex.poll_capture(&mut mic_frames, &mut ref_frames, 3).unwrap().unwrap();
+        if block.interrupted {
+            assert!((i + 2) * 160 >= CANDIDATE_SAMPLES, "a mixed window authorized mute");
+            break;
+        }
+    }
+    assert_eq!(reflex.interruption().expect("fresh owner audio can interrupt B").token_offset, 3);
+}
+
 /// Route the default output to a *private virtual sink* and the default input to its monitor.
 /// A second CPAL stream injects released speech into that mixer, not into the AEC reference.
 #[cfg(target_os = "linux")]

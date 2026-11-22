@@ -29,6 +29,9 @@ pub struct DuplexReflex {
     vad: SileroVad,
     speaker: SpeakerEmbedder,
     coordinator: BargeInCoordinator,
+    // Last run for which the queued streams have a software origin. No earlier
+    // played reference can precede generation one, even if its first poll is late.
+    queued_run: PlaybackRun,
     frame: [f32; VAD_FRAME_SAMPLES],
     filled: usize,
     frame_has_render: bool,
@@ -48,6 +51,7 @@ impl DuplexReflex {
             vad,
             speaker,
             coordinator,
+            queued_run: PlaybackRun::FIRST,
             frame: [0.0; VAD_FRAME_SAMPLES],
             filled: 0,
             frame_has_render: false,
@@ -64,7 +68,9 @@ impl DuplexReflex {
     }
 
     /// Poll one pair, without draining either side ahead of the other. The rings must
-    /// share a start time; this converts rates, it does not estimate hardware clock drift.
+    /// be the same aligned streams on every poll, with the output producer publishing
+    /// each played reference before rendering the next block (as the device driver does).
+    /// A restart discards backlog on both streams; it does not correct hardware latency or drift.
     /// On any processing error retire both streams rather than splicing across the gap.
     pub fn poll_capture(
         &mut self,
@@ -72,6 +78,20 @@ impl DuplexReflex {
         reference: &mut CaptureFrames<AEC_BLOCK_SAMPLES>,
         token_offset: usize,
     ) -> EonResult<Option<DuplexBlock>> {
+        let before = self.coordinator.playback.playing_run();
+        if let Some(run) = before
+            && run != self.queued_run
+        {
+            // The one render producer finished publishing A before it could start B.
+            // After acquiring B, flush both producer tails and their sinc histories;
+            // already queued B audio is sacrificed too. Never rebase overflow counters.
+            capture.discard_buffered()?;
+            reference.discard_buffered()?;
+            self.linear.discard_render_history();
+            self.queued_run = run;
+            self.select_run(None);
+            return Ok(None);
+        }
         let capture_ready = capture.ready()?;
         let reference_ready = reference.ready()?;
         if !capture_ready || !reference_ready {
@@ -80,16 +100,29 @@ impl DuplexReflex {
         // Only this worker owns the consumers; callbacks can only add samples.
         let render = reference.try_read()?.expect("complete render block");
         let mut pcm = capture.try_read()?.expect("complete capture block");
-        let interrupted = self.process_block(&render, &mut pcm, token_offset)?;
+        let after = self.coordinator.playback.playing_run();
+        // Still deliver cleaned PCM on a racing transition, but never use it to vote.
+        let run = if before == after { before } else { None };
+        let interrupted = self.process_block(&render, &mut pcm, run, token_offset)?;
         Ok(Some(DuplexBlock { pcm, interrupted }))
+    }
+
+    fn select_run(&mut self, run: Option<PlaybackRun>) {
+        if self.coordinator.select_run(run, &mut self.vad) {
+            // A 512-sample VAD frame spans several 160-sample device blocks.
+            self.filled = 0;
+            self.frame_has_render = false;
+        }
     }
 
     fn process_block(
         &mut self,
         render: &[f32; AEC_BLOCK_SAMPLES],
         capture: &mut [f32; AEC_BLOCK_SAMPLES],
+        run: Option<PlaybackRun>,
         token_offset: usize,
     ) -> EonResult<bool> {
+        self.select_run(run);
         let mic = *capture;
         self.aec.analyze_render(render)?;
         self.aec.process_capture(capture)?;
@@ -124,7 +157,8 @@ impl DuplexReflex {
         token_offset: usize,
         journal: &mut impl Write,
     ) -> EonResult<bool> {
-        let interrupted = self.process_block(render, capture, token_offset)?;
+        let run = self.coordinator.playback.playing_run();
+        let interrupted = self.process_block(render, capture, run, token_offset)?;
         if interrupted {
             self.coordinator.persist(journal)?;
         }
@@ -334,6 +368,7 @@ impl BargeInCoordinator {
             self.windows.clear(); // A later retry cannot bridge the frame that was refused.
             return Err(error);
         }
+        self.select_run(self.playback.playing_run(), vad);
         let interrupted = self.observe(frame, vad, speaker, token_offset)?;
         if interrupted {
             self.persist(journal)?;
@@ -348,14 +383,10 @@ impl BargeInCoordinator {
         speaker: &mut SpeakerEmbedder,
         token_offset: usize,
     ) -> EonResult<bool> {
-        let Some(run) = self.playback.playing_run() else {
+        let Some(run) = self.run else {
             self.reset_candidate(vad);
             return Ok(false);
         };
-        if self.run != Some(run) {
-            self.reset_candidate(vad);
-            self.run = Some(run);
-        }
         match vad.speech_probability(frame) {
             Ok(p) if (0.5..=1.0).contains(&p) => (),
             result => {
@@ -377,8 +408,16 @@ impl BargeInCoordinator {
         Ok(current.is_some_and(|accepted| self.on_verification(run, accepted, token_offset)))
     }
 
+    fn select_run(&mut self, run: Option<PlaybackRun>, vad: &mut SileroVad) -> bool {
+        if self.run == run {
+            return false;
+        }
+        self.run = run;
+        self.reset_candidate(vad);
+        true
+    }
+
     fn reset_candidate(&mut self, vad: &mut SileroVad) {
-        self.run = None;
         self.windows.clear();
         vad.reset();
     }
