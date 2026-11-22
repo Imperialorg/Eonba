@@ -79,8 +79,9 @@ async fn established_trial(
         speaker_confidence_permille: 0,
     };
     let responder = (!initiator).then(|| link.control_responder());
+    let elect_by = tokio::time::Instant::now() + ELECTION_DEADLINE;
     let elect = async {
-        let (turn, result) = tokio::time::timeout(ELECTION_DEADLINE, async {
+        let (turn, result) = tokio::time::timeout_at(elect_by, async {
             if initiator {
                 (1, link.arbitrate(1, claim).await.unwrap())
             } else {
@@ -98,7 +99,11 @@ async fn established_trial(
         // Our claim can arrive later than the initiator's. Its first real RPC
         // mustn't queue behind the remainder of our local election window.
         tokio::join!(elect, async {
-            for _ in 0..TRIALS {
+            responder
+                .answer_initial_control_probe(elect_by)
+                .await
+                .unwrap();
+            for _ in 1..TRIALS {
                 responder.answer_control_probe().await.unwrap();
             }
         });

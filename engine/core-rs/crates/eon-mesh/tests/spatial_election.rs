@@ -103,6 +103,28 @@ async fn control_rtt_uses_an_existing_paired_link_and_does_not_elect_a_speaker()
 }
 
 #[tokio::test]
+async fn first_probe_waits_for_bounded_startup_before_the_request() {
+    let (_left, _right, a, b) = pair().await;
+    let responder = b.control_responder();
+    let accept_by = tokio::time::Instant::now() + BOUND;
+    tokio::try_join!(responder.answer_initial_control_probe(accept_by), async {
+        // No stream or request exists yet. Exceed the ordinary two-second
+        // budget without spending any of the initiator's measured RPC time.
+        tokio::time::sleep(Duration::from_millis(2100)).await;
+        a.measure_control_rtt().await
+    })
+    .unwrap();
+    let err = responder
+        .answer_initial_control_probe(tokio::time::Instant::now())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, EonError::OperationFailed { operation, reason }
+        if operation == "mesh.paired_probe" && reason == "timed out waiting for first control stream")
+    );
+}
+
+#[tokio::test]
 async fn control_reply_does_not_wait_for_the_local_election_to_finish() {
     let (_left, _right, a, mut b) = pair().await;
     let responder = b.control_responder();
