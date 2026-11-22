@@ -48,6 +48,31 @@ fn silence_yields_no_text() {
 }
 
 #[test]
+fn direct_cache_resets_after_cancel_and_finish() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/en.wav");
+    let samples = read_pcm16_mono_16k(&fixture);
+    let (excerpt, rest) = samples.split_at(48_000);
+    let mut asr = load_model();
+
+    let mut cancelled = asr.start_utterance().unwrap();
+    cancelled.push(rest).unwrap();
+    drop(cancelled);
+
+    // Direct-backend baseline for this mid-sentence cut: the last five IDs require right context at finish.
+    let ids = [4, 121, 53, 41, 48, 39, 233, 11, 38, 265, 40, 127, 58, 8, 42];
+    for size in [317, excerpt.len()] {
+        let mut stream = asr.start_utterance().unwrap();
+        for chunk in excerpt.chunks(size) {
+            stream.push(chunk).unwrap();
+        }
+        assert_eq!(stream.text_token_ids().unwrap(), &ids[..10]);
+        let (text, final_ids) = stream.finish_with_text_tokens().unwrap();
+        assert_eq!(text, "THE DRIBAL CHIEFTAIN CALLED FOR");
+        assert_eq!(final_ids, ids);
+    }
+}
+
+#[test]
 fn rejected_chunks_do_not_advance_the_utterance() {
     let mut asr = load_model();
     let mut stream = asr.start_utterance().unwrap();
