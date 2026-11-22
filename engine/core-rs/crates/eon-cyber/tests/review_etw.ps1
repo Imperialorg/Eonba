@@ -53,7 +53,9 @@ function Build-Reader {
 $started = $false
 try {
     Build-Reader
-    logman create trace $session -p $provider.ToString('B') 0x1 4 -o $etl -max 4 -ets
+    # Observe every keyword and level for this provider so the opt-out check
+    # cannot overlook an event merely because it has a different descriptor.
+    logman create trace $session -p $provider.ToString('B') '0xffffffffffffffff' '0xff' -o $etl -max 4 -ets
     if ($LASTEXITCODE -ne 0) { throw 'Cannot start private acceptance trace.' }
     $started = $true
     $without = Invoke-Review $false
