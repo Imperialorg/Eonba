@@ -1,5 +1,8 @@
 //! Real relay transit on loopback; not a carrier roaming or STUN test.
 
+#[path = "wan/continuity.rs"]
+mod continuity;
+
 use std::{
     net::{Ipv4Addr, SocketAddr},
     num::NonZeroU32,

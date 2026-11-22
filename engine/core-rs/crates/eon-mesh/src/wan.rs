@@ -3,6 +3,7 @@
 //! While open, iroh maintains its connection to the configured relay. The
 //! relay sees endpoint IDs, sizes and timing, not the end-to-end QUIC payload.
 
+pub mod continuity;
 #[cfg(target_os = "linux")]
 mod managed;
 mod media;

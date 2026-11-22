@@ -197,6 +197,39 @@ All 39 late decodes in those two runs occurred **after both peers had selected a
 
 All three passed the unchanged cut gate, with zero missing cut decodes or skipped cut send slots. The separate media relay delivered 749, 288 and 287 first decodes before primary recovery respectively. These are private, shared-kernel measurements, not a WAN latency guarantee.
 
+#### Field capture on two provisioned Linux peers
+
+`eon-wan-continuity` measures **one direction on one freshly opened connection**. Use the receiving device at the transition so the operator can mark it there. Both peers must already have the **private mirror grant and lifetime egress policy above**. The executable opens only `open_managed_n0(..., PrivateMirror { .. }, ...)`; it cannot install a grant, select public n0, accept a peer address, or retry via another constructor. Without the grants, stop here.
+
+Provision a separate local profile directory on each device:
+
+| File | Contents |
+|---|---|
+| `identity.key` | This device's secret (64 hex digits, owner-only readable, e.g. mode `0600`). |
+| `peer.pin` | The other device's full Ed25519 public key in hex. |
+| `relay.ip`, `pkarr.ip` | One literal RFC1918 IPv4 address in each file, in the service roles bound by the grant. |
+| `ca.der` | The grant's private mirror trust anchor, in binary DER (max 64 KiB). |
+
+Use an absolute profile path through real directories owned by the operator or root; neither directories nor files may be group/world writable. Files must be regular, singly linked and not symlinks. Keys never go on the command line. Use an unprivileged shell **already confined by the supervisor** on each device, with no proxies, `SSLKEYLOGFILE` or `QLOGDIR`. Build from `engine/core-rs` with `cargo build --locked -p eon-mesh --bin eon-wan-continuity` and deploy that binary to both devices.
+
+```sh
+# Start within 30 seconds of each other; both operators choose the same duration.
+# Receiver: keep stdin on the local terminal. Only the readout goes to stdout.
+eon-wan-continuity receive "$HOME/field-profile" 60 > field-receipts.txt
+# Sender (on the other device):
+eon-wan-continuity send "$HOME/field-profile" 60
+```
+
+Wait for the receiver's first prompt (it has decoded a probe). Press **Enter at the beginning of the actual transition**, then **Enter when it ends**. Leave time for receipts after the second mark. Do not mark a transition that did not happen. The tool neither changes interfaces nor detects a radio or path switch. To measure the reverse direction, start a fresh run with exchanged roles.
+
+The sender queues only synthetic 640-byte PCM silence, numbered from 1, at most once per 20 ms for 1–120 seconds (max 6,000 frames; no catch-up bursts). Setup, finish, and shutdown have separate bounded waits. The reliable finish message declares the actual number queued; `limit` is only a ceiling. The receiver allows 500 ms for datagrams overtaken by the finish, then returns a reliable drain receipt. The connection is consumed; neither a timeout nor a reconnect can extend a capture.
+
+* `rx_us` for marks and first decodes is relative to the **receiver's monotonic capture start**. `gap_us` is the interval between consecutive unique application decodes in arrival order, not network propagation time. `phase` labels those decodes, **not send attempts**. `max_mark_gap_us` is the longest observed receipt interval overlapping the two marks, including a gap that spans both; a leading/trailing silence without two receipts is not a measured interval.
+* `missing` counts declared sequences without a decode by the end of this readout, not skipped send opportunities. Without a valid finish, `queued` and `missing` are `unknown`; partial receipt rows remain useful. No payloads, addresses, identifiers, wall-clock timestamps or key material appear in the readout.
+* Receiver exit zero (`bracketed=true`) requires a completed exchange, both marks and a sequence after the end higher than all sequences before the beginning. **Not a lossless or latency pass**: there may be no receipts during the marked interval. Inspect the rows, missing count and gaps. No sender/receiver clock subtraction, RTT or `<5 ms` one-way verdict is produced.
+
+**Local harness:** `cargo test --offline --locked -p eon-mesh --test wan iroh_and_qos_tests_continuity` exercises the same capture routines on two real pinned endpoints using the existing loopback-only relay fixture and test marks. It covers missing, duplicate and reordered receipts, a tail arriving after finish, malformed PCM/finish totals, and a reconnect attempt. `cargo test --offline --locked -p eon-mesh --bin eon-wan-continuity` checks profile handling. Neither test provisions privileges or exercises public discovery, managed traversal, or a physical handoff.
+
 ### 2.3 Schema Reconciliation and Clock-Skew-Immune 15ms Spatial Election (`src/spatial.rs`)
 
 **Protobuf Reconciliation**: Update `SensoryClaim` in `proto/eon.proto` with two optional fields so it matches `DISTRIBUTED_NETWORKING_MESH.md` §8.1 without breaking existing field numbers `1..8`:

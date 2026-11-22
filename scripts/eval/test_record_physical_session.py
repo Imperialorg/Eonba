@@ -48,6 +48,7 @@ class RigTests(unittest.TestCase):
     def collect(self, directory, turns, take):
         info = rig.configuration(self.args)
         info["verified_capture_controller"] = info["route_calibration"]["capture_controller"]  # test endpoint
+        info["capture_geometry_verified"] = True
         rig.collect(self.args, directory, turns, take, info)
 
     def test_driven_acquire_passes_calibrated_controller_to_endpoint(self):
@@ -244,12 +245,13 @@ class RigTests(unittest.TestCase):
             nonlocal left
             left += 1
             for _ in range(16):
-                save(bytes([left, 0, 0xab, 0xcd]) * 1000)
+                save(bytes([left, 0, 0xab, 0xcd]) * 1000, lambda: 0)
 
         with patch.object(rig.os, "write", side_effect=fragment), rig.responding_take(self.args, take) as capture:
             for i, expected in ((1, True), (2, False)):
                 saved = bytearray()
-                self.assertEqual(capture(1, saved.extend), rig.BridgeOutcome(expected, None, 16000 if expected else None))
+                end = 16000 if expected else None
+                self.assertEqual(capture(1, saved.extend), rig.BridgeOutcome(expected, None, end, end))
                 self.assertEqual(saved, bytes([i, 0, 0xab, 0xcd]) * 16000)
         self.assertGreater(attempts, 100)
         self.args.speaker = "default"
@@ -261,7 +263,7 @@ class RigTests(unittest.TestCase):
         pcm = b"\x01\x00\x02\x00" * 16000
         def take(seconds, save):
             for i in range(0, len(pcm), 4096):
-                save(pcm[i:i + 4096])
+                save(pcm[i:i + 4096], lambda: 0)
 
         for failure in ("overflow", "death"):
             self.responder("header()\nos.write(1, b'3')\n" +
@@ -280,6 +282,56 @@ class RigTests(unittest.TestCase):
                 self.assertIn("overflow", str(error.exception))
             with wave.open(str(path)) as wav:
                 self.assertEqual(wav.readframes(16000), pcm)
+
+    def test_capture_cutoff_follows_write_completing_decisive_frame(self):
+        # Deliver only the first byte of frame 12,001 in its original
+        # callback. The decisive byte reaches the worker later, even though
+        # that worker reports the same reference length in both cases.
+        self.responder("n = header()\nos.write(1,b'3')\nassert len(reader.read(2*n)) == 2*n\n"
+                       "os.write(1,b'PB'+struct.pack('<I',12001))\nassert header()==0\nos.write(1,b'D')\n")
+        real_write = os.write
+        for resume, cutoff in ((15, 15023), (17, 16000)):
+            block = 0
+            half = False
+            def fragment(fd, data):
+                nonlocal half
+                if 13 <= block < resume:
+                    if not half:
+                        half = True
+                        return real_write(fd, data[:1])
+                    raise BlockingIOError()
+                return real_write(fd, data)
+
+            def take(_, save):
+                nonlocal block
+                for block in range(1, 17):
+                    save(bytes(4 * 1000), lambda: 23)
+                    rig.time.sleep(0.001)
+                block = 17  # drain after capture stops
+
+            with (self.subTest(resume=resume), patch.object(rig.os, "write", side_effect=fragment),
+                  rig.responding_take(self.args, take) as capture):
+                self.assertEqual(capture(1, lambda _: None), rig.BridgeOutcome(True, None, 12001, cutoff))
+
+    def test_live_playback_cannot_attest_to_an_unsent_frame(self):
+        flag = self.root / "marked"
+        self.responder("n = header()\nos.write(1,b'3')\nassert len(reader.read(2000)) == 2000\n"
+                       "os.write(1,b'P')\nopen(sys.argv[-1]+'/marked','x').close()\n"
+                       "assert len(reader.read(2*(n-1000))) == 2*(n-1000)\n"
+                       "os.write(1,b'B'+struct.pack('<I',1001))\nreader.read()\n")
+        def take(_, save):
+            save(bytes(4 * 1000), lambda: 50)
+            deadline = rig.time.monotonic() + 2
+            while not flag.exists():
+                self.assertLess(rig.time.monotonic(), deadline)
+                rig.time.sleep(0.001)
+            for _ in range(15):
+                save(bytes(4 * 1000), lambda: 50)
+                rig.time.sleep(0.001)
+
+        with (self.assertRaisesRegex(ValueError, "invalid pre-enqueue"),
+              rig.responding_take(self.args, take) as capture):
+            capture(1, lambda _: None)
 
     def test_driven_inventory_uses_control_and_each_exact_take_even_for_misses(self):
         self.responder("for result in (b'B', b'PB', b'N'):\n"
@@ -316,12 +368,15 @@ class RigTests(unittest.TestCase):
         self.assertEqual(info["mode"], "driven")
         self.assertIs(info["control_bridge_started"], True)
         self.assertEqual((info["responder_protocol"], info["control_reference_frames"]), (3, 1200))
+        self.assertGreaterEqual(info["control_captured_before_reference"], 1200)
         frame = info["control_playback_frame"]
         self.assertGreater(frame, 1200)  # includes the entire callback that observed playback
         self.assertGreaterEqual(30 * self.args.rate - frame - info["route_calibration"]["upper_bound_frames"], 4480)
         self.assertEqual([x["bridge_started"] for x in info["trials"].values()], [True, False])
         self.assertEqual(info["trials"]["turn-001.wav"]["reference_frames"], 1200)
+        self.assertGreaterEqual(info["trials"]["turn-001.wav"]["captured_before_reference"], 1200)
         self.assertNotIn("reference_frames", info["trials"]["turn-002.wav"])
+        self.assertNotIn("captured_before_reference", info["trials"]["turn-002.wav"])
         self.assertEqual(info["trials"].keys(), {p.name for p in (self.root / "trials").iterdir()})
 
     def test_control_tail_starts_beyond_the_adc_backlog_at_live_marker(self):
@@ -355,8 +410,7 @@ class RigTests(unittest.TestCase):
                 return requested
 
             def available(_):
-                self.assertEqual(pos, marker_after + 1024)
-                return frames - pos - future_frames
+                return max(0, frames - pos - future_frames) if pos >= marker_after + 1024 else 0
 
             alsa.snd_pcm_readi.side_effect = read
             alsa.snd_pcm_avail.side_effect = available
@@ -374,7 +428,7 @@ class RigTests(unittest.TestCase):
                     self.assertFalse((directory / "session.json").exists())
             with wave.open(str(directory / "muted-control.wav")) as wav:
                 self.assertEqual(wav.readframes(frames), pcm)
-            alsa.snd_pcm_avail.assert_called_once()
+            self.assertEqual(alsa.snd_pcm_avail.call_count, alsa.snd_pcm_readi.call_count)
             flag.unlink()
 
     def test_absent_or_post_capture_playback_stops_before_unmute(self):
@@ -389,13 +443,13 @@ class RigTests(unittest.TestCase):
         def take(seconds, save):
             nonlocal stalled
             self.assertEqual(seconds, 30)
-            save(bytes(4 * 800))
-            save(struct.pack("<hh", 1000, 0) * 400)
+            save(bytes(4 * 800), lambda: 0)
+            save(struct.pack("<hh", 1000, 0) * 400, lambda: 0)
             remaining = 16000 * seconds - 1200
             while remaining:
                 n = min(1024, remaining)
                 stalled = n == remaining  # final reference block cannot reach the worker until drain
-                save(bytes(4 * n))
+                save(bytes(4 * n), lambda: 0)
                 remaining -= n
                 rig.time.sleep(0.001)
             stalled = False
@@ -422,7 +476,7 @@ class RigTests(unittest.TestCase):
                            f"os.write(1,{outcome!r})\n")
             def take(seconds, save):
                 for i in range(0, len(pcm), 4096):
-                    save(pcm[i:i + 4096])
+                    save(pcm[i:i + 4096], lambda: 0)
                     rig.time.sleep(0.001)
             path = self.root / f"{outcome.decode()}.wav"
             with (self.subTest(outcome=outcome), self.assertRaisesRegex(ValueError, "responder status"),
@@ -434,7 +488,7 @@ class RigTests(unittest.TestCase):
     def test_loss_before_final_stream_check_cannot_publish(self):
         self.responder("assert header() == 0\n")  # exits zero without checking the held route
         with (patch("builtins.input", return_value="MUTED"),
-              patch.object(rig, "record", return_value=("control", rig.BridgeOutcome(True, 1200, 1024))),
+              patch.object(rig, "record", return_value=("control", rig.BridgeOutcome(True, 1200, 1024, 1024))),
               patch.object(rig.session, "checked_capture"), patch.object(rig.session, "check_control"),
               self.assertRaisesRegex(ValueError, "missing responder status")):
             self.collect(self.root, [], MagicMock())
@@ -448,7 +502,7 @@ class RigTests(unittest.TestCase):
             pcm = bytes(4 * self.args.rate)
             def take(_, save):
                 for i in range(0, len(pcm), 4096):
-                    save(pcm[i:i + 4096])
+                    save(pcm[i:i + 4096], lambda: 0)
                     rig.time.sleep(0.001)
             with (self.subTest(count=count), self.assertRaisesRegex(ValueError, "invalid pre-enqueue"),
                   rig.responding_take(self.args, take) as capture):

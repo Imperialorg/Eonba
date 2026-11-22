@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use super::{common, fixture, load_speaker, models};
+use super::{common, load_speaker, models};
 use eon_voice::TaskId;
 use eon_voice::barge_in::BargeIn;
 use eon_voice::coordinator::{BargeInCoordinator, CANDIDATE_SAMPLES, DuplexReflex};
@@ -76,8 +76,24 @@ fn handoff(owner: &SpeakerEmbedding, prelude: &[f32], stranger: &[f32], returnin
 
 #[test]
 fn active_speaker_switches_do_not_credit_a_departed_owner() {
-    let owner = fixture();
-    let stranger = common::read_pcm16_mono_16k(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/0.wav"));
+    let (owner, stranger) = match (
+        std::env::var_os("EON_HANDOFF_OWNER_WAV"),
+        std::env::var_os("EON_HANDOFF_STRANGER_WAV"),
+    ) {
+        (None, None) => {
+            let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+            (dir.join("en.wav"), dir.join("0.wav"))
+        }
+        (Some(a), Some(b)) => {
+            let (a, b) = (PathBuf::from(a), PathBuf::from(b));
+            assert!(a.is_absolute() && b.is_absolute() && a.is_file() && b.is_file(),
+                "supply two absolute paths to authorized WAV files");
+            (a, b)
+        }
+        _ => panic!("handoff requires both EON_HANDOFF_OWNER_WAV and EON_HANDOFF_STRANGER_WAV"),
+    };
+    let owner = common::read_pcm16_mono_16k(&owner);
+    let stranger = common::read_pcm16_mono_16k(&stranger);
     let half = owner.len() / 2;
     let mut embedder = load_speaker();
     let enrollment = embedder.embed(&owner[..half]).unwrap();

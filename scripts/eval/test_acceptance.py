@@ -78,22 +78,27 @@ class PhysicalInventoryTests(unittest.TestCase):
         self.assertEqual(measured["noisy_scenes"][physical.SCENES[0]],
                          {"trials": 34, "misses": 1, "max_ttfa_ms": None})
 
-    def test_enqueued_bridge_cannot_explain_an_earlier_acoustic_onset(self):
+    def driven_v3(self):
         self.driven_control()
-        self.info.update(responder_protocol=3, control_reference_frames=2500)
+        self.info.update(responder_protocol=3, control_reference_frames=1200, control_captured_before_reference=2500,
+                         capture_geometry_verified=True)
+        self.info["route_calibration"].update(capture_period_frames=80, capture_buffer_frames=320)
         for trial in self.info["trials"].values():
-            trial.update(bridge_started=True, reference_frames=2100)
+            trial.update(bridge_started=True, reference_frames=2100, captured_before_reference=2400)
+
+    def test_enqueued_bridge_cannot_explain_an_earlier_acoustic_onset(self):
+        self.driven_v3()
         self.assertTrue(self.measure()["task_10_2"]["passed"])
         # Last input at 1016, first sustained speaker bin ends at 2600. Its
         # apparent 100 ms latency cannot come from a bridge enqueued any later.
         trial = self.info["trials"]["0.wav"]
         for already_acquired in (2600, 2601, 8000):
-            trial["reference_frames"] = already_acquired
+            trial["captured_before_reference"] = already_acquired
             with self.subTest(count=already_acquired), self.assertRaisesRegex(ValueError, "precedes bridge enqueue"):
                 self.measure()
-        trial["reference_frames"] = 2599
+        trial["captured_before_reference"] = 2599
         self.assertTrue(self.measure()["task_10_2"]["passed"])  # a straddling bin is not provably premature
-        self.info["control_reference_frames"] = self.info["control_playback_frame"] + 1
+        self.info["control_captured_before_reference"] = self.info["control_playback_frame"] + 1
         with self.assertRaisesRegex(ValueError, "control playback observation"):
             self.measure()
 
@@ -106,9 +111,16 @@ class PhysicalInventoryTests(unittest.TestCase):
         trial["reference_frames"] = 2100
         with self.assertRaisesRegex(ValueError, "version 3"):
             self.measure()
-        self.info.update(responder_protocol=3, control_reference_frames=1200)
-        for entry in self.info["trials"].values():
-            entry["reference_frames"] = 2100
+        self.driven_v3()
+        trial = self.info["trials"]["0.wav"]
+        for invalid in (None, False, 2099, 2100.1, 8001):
+            trial["captured_before_reference"] = invalid
+            with self.subTest(cutoff=invalid), self.assertRaisesRegex(ValueError, "invalid captured_before_reference"):
+                self.measure()
+        del trial["captured_before_reference"]
+        with self.assertRaisesRegex(ValueError, "invalid captured_before_reference"):
+            self.measure()
+        trial["captured_before_reference"] = 2400
         for invalid in (None, False, 0, -1, 1.2, "2100", 8001):
             trial["reference_frames"] = invalid
             with self.subTest(count=invalid), self.assertRaisesRegex(ValueError, "invalid reference_frames"):
@@ -123,6 +135,23 @@ class PhysicalInventoryTests(unittest.TestCase):
             self.info["responder_protocol"] = version
             with self.subTest(version=version), self.assertRaisesRegex(ValueError, "invalid responder_protocol"):
                 self.measure()
+
+    def test_reference_delivery_during_drain_with_a_silent_speaker_is_a_miss(self):
+        self.driven_v3()
+        path = self.root / "trials/0.wav"
+        self.info["trials"][path.name]["captured_before_reference"] = self.samples[path].frames
+        self.samples[path] = replace(self.samples[path], first_output_end=None)
+        self.assertEqual(self.measure()["task_10_2"]["misses"], {path.name: "no sustained speaker response"})
+
+    def test_version_three_cannot_omit_verified_capture_geometry(self):
+        self.driven_v3()
+        del self.info["capture_geometry_verified"]
+        with self.assertRaisesRegex(ValueError, "capture_geometry_verified"):
+            self.measure()
+        self.info["capture_geometry_verified"] = True
+        del self.info["route_calibration"]["capture_period_frames"]
+        with self.assertRaisesRegex(ValueError, "capture_period_frames"):
+            self.measure()
 
     def test_no_implicit_mode_unknown_outcome_or_unexercised_driven_control(self):
         del self.info["mode"]

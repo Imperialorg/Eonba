@@ -1,6 +1,8 @@
 """Acquire an operator-authorized stereo TTFA session on a dedicated Linux measurement rig."""
 
 import argparse
+from array import array
+from bisect import bisect_left
 from contextlib import contextmanager, nullcontext
 import hashlib
 import json
@@ -106,6 +108,7 @@ class BridgeOutcome(NamedTuple):
     started: bool
     playback_frame: int | None  # high-water mark including frames already queued in ALSA
     reference_frames: int | None  # frames read by the responder before enqueue, not an onset
+    captured_before_reference: int | None  # frames acquired before the decisive reference was sent
 
 
 @contextmanager
@@ -152,10 +155,20 @@ def responding_take(args, take):
                 status(90, b"3")  # older workers cannot bind the response to a reference prefix
                 received = 0
                 playback_frame = None
+                sent_at_playback = None
+                delivered, captured = array("I"), array("I")
                 fault = None
 
+                def note_delivery(cutoff):
+                    # A short write can end halfway through a mono sample. Only
+                    # index complete frames, including pending bytes from earlier reads.
+                    complete = received - (len(pipe.pending) + 1) // 2
+                    if complete > (delivered[-1] if delivered else 0):
+                        delivered.append(complete)
+                        captured.append(min(frames, cutoff))
+
                 def receive(stereo, available=None):
-                    nonlocal fault, received, playback_frame
+                    nonlocal fault, received, playback_frame, sent_at_playback
                     write(stereo)
                     if fault is None:
                         try:
@@ -164,18 +177,22 @@ def responding_take(args, take):
                                 raise OSError("unexpected capture frame count")
                             # Poll before offering this block: no terminal outcome is legal yet.
                             value = poll_status()
+                            if available is None:
+                                raise ValueError("no live capture availability for reference delivery")
+                            queued = available()
+                            if type(queued) is not int or queued < 0:
+                                raise ValueError("invalid capture availability")
+                            # This block and the observed ADC backlog already exist
+                            # before any pending or new reference bytes can be written.
+                            acquired = received + n + queued
                             if value is not None:
                                 if value != b"P" or playback_frame is not None or not received:
                                     raise ValueError("unexpected live responder status")
-                                if available is None:
-                                    raise ValueError("no live capture availability for playback marker")
-                                queued = available()
-                                if type(queued) is not int or queued < 0:
-                                    raise ValueError("invalid capture availability")
-                                # Exclude this read AND all frames the ADC has already acquired.
-                                playback_frame = received + n + queued
+                                playback_frame = acquired
+                                sent_at_playback = delivered[-1] if delivered else 0
                             received += n
                             pipe.offer(memoryview(stereo).cast("h")[::2].tobytes())
+                            note_delivery(acquired)
                         except (OSError, ValueError) as error:
                             # Stop playback but finish writing this original stereo WAV.
                             worker.kill()
@@ -187,18 +204,21 @@ def responding_take(args, take):
                 if received != frames:
                     raise ValueError("short reference take; original retained")
                 pipe.finish()
+                note_delivery(frames)
                 # A P first received during drain still needs B, but is not a live observation.
                 played = playback_frame is not None or status(10, b"PN") == b"P"
                 reference_frames = None
+                cutoff = None
                 if played:
                     status(10, b"B")
                     reference_frames, = struct.unpack("<I", read_status(4, 10))
                     if not 0 < reference_frames <= frames or (
-                            playback_frame is not None and reference_frames > playback_frame):
+                            sent_at_playback is not None and reference_frames > sent_at_playback):
                         raise ValueError("invalid pre-enqueue reference count")
+                    cutoff = captured[bisect_left(delivered, reference_frames)]
                 if poll_status() is not None:
                     raise ValueError("unexpected responder status after take")
-                return BridgeOutcome(played, playback_frame, reference_frames)
+                return BridgeOutcome(played, playback_frame, reference_frames, cutoff)
 
             yield run
             # The worker checks the held stream one last time before a manifest is published.
@@ -305,6 +325,7 @@ def collect(args, directory, turns, take, info):
             info["control_playback_frame"] = outcome.playback_frame
             if outcome.started:
                 info["control_reference_frames"] = outcome.reference_frames
+                info["control_captured_before_reference"] = outcome.captured_before_reference
         session.check_control(session.checked_capture(control, args.threshold, control_hash), info)
         print("Unmute the speaker. Keep the same clock, channel routing, gains and threshold.")
         seen = {control_hash}
@@ -324,6 +345,7 @@ def collect(args, directory, turns, take, info):
                 label["bridge_started"] = outcome.started
                 if outcome.started:
                     label["reference_frames"] = outcome.reference_frames
+                    label["captured_before_reference"] = outcome.captured_before_reference
             info["trials"][name] = label
     # Do not select trials by outcome. Even a turn with no speaker response is in the inventory.
     pending = directory / "session.json.partial"
