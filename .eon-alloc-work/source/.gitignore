@@ -1,0 +1,57 @@
+# Rust & Cargo
+target/
+engine/core-rs/target/
+Cargo.lock
+
+# Gradle & JVM
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+# Android
+*.apk
+*.ap_
+*.aab
+*.dex
+local.properties
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Native & C++
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+
+# Audio & Cache Downloads
+perception/models/
+data/cache/
+*.pcm
+*.wav
+*.wav.part
+
+.z3-trace
+
+# Local LEAN simulation results
+/backtests/

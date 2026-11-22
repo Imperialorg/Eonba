@@ -1,0 +1,312 @@
+{
+  "schema_version": 3,
+  "notes": "sha256 and size_bytes must come from the upstream artifact. Hugging Face digests are the LFS oid. An entry with sha256 null is refused by scripts/download_models.py until pinned.",
+  "groups": {
+    "common_voice": [
+      "silero-vad-v5",
+      "zipformer-en-2023-06-26-encoder-int8",
+      "zipformer-en-2023-06-26-decoder",
+      "zipformer-en-2023-06-26-joiner-int8",
+      "zipformer-en-2023-06-26-tokens",
+      "kokoro-v1.0-voice-af_heart"
+    ],
+    "nemotron_asr_160ms": [
+      "nemotron-asr-160ms-encoder-int8",
+      "nemotron-asr-160ms-decoder-int8",
+      "nemotron-asr-160ms-joiner-int8",
+      "nemotron-asr-160ms-tokens"
+    ],
+    "gui_grounding_agpl": [
+      "omniparser-v2-icon-detect"
+    ]
+  },
+  "profiles": {
+    "p0_mobile_ultralight": [
+      "common_voice",
+      "qwen3.5-0.8b-q4_k_m",
+      "kokoro-v1.0-int8"
+    ],
+    "p1_mobile_flagship": [
+      "common_voice",
+      "gemma-4-e2b-it-qat-q4_0",
+      "kokoro-v1.0-int8"
+    ],
+    "p2_workstation_16g": [
+      "common_voice",
+      "gemma-4-12b-it-qat-ud-q4_k_xl",
+      "kokoro-v1.0-fp16"
+    ],
+    "p3_workstation_heavy": [
+      "common_voice",
+      "qwen3.6-27b-q4_k_m",
+      "nemotron_asr_160ms",
+      "kokoro-v1.0-fp16"
+    ]
+  },
+  "models": [
+    {
+      "id": "kokoro-v1.0-release-int8",
+      "dest": "perception/models/tts/release/kokoro-v1.0.int8.onnx",
+      "url": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx",
+      "sha256": "6e742170d309016e5891a994e1ce1559c702a2ccd0075e67ef7157974f6406cb",
+      "size_bytes": 92361271,
+      "license": "Apache-2.0",
+      "notes": "Explicit opt-in Taylor Chu INT8 export (tokens/style/speed to audio). Not the graph used by default profiles. Use the pinned af_heart voice."
+    },
+    {
+      "id": "bge-micro-v2-int8",
+      "dest": "perception/models/embeddings/bge-micro-v2/model_quantized.onnx",
+      "url": "https://huggingface.co/TaylorAI/bge-micro-v2/resolve/3edf6d7de0faa426b09780416fe61009f26ae589/onnx/model_quantized.onnx",
+      "sha256": "ed65e36025aa94cb74207dab863c85452919ec0ab7df3512092932aa22c9a33a",
+      "size_bytes": 17409774,
+      "license": "MIT",
+      "notes": "Also verified byte-for-byte in the public tomlm/LottaDB test-assets-v1 release, bge-micro-v2.tar.gz (SHA256 132204045640c19ca555942dcaf82687dbf1cf8b38e1038121d2b6add76ec6e2). Opt-in; not included in hardware profiles."
+    },
+    {
+      "id": "bge-micro-v2-tokenizer",
+      "dest": "perception/models/embeddings/bge-micro-v2/tokenizer.json",
+      "url": "https://huggingface.co/TaylorAI/bge-micro-v2/resolve/3edf6d7de0faa426b09780416fe61009f26ae589/tokenizer.json",
+      "sha256": "cb374d6bc042c22455946f4e09a89d29882a199fdaf8fb25be00dc8b8857a448",
+      "size_bytes": 711661,
+      "license": "MIT",
+      "notes": "Complete tokenizer pipeline for bge-micro-v2-int8; also verified in the same test-assets-v1 release."
+    },
+    {
+      "id": "zipformer-en-2023-06-26-encoder-int8",
+      "dest": "perception/models/asr/encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
+      "sha256": "5022b2eca5b19d1bc104fcf33e26bc32604b7df553cd2e1f62e31dc7b05e9c87",
+      "size_bytes": 70108816,
+      "license": "Apache-2.0",
+      "archive": {
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
+        "sha256": "639e25b578e9e997131402199419c13a941f8e4e198e2da1ce57dbf5cf401282",
+        "size_bytes": 310414022,
+        "member": "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
+      },
+      "notes": "Pinned from the upstream k2-fsa release tarball; the same-named Hugging Face mirror has different bytes."
+    },
+    {
+      "id": "zipformer-en-2023-06-26-decoder",
+      "dest": "perception/models/asr/decoder-epoch-99-avg-1-chunk-16-left-128.onnx",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
+      "sha256": "85914f840b71110487ece7a30ebd0bd4b8fb5c2623215bba3aa5ab4c138fc591",
+      "size_bytes": 2093080,
+      "license": "Apache-2.0",
+      "archive": {
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
+        "sha256": "639e25b578e9e997131402199419c13a941f8e4e198e2da1ce57dbf5cf401282",
+        "size_bytes": 310414022,
+        "member": "decoder-epoch-99-avg-1-chunk-16-left-128.onnx"
+      },
+      "notes": "Pinned from the upstream k2-fsa release tarball; the same-named Hugging Face mirror has different bytes."
+    },
+    {
+      "id": "zipformer-en-2023-06-26-joiner-int8",
+      "dest": "perception/models/asr/joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
+      "sha256": "abd5e30f3f16fc510605c6029dba33f10e4386bd75c5bdc30cf94076864db10d",
+      "size_bytes": 259416,
+      "license": "Apache-2.0",
+      "archive": {
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
+        "sha256": "639e25b578e9e997131402199419c13a941f8e4e198e2da1ce57dbf5cf401282",
+        "size_bytes": 310414022,
+        "member": "joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx"
+      },
+      "notes": "Pinned from the upstream k2-fsa release tarball; the same-named Hugging Face mirror has different bytes."
+    },
+    {
+      "id": "zipformer-en-2023-06-26-tokens",
+      "dest": "perception/models/asr/tokens.txt",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
+      "sha256": "49e3c2646595fd907228b3c6787069658f67b17377c60aeb8619c4551b2316fb",
+      "size_bytes": 5048,
+      "license": "Apache-2.0",
+      "archive": {
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
+        "sha256": "639e25b578e9e997131402199419c13a941f8e4e198e2da1ce57dbf5cf401282",
+        "size_bytes": 310414022,
+        "member": "tokens.txt"
+      },
+      "notes": "Pinned from the upstream k2-fsa release tarball; the same-named Hugging Face mirror has different bytes."
+    },
+    {
+      "id": "voice-test-zipformer-0",
+      "dest": "engine/core-rs/crates/eon-voice/tests/fixtures/0.wav",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
+      "sha256": "6bc58a4efdf20daac252b6b1502632601a71efe0308f6757dc1eda34891a7e4f",
+      "size_bytes": 212044,
+      "archive": {
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
+        "sha256": "639e25b578e9e997131402199419c13a941f8e4e198e2da1ce57dbf5cf401282",
+        "size_bytes": 310414022,
+        "member": "0.wav"
+      },
+      "notes": "Upstream Zipformer test recording. Not shipped with the app or included in hardware profiles."
+    },
+    {
+      "id": "voice-test-sensevoice-en",
+      "dest": "engine/core-rs/crates/eon-voice/tests/fixtures/en.wav",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
+      "sha256": "eb1eb008904465b74c304aad8342e8c7d3c6e61ffe9f66adcaca9cf0f76a93f4",
+      "size_bytes": 228908,
+      "archive": {
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
+        "sha256": "7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e",
+        "size_bytes": 163002883,
+        "member": "en.wav"
+      },
+      "notes": "Upstream SenseVoice test recording. Not shipped with the app or included in hardware profiles."
+    },
+    {
+      "id": "silero-vad-v5",
+      "dest": "perception/models/vad/silero_vad.onnx",
+      "url": "https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx",
+      "sha256": "2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f",
+      "size_bytes": 2327524,
+      "license": "MIT"
+    },
+    {
+      "id": "kokoro-v1.0-voice-af_heart",
+      "dest": "perception/models/tts/voices/af_heart.bin",
+      "url": "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/voices/af_heart.bin",
+      "sha256": "d583ccff3cdca2f7fae535cb998ac07e9fcb90f09737b9a41fa2734ec44a8f0b",
+      "size_bytes": 522240,
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "kokoro-v1.0-int8",
+      "dest": "perception/models/tts/kokoro-v1.0-int8.onnx",
+      "url": "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_quantized.onnx",
+      "sha256": "fbae9257e1e05ffc727e951ef9b9c98418e6d79f1c9b6b13bd59f5c9028a1478",
+      "size_bytes": 92361116,
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "kokoro-v1.0-fp16",
+      "dest": "perception/models/tts/kokoro-v1.0-fp16.onnx",
+      "url": "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_fp16.onnx",
+      "sha256": "ba4527a874b42b21e35f468c10d326fdff3c7fc8cac1f85e9eb6c0dfc35c334a",
+      "size_bytes": 163234740,
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "qwen3.5-0.8b-q4_k_m",
+      "dest": "perception/models/slm/Qwen3.5-0.8B-Q4_K_M.gguf",
+      "url": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf",
+      "sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517",
+      "size_bytes": 532517120,
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "gemma-4-e2b-it-qat-q4_0",
+      "dest": "perception/models/slm/gemma-4-E2B_q4_0-it.gguf",
+      "url": "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/main/gemma-4-E2B_q4_0-it.gguf",
+      "sha256": "fa401b55b07ee70a54c6dae3903c783a6e65064312529ea57175cb5f8dec6634",
+      "size_bytes": 3349516256,
+      "license": "Gemma Terms of Use"
+    },
+    {
+      "id": "gemma-4-12b-it-qat-ud-q4_k_xl",
+      "dest": "perception/models/slm/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf",
+      "url": "https://huggingface.co/unsloth/gemma-4-12B-it-qat-GGUF/resolve/main/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf",
+      "sha256": "90fd44e29e0d7cffeb0fd00dc73cfdab9ed0b0e95306ecf7821ea634c940c370",
+      "size_bytes": 6716356800,
+      "license": "Gemma Terms of Use"
+    },
+    {
+      "id": "qwen3.6-27b-q4_k_m",
+      "dest": "perception/models/slm/Qwen3.6-27B-Q4_K_M.gguf",
+      "url": "https://huggingface.co/unsloth/Qwen3.6-27B-GGUF/resolve/main/Qwen3.6-27B-Q4_K_M.gguf",
+      "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0",
+      "size_bytes": 16817244384,
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "omniparser-v2-icon-detect",
+      "dest": "perception/models/vision/omniparser/icon_detect/model.pt",
+      "url": "https://huggingface.co/microsoft/OmniParser-v2.0/resolve/main/icon_detect/model.pt",
+      "sha256": "dab3d4351ad00b035db829909a4db98354d5a90f6990e4ac00222a9a95d4bf57",
+      "size_bytes": 40623819,
+      "license": "AGPL-3.0",
+      "notes": "Opt-in only (not in any profile). Upstream README: icon_detect is AGPL. Pulling it into a distributed build triggers AGPL source obligations."
+    },
+    {
+      "id": "qwen2.5-vl-3b-instruct-q4_k_m",
+      "dest": "perception/models/vlm/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf",
+      "url": "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/5037fcf163dd95d1e41d1974465f0898ed108ca2/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf",
+      "sha256": "d02fe9b69ad8cadbbd228e387667af66612c44bed29ffc8eb1e7caf9ac486c12",
+      "size_bytes": 1929901056,
+      "license": "Qwen Research License Agreement",
+      "notes": "Opt-in evaluation, not in any hardware profile. ggml-org conversion of Qwen/Qwen2.5-VL-3B-Instruct; use with qwen2.5-vl-3b-mmproj-f16. The original weights' LICENSE is non-commercial research/evaluation, notwithstanding the conversion card's apache-2.0 tag: https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct/blob/66285546d2b821cf421d4f5eb2576359d3770cd3/LICENSE"
+    },
+    {
+      "id": "qwen2.5-vl-3b-mmproj-f16",
+      "dest": "perception/models/vlm/mmproj-Qwen2.5-VL-3B-Instruct-f16.gguf",
+      "url": "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/5037fcf163dd95d1e41d1974465f0898ed108ca2/mmproj-Qwen2.5-VL-3B-Instruct-f16.gguf",
+      "sha256": "b9160fe9d814d1fadf68395677468534778b39ac33c2e7561b7b218626e60d5e",
+      "size_bytes": 1338428128,
+      "license": "Qwen Research License Agreement",
+      "notes": "Matching vision tower/projector from the same ggml-org revision as qwen2.5-vl-3b-instruct-q4_k_m. Same upstream non-commercial research/evaluation restriction; outside hardware profiles."
+    },
+    {
+      "id": "omniparser-v2-icon-detect-onnx",
+      "dest": "perception/models/vision/omniparser/icon_detect/model.onnx",
+      "url": "https://huggingface.co/onnx-community/OmniParser-v2.0_icon_detect/resolve/f0fbccdf5f56c2a689f669b95cb4f67bcf4e12b1/onnx/model.onnx",
+      "sha256": "c0d3d261e3368a5e51fe0d632c5d62e4bd4da489ac4b95fbbee450eb640e36fe",
+      "size_bytes": 80305670,
+      "license": "AGPL-3.0",
+      "notes": "Opt-in only, outside all hardware profiles. ONNX Community's static FP32 YOLO11m export of the Microsoft v2 icon_detect checkpoint, not a Microsoft-published ONNX file. Embedded weights, 1x3x640x640 input, 1x5x8400 output; no Python or .pt loading. See docs/TECH_STACK_AND_TOOLCHAINS.md#omniparser-v2-icon-proposals for validation and licensing."
+    },
+    {
+      "id": "nemotron-asr-160ms-encoder-int8",
+      "dest": "perception/models/asr/nemotron-asr-160ms/encoder.int8.onnx",
+      "url": "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-160ms-int8-2026-06-11/resolve/main/encoder.int8.onnx",
+      "sha256": "e1b39e5e16bef578a54ed2fba5f031438e000cc36c3ea2ca49d55699d5baebd4",
+      "size_bytes": 657601518,
+      "license": "OpenMDW"
+    },
+    {
+      "id": "nemotron-asr-160ms-decoder-int8",
+      "dest": "perception/models/asr/nemotron-asr-160ms/decoder.int8.onnx",
+      "url": "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-160ms-int8-2026-06-11/resolve/main/decoder.int8.onnx",
+      "sha256": "19f9c98fc6d0a2c33a65a43b36fdb2e914c26c0aa9764be3aebc502a1e982fb0",
+      "size_bytes": 14978075,
+      "license": "OpenMDW"
+    },
+    {
+      "id": "nemotron-asr-160ms-joiner-int8",
+      "dest": "perception/models/asr/nemotron-asr-160ms/joiner.int8.onnx",
+      "url": "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-160ms-int8-2026-06-11/resolve/main/joiner.int8.onnx",
+      "sha256": "4101c7c679a0bc30483794b27a059e34e79232aa2068d78d51231a22c8b0d7ce",
+      "size_bytes": 9504438,
+      "license": "OpenMDW"
+    },
+    {
+      "id": "nemotron-asr-160ms-tokens",
+      "dest": "perception/models/asr/nemotron-asr-160ms/tokens.txt",
+      "url": "https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-160ms-int8-2026-06-11/resolve/main/tokens.txt",
+      "sha256": "729cc103155bafa785f9cd45746cd41cabe97eab7182fc04d594129587958f8a",
+      "size_bytes": 131440,
+      "license": "OpenMDW"
+    },
+    {
+      "id": "camplusplus-zh-en-advanced",
+      "dest": "perception/models/speaker/camplusplus_zh_en_advanced.onnx",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
+      "sha256": "53cab20ba8f2eb2f6e2d89ecc18e88ef3222169b61b4419cbc13666744a4574b",
+      "size_bytes": 28281165,
+      "license": "Apache-2.0",
+      "notes": "Opt-in sherpa-onnx conversion of https://modelscope.cn/models/iic/speech_campplus_sv_zh_en_16k-common_advanced. Requires a new enrollment; not compatible with WeSpeaker vectors."
+    },
+    {
+      "id": "wespeaker-resnet34",
+      "dest": "perception/models/speaker/wespeaker_resnet34.onnx",
+      "url": "https://huggingface.co/wespeaker/wespeaker-voxceleb-resnet34-LM/resolve/main/voxceleb_resnet34_LM.onnx",
+      "sha256": "7bb2f06e9df17cdf1ef14ee8a15ab08ed28e8d0ef5054ee135741560df2ec068",
+      "size_bytes": 26530309,
+      "license": "Apache-2.0"
+    }
+  ]
+}

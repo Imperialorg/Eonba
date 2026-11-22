@@ -1,0 +1,29 @@
+{
+  "name": "eon-paused-locations",
+  "displayName": "EON Paused Project Locations",
+  "description": "Show locations in selected open project files for one already-paused call stack.",
+  "publisher": "eon",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "vscode": "^1.93.0"
+  },
+  "categories": ["Debuggers"],
+  "extensionKind": ["ui"],
+  "capabilities": {
+    "untrustedWorkspaces": { "supported": false },
+    "virtualWorkspaces": { "supported": false }
+  },
+  "main": "./extension.js",
+  "activationEvents": ["onCommand:eon.showPausedProjectLocations"],
+  "contributes": {
+    "commands": [
+      {
+        "command": "eon.showPausedProjectLocations",
+        "title": "Show Paused Project Locations",
+        "category": "EON",
+        "enablement": "isLinux && isWorkspaceTrusted && !remoteName && debugState == stopped"
+      }
+    ]
+  }
+}

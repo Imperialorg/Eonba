@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/eon-primitives",
+    "crates/eon-foundation",
+    "crates/eon-kernel",
+    "crates/eon-capability",
+    "crates/eon-cyber",
+    "crates/eon-mesh",
+    "crates/eon-voice",
+    "crates/eon-vision",
+    "crates/eon-cognition",
+    "crates/eon-uniffi",
+    "crates/eon-cli",
+    "crates/eon-daemon",
+    "crates/eon-canvas",
+    "crates/eon-ebpf",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["EON Engineering Team"]
+license = "Apache-2.0"
+
+[workspace.dependencies]
+ort = "=2.0.0-rc.15"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+overflow-checks = false
+
+[profile.bench]
+opt-level = 3
+debug = true
+lto = "thin"

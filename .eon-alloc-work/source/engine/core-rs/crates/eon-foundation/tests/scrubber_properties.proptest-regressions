@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 726590e484c1faad679345e5e9101519141f9bcbfffea5dd85f6dbac87d408ff # shrinks to segments = ["AB-", "Cc1hD20e", "EFof_d5ia3gjkG"]
+cc d67cbb328645db2e3aa67083e39189be988fec7eed9da2a19113d48b3af50da6 # shrinks to segments = ["a.", "B0HeEf", "PI-bQ", "cdJgK1", "hFC23_DAia"]
+cc 04de363e92fa87d5d793bb2c2cbd73419c9f22151818abec55d67d53b8a1439b # shrinks to body = "bhcAM/N/O23Ba/001eAf6iaCD4gjk7ld"
+cc 4b88c444018c2d62063a34545448e2c9fe04aa099a5af71dec62cd7cee0a0181 # shrinks to body = "jD0/l5AEFn3G1B/opca2H0Idefq4g/J/"
+cc cb0090ea1ea37229092d6e4ca5c8849a3c518d364ede815f9a2006eefa9f72ba # shrinks to segments = ["a0aaaa_a", "axoxb--0", "a00-_--_"]
