@@ -13,7 +13,7 @@ use super::{DECODER_FILE, ENCODER_FILE, JOINER_FILE, TOKENS_FILE};
 use crate::features::{NUM_MEL_BINS, SAMPLE_RATE_HZ, online_fbank};
 use kaldi_native_fbank::OnlineFeature;
 use ort::session::{Session, SessionInputValue};
-use ort::value::{Tensor, TensorElementType, ValueType};
+use ort::value::{DynValue, Tensor, TensorElementType, ValueType};
 
 const CHUNK_FRAMES: usize = 45;
 const CHUNK_SHIFT: usize = 32;
@@ -21,15 +21,10 @@ const CONTEXT_SIZE: usize = 2;
 const BLANK_ID: i64 = 0;
 const WORD_BOUNDARY: char = '\u{2581}';
 
-enum CacheData {
-    F32(Vec<f32>),
-    I64(Vec<i64>),
-}
-
-struct CacheTensor {
+struct CacheInput {
     name: String,
-    shape: Vec<i64>,
-    data: CacheData,
+    output_name: String,
+    zero: DynValue,
 }
 
 pub(super) struct Model {
@@ -37,7 +32,7 @@ pub(super) struct Model {
     decoder: Session,
     joiner: Session,
     tokens: HashMap<i64, String>,
-    caches: Vec<CacheTensor>,
+    cache_inputs: Vec<CacheInput>,
 }
 
 fn onnx_err(context: &str, e: impl std::fmt::Display) -> EonError {
@@ -69,7 +64,7 @@ fn load_tokens(path: &Path) -> EonResult<HashMap<i64, String>> {
 
 /// Zero-initialises every encoder input except the audio features. Dynamic dimensions are sized to 1, which matches
 /// the batch size used at inference.
-fn initial_caches(encoder: &Session) -> EonResult<Vec<CacheTensor>> {
+fn initial_caches(encoder: &Session) -> EonResult<Vec<CacheInput>> {
     encoder
         .inputs()
         .iter()
@@ -80,20 +75,21 @@ fn initial_caches(encoder: &Session) -> EonResult<Vec<CacheTensor>> {
             };
             let dims: Vec<i64> = shape.iter().map(|&d| if d <= 0 { 1 } else { d }).collect();
             let len = dims.iter().product::<i64>() as usize;
-            let data = match ty {
-                TensorElementType::Float32 => CacheData::F32(vec![0.0; len]),
-                TensorElementType::Int64 => CacheData::I64(vec![0; len]),
+            let zero = match ty {
+                TensorElementType::Float32 => Tensor::from_array((dims, vec![0.0_f32; len])).map(Tensor::into_dyn),
+                TensorElementType::Int64 => Tensor::from_array((dims, vec![0_i64; len])).map(Tensor::into_dyn),
                 other => {
                     return Err(onnx_err(
                         "caches",
                         format!("unsupported {other:?} for {}", input.name()),
                     ));
                 }
-            };
-            Ok(CacheTensor {
+            }
+            .map_err(|e| onnx_err("cache", e))?;
+            Ok(CacheInput {
                 name: input.name().to_owned(),
-                shape: dims,
-                data,
+                output_name: format!("new_{}", input.name()),
+                zero,
             })
         })
         .collect()
@@ -114,22 +110,22 @@ impl Model {
     pub fn load(model_dir: impl AsRef<Path>) -> EonResult<Self> {
         let dir = model_dir.as_ref();
         let encoder = load_session(&dir.join(ENCODER_FILE))?;
-        let caches = initial_caches(&encoder)?;
+        let cache_inputs = initial_caches(&encoder)?;
         Ok(Self {
             decoder: load_session(&dir.join(DECODER_FILE))?,
             joiner: load_session(&dir.join(JOINER_FILE))?,
             tokens: load_tokens(&dir.join(TOKENS_FILE))?,
             encoder,
-            caches,
+            cache_inputs,
         })
     }
 
     pub fn start_utterance(&mut self) -> EonResult<Stream<'_>> {
-        self.caches = initial_caches(&self.encoder)?;
         let context = [BLANK_ID; CONTEXT_SIZE];
         let decoder_out = self.run_decoder(context)?;
         Ok(Stream {
             model: self,
+            caches: None,
             features: online_fbank()?,
             next_frame: 0,
             context,
@@ -143,6 +139,8 @@ impl Model {
 /// survive arbitrary PCM push boundaries. End padding is added only by `finish`.
 pub(super) struct Stream<'a> {
     model: &'a mut Model,
+    // None feeds the immutable zeros. Only the stream owns its subsequent encoder states.
+    caches: Option<Vec<DynValue>>,
     features: OnlineFeature,
     next_frame: usize,
     context: [i64; CONTEXT_SIZE],
@@ -175,7 +173,7 @@ impl Stream<'_> {
     fn decode_ready(&mut self) -> EonResult<()> {
         while self.next_frame + CHUNK_FRAMES <= self.features.num_frames_ready() {
             let chunk = self.features.features[self.next_frame..self.next_frame + CHUNK_FRAMES].concat();
-            let (encoded, frames) = self.model.run_encoder(&chunk)?;
+            let (encoded, frames) = self.run_encoder(&chunk)?;
             let dim = encoded.len() / frames;
             for frame in encoded.chunks_exact(dim) {
                 let token = self.model.run_joiner(frame, &self.decoder_out)?;
@@ -189,53 +187,45 @@ impl Stream<'_> {
         }
         Ok(())
     }
-}
 
-impl Model {
     /// Returns the flattened encoder output and its frame count, and advances the caches.
     fn run_encoder(&mut self, chunk: &[f32]) -> EonResult<(Vec<f32>, usize)> {
-        let mut feed: Vec<(String, SessionInputValue<'static>)> = Vec::with_capacity(self.caches.len() + 1);
+        let inputs = &self.model.cache_inputs;
+        let mut feed: Vec<(&str, SessionInputValue<'_>)> = Vec::with_capacity(inputs.len() + 1);
         let features = Tensor::from_array(([1usize, CHUNK_FRAMES, NUM_MEL_BINS], chunk.to_vec()))
             .map_err(|e| onnx_err("input", e))?;
-        feed.push(("x".to_owned(), features.into()));
-        for cache in &self.caches {
-            let value: SessionInputValue<'static> = match &cache.data {
-                CacheData::F32(v) => Tensor::from_array((cache.shape.clone(), v.clone()))
-                    .map_err(|e| onnx_err("cache", e))?
-                    .into(),
-                CacheData::I64(v) => Tensor::from_array((cache.shape.clone(), v.clone()))
-                    .map_err(|e| onnx_err("cache", e))?
-                    .into(),
-            };
-            feed.push((cache.name.clone(), value));
+        feed.push(("x", features.into()));
+        for (i, input) in inputs.iter().enumerate() {
+            let value = self.caches.as_ref().map_or(&input.zero, |values| &values[i]);
+            feed.push((&input.name, value.into()));
         }
 
-        let outputs = self.encoder.run(feed).map_err(|e| onnx_err("encoder", e))?;
+        let mut outputs = self.model.encoder.run(feed).map_err(|e| onnx_err("encoder", e))?;
         let (shape, encoder_out) = outputs["encoder_out"]
             .try_extract_tensor::<f32>()
             .map_err(|e| onnx_err("encoder_out", e))?;
         let frames = shape[1] as usize;
         let encoder_out = encoder_out.to_vec();
 
-        for cache in &mut self.caches {
-            let name = format!("new_{}", cache.name);
-            let next = &outputs[name.as_str()];
-            match &mut cache.data {
-                CacheData::F32(v) => {
-                    let (_, data) = next.try_extract_tensor::<f32>().map_err(|e| onnx_err("cache", e))?;
-                    v.clear();
-                    v.extend_from_slice(data);
-                }
-                CacheData::I64(v) => {
-                    let (_, data) = next.try_extract_tensor::<i64>().map_err(|e| onnx_err("cache", e))?;
-                    v.clear();
-                    v.extend_from_slice(data);
-                }
+        let mut caches = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let next = outputs
+                .remove(&input.output_name)
+                .ok_or_else(|| onnx_err("cache", format!("missing {}", input.output_name)))?;
+            if next.dtype() != input.zero.dtype() {
+                return Err(onnx_err(
+                    "cache",
+                    format!("{}: expected {}, got {}", input.output_name, input.zero.dtype(), next.dtype()),
+                ));
             }
+            caches.push(next);
         }
+        self.caches = Some(caches);
         Ok((encoder_out, frames))
     }
+}
 
+impl Model {
     fn run_decoder(&mut self, context: [i64; CONTEXT_SIZE]) -> EonResult<Vec<f32>> {
         let y = Tensor::from_array(([1usize, CONTEXT_SIZE], context.to_vec())).map_err(|e| onnx_err("decoder", e))?;
         let outputs = self
