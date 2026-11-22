@@ -5,8 +5,11 @@ use std::error::Error;
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::atomic::Ordering::Acquire;
+use std::sync::mpsc::sync_channel;
+use std::thread;
 use std::time::{Duration, Instant};
 
+use eon_voice::EonResult;
 use eon_voice::asr::ZipformerAsr;
 use eon_voice::barge_in::BargeIn;
 use eon_voice::commitment::{Bridge, BridgeCache, CommitmentGate};
@@ -16,20 +19,93 @@ use eon_voice::pre_cognition::IntentPreview;
 use eon_voice::resample::CaptureFrames;
 use eon_voice::ring::{PcmProducer, pcm_ring};
 use eon_voice::tts::KokoroTts;
-use eon_voice::vad::{SileroVad, VadEndpoint};
+use eon_voice::vad::{SileroVad, VadTurnState};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+type Frame = [f32; VAD_FRAME_SAMPLES];
 
 fn reply(
     input: impl Read,
     rate: u32,
-    vad: SileroVad,
+    mut vad: SileroVad,
     asr: &mut ZipformerAsr,
     ready: impl FnOnce() -> Result<()>,
 ) -> Result<Option<(Bridge, u32)>> {
-    let mut endpoint = VadEndpoint::new(vad);
+    vad.reset();
     let mut stream = asr.start_utterance()?;
-    let mut partial = String::new();
+    let end = detect_turn(
+        input,
+        rate,
+        ready,
+        |frame| vad.speech_probability(frame),
+        |frame| Ok(stream.push(frame)?.map(|update| update.text)),
+    )?;
+    // Right-context decoding can still change the text; a partial is never a reply.
+    final_reply(end, || stream.finish())
+}
+
+fn final_reply(
+    end: Option<u32>,
+    finish: impl FnOnce() -> EonResult<String>,
+) -> Result<Option<(Bridge, u32)>> {
+    let Some(reference_frames) = end else {
+        return Ok(None);
+    };
+    let text = finish()?;
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    let bridge = match IntentPreview::from_partial(&text) {
+        Some(IntentPreview::Question) => Bridge::Report,
+        Some(IntentPreview::Request) => Bridge::Proposal,
+        _ => Bridge::Notice,
+    };
+    Ok(Some((bridge, reference_frames)))
+}
+
+fn detect_turn(
+    input: impl Read,
+    rate: u32,
+    ready: impl FnOnce() -> Result<()>,
+    mut score: impl FnMut(&Frame) -> EonResult<f32> + Send,
+    mut decode: impl FnMut(&Frame) -> EonResult<Option<String>>,
+) -> Result<Option<u32>> {
+    thread::scope(|scope| {
+        let (submit, frames) = sync_channel::<Frame>(1);
+        let (scores, receive) = sync_channel(1);
+        let builder = thread::Builder::new().name("rig-silero".into());
+        let worker = builder.spawn_scoped(scope, move || -> EonResult<()> {
+            for frame in frames {
+                if scores.send(score(&frame)?).is_err() {
+                    break; // take cancelled
+                }
+            }
+            Ok(())
+        })?;
+        let mut turn = VadTurnState::default();
+        let mut partial = String::new();
+        let end = read_until_endpoint(input, rate, ready, move |frame| {
+            // One real frame in flight: neither model sees frame N+1 until the
+            // endpoint decision uses both the score and the updated partial for N.
+            submit.send(*frame).map_err(|_| "Silero worker disconnected")?;
+            if let Some(text) = decode(frame)? {
+                partial = text;
+            }
+            Ok(turn.push(receive.recv()?, &partial).is_some())
+        });
+        // The frame callback (including both channel ends) is gone on *every*
+        // exit. Join before returning even on EOF or an input/decoder failure.
+        worker.join().map_err(|_| "Silero worker panicked")??;
+        end
+    })
+}
+
+fn read_until_endpoint(
+    input: impl Read,
+    rate: u32,
+    ready: impl FnOnce() -> Result<()>,
+    mut observe: impl FnMut(&Frame) -> Result<bool>,
+) -> Result<Option<u32>> {
     let (mut tx, rx) = pcm_ring(1 << 14);
     let mut frames = CaptureFrames::<VAD_FRAME_SAMPLES>::new(rx, rate)?;
     let mut input = io::BufReader::new(input);
@@ -58,20 +134,8 @@ fn reply(
             return Err("discontinuous input".into());
         }
         while let Some(frame) = frames.try_read()? {
-            if let Some(update) = stream.push(&frame)? {
-                partial = update.text;
-            }
-            if endpoint.push(&frame, &partial)?.is_some() {
-                let text = stream.finish()?;
-                if text.trim().is_empty() {
-                    return Ok(None);
-                }
-                let bridge = match IntentPreview::from_partial(&text) {
-                    Some(IntentPreview::Question) => Bridge::Report,
-                    Some(IntentPreview::Request) => Bridge::Proposal,
-                    _ => Bridge::Notice,
-                };
-                return Ok(Some((bridge, reference_frames)));
+            if observe(&frame)? {
+                return Ok(Some(reference_frames));
             }
         }
     }
@@ -240,6 +304,112 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revised_partial_selects_the_tier_on_the_exact_frame_being_scored() -> Result<()> {
+        // Frame IDs, not a speech/model fixture or a timing measurement.
+        let input: Vec<_> = (1i16..=40)
+            .flat_map(|i| i.to_le_bytes().repeat(VAD_FRAME_SAMPLES))
+            .collect();
+        for (initial, revised, last) in [
+            ("stop and", "stop", 12),
+            ("stop", "", 27),
+            ("stop", "stop and", 38),
+        ] {
+            let mut scored = 0i16;
+            let mut decoded = 0i16;
+            let mut scorer_thread = None;
+            let end = detect_turn(
+                &input[..],
+                16_000,
+                || Ok(()),
+                |frame| {
+                    let id = thread::current().id();
+                    assert_eq!(*scorer_thread.get_or_insert(id), id);
+                    scored += 1;
+                    assert!(frame.iter().all(|&s| s == f32::from(scored) / 32768.));
+                    Ok(if scored <= 2 { 1. } else { 0. })
+                },
+                |frame| {
+                    decoded += 1;
+                    assert!(frame.iter().all(|&s| s == f32::from(decoded) / 32768.));
+                    Ok(match decoded {
+                        1 => Some(initial.into()),
+                        12 => Some(revised.into()), // tenth quiet frame: a Complete partial would close now
+                        _ => None,
+                    })
+                },
+            )?;
+            assert_eq!((scored, decoded), (last, last));
+            assert_eq!(end, Some(last as u32 * VAD_FRAME_SAMPLES as u32));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn silence_and_eof_one_sample_short_of_endpoint_never_flush_a_partial() -> Result<()> {
+        for (had_speech, full_frames) in [(false, 40), (true, 11)] {
+            let input = vec![0; 2 * ((full_frames + 1) * VAD_FRAME_SAMPLES - 1)];
+            let mut scored = 0;
+            let end = detect_turn(
+                &input[..],
+                16_000,
+                || Ok(()),
+                |_| {
+                    scored += 1;
+                    Ok(if had_speech && scored <= 2 { 1. } else { 0. })
+                },
+                |_| Ok(Some("stop".into())),
+            )?;
+            assert_eq!(scored, full_frames);
+            assert!(final_reply(end, || panic!("EOF flushed decoder"))?.is_none());
+        }
+        // Even an actual endpoint cannot authorize audio based on its partial.
+        assert!(final_reply(Some(6144), || Ok(" \n".into()))?.is_none());
+        assert!(matches!(
+            final_reply(Some(6144), || Ok("why now".into()))?,
+            Some((Bridge::Report, 6144))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn independent_calls_can_overlap_and_either_failure_aborts_the_take() {
+        use eon_voice::EonError;
+
+        // Two-way handshake, not a benchmark. A serial implementation cannot complete both calls.
+        for score_fails in [true, false] {
+            let (scoring, wait_for_score) = sync_channel(1);
+            let (decoding, wait_for_decode) = sync_channel(1);
+            let timeout = Duration::from_secs(5);
+            let err = detect_turn(
+                &[0; 2 * VAD_FRAME_SAMPLES][..],
+                16_000,
+                || Ok(()),
+                move |_| {
+                    scoring.send(()).unwrap();
+                    wait_for_decode.recv_timeout(timeout).unwrap();
+                    if score_fails {
+                        Err(EonError::InternalError("score".into()))
+                    } else {
+                        Ok(0.)
+                    }
+                },
+                |_| {
+                    decoding.send(()).unwrap();
+                    wait_for_score.recv_timeout(timeout).unwrap();
+                    if score_fails {
+                        Ok(None)
+                    } else {
+                        Err(EonError::InternalError("decode".into()))
+                    }
+                },
+            )
+            .unwrap_err();
+            let failed = if score_fails { "score" } else { "decode" };
+            assert_eq!(err.downcast_ref::<EonError>(), Some(&EonError::InternalError(failed.into())));
+        }
+    }
 
     #[test]
     fn incomplete_payload_or_header_never_reports_an_outcome() {

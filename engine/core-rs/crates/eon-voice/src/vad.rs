@@ -69,12 +69,41 @@ impl Activity {
     }
 }
 
+/// Endpoint history for one listening turn, independent of the Silero inference session.
+#[derive(Default)]
+pub struct VadTurnState {
+    activity: Activity,
+    endpoint: Endpointer,
+}
+
+impl VadTurnState {
+    /// Feed consecutive Silero probabilities, each with the latest ASR partial *including* that frame.
+    pub fn push(&mut self, probability: f32, partial: &str) -> Option<Endpoint> {
+        self.observe(probability, partial).1
+    }
+
+    fn observe(&mut self, probability: f32, partial: &str) -> (Option<Endpoint>, Option<Endpoint>) {
+        let (speech, acoustic_pause) = self.activity.observe(probability);
+        // A long partial must not turn a single DSP worker tick into an
+        // unbounded text scan. Fall back to the conservative continuation tier.
+        let tier = if partial.len() <= MAX_PARTIAL_BYTES {
+            Completeness::from_partial(partial)
+        } else {
+            Completeness::Incomplete
+        };
+        let turn_end = self.endpoint.push_frame(FRAME_MS, speech, tier);
+        if turn_end.is_some() {
+            self.activity = Activity::default();
+        }
+        (acoustic_pause, turn_end)
+    }
+}
+
 /// Native VAD/endpointer for listening turns. Barge-in detection during active
 /// playback runs separately; this holdoff starts only *after* a reply finishes.
 pub struct VadEndpoint {
     vad: SileroVad,
-    activity: Activity,
-    endpoint: Endpointer,
+    turn: VadTurnState,
     holdoff_samples: usize,
     session: eon_primitives::SessionId,
 }
@@ -142,8 +171,7 @@ impl VadEndpoint {
         vad.reset();
         Self {
             vad,
-            activity: Activity::default(),
-            endpoint: Endpointer::new(),
+            turn: VadTurnState::default(),
             holdoff_samples: 0,
             session: eon_primitives::SessionId::new(),
         }
@@ -155,8 +183,7 @@ impl VadEndpoint {
 
     pub fn reply_finished(&mut self) {
         self.vad.reset();
-        self.activity = Activity::default();
-        self.endpoint = Endpointer::new();
+        self.turn = VadTurnState::default();
         self.holdoff_samples = crate::geometry::samples_for_ms(RESUME_HOLDOFF_MS, SAMPLE_RATE_HZ);
         self.session = eon_primitives::SessionId::new();
     }
@@ -189,18 +216,7 @@ impl VadEndpoint {
         let probability = self.vad.speech_probability(frame)?;
         let inference_time = started.elapsed();
         let rms = (frame.iter().map(|x| x * x).sum::<f32>() / VAD_FRAME_SAMPLES as f32).sqrt();
-        let (speech, acoustic_pause) = self.activity.observe(probability);
-        // A long partial must not turn a single DSP worker tick into an
-        // unbounded text scan. Fall back to the conservative continuation tier.
-        let tier = if partial.len() <= MAX_PARTIAL_BYTES {
-            Completeness::from_partial(partial)
-        } else {
-            Completeness::Incomplete
-        };
-        let turn_end = self.endpoint.push_frame(FRAME_MS, speech, tier);
-        if turn_end.is_some() {
-            self.activity = Activity::default();
-        }
+        let (acoustic_pause, turn_end) = self.turn.observe(probability, partial);
         Ok(Some(ScoredVadFrame {
             probability,
             rms,
