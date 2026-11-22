@@ -52,12 +52,12 @@
   - **Requirements**: Embedded SQLite / redb store with WAL mode. Atomic transactions for snapshot creation and state commits.
   - **Verification**: `cargo test --locked -p eon-foundation` covers transactional checkpoint and snapshot commits, overlapping WAL reads, rollback on a failed write, upgrading a checkpoint-only database, and replay after reopening.
 
-- [ ] **Task 1.3: Identity, Zero-Knowledge Credential Broker & Journal Scrubber**
+- [x] **Task 1.3: Identity, Zero-Knowledge Credential Broker & Journal Scrubber**
   - **Crate**: `eon-foundation`
   - **Files**: `src/identity.rs`, `src/permissions.rs`, `src/credentials.rs`, `src/scrubber.rs`
   - **Requirements**: Ownership identities (System, User, EphemeralAgent). Permission bitflags (`READ_WORKSPACE`, `MUTATE_WORKSPACE`, `EXECUTE_PROCESS`, `CYBER_OPERATIONS`, `NETWORK_ACCESS`, `DEVICE_CONTROL`, `SPAWN_SUBAGENT`). Opaque credential handles (`secret://<vault_key>`) with late-binding memory resolution from hardware OS enclaves (Android Keystore, Windows DPAPI, Linux Keyring). In-flight `JournalScrubber` redacting tokens and high-entropy strings ($\mathcal{H} > 4.5$) before journal disk commitment.
   - **Journal verification**: `cargo test --locked -p eon-foundation` checks the stored frame and its replay for recognized credential fixtures, including unlabelled high-entropy hex. This does not guarantee detection of arbitrary secrets.
-  - **Platform status**: Linux keyring and Android API 35 emulator tests passed. After force-stop, the original AndroidKeyStore key decrypted the saved inspection probe. The separate native vault passed its Rust broker and child-stdin binding test. Native Windows DPAPI still needs a Windows run; the emulator does not attest physical hardware backing.
+  - **Platform verification** (`2d093bc`): The [Windows DPAPI step](https://github.com/Imperialorg/Eonba/actions/runs/44989065768/job/137110093511) ran both named tests: owner grants and child stdin, and broker lifetime and invalid ciphertext. Both passed, none ignored. The [Linux keyring](https://github.com/Imperialorg/Eonba/actions/runs/44989065768/job/137110093454) and [Android API 35 Keystore issue/restart and native vault](https://github.com/Imperialorg/Eonba/actions/runs/44989065768/job/137110093433) also passed. This verifies platform broker behavior, not TPM or physical Android hardware backing.
 
 ---
 
@@ -239,7 +239,7 @@ The security work in this roadmap is defensive: inspect authorized code, depende
   - **Files**: `src/defense/taint_auditor.rs`, `src/defense/auto_patch.rs`, `src/defense/telemetry.rs`
   - **Requirements**: Review authorized source for patterns associated with CWE-119, CWE-89, CWE-362 and observable timing differences. Produce reviewable constant-time and bounds-checking edits, without executing submitted code or patching a running process. Collect opt-in, metadata-only telemetry on supported Linux/Android eBPF, Windows ETW and stock Android backends. Distinguish observed evidence from unsupported rules and unavailable sensors.
   - **Verification**: Exercise both matching and nonmatching source, compile and test the reviewed repair, check that reports do not disclose the source, and test each claimed telemetry backend on its supported host. Local `/proc/self/io` counters do not establish eBPF, ETW or VPN coverage.
-  - **Platform evidence**: Stock API 35 process time and self-only Linux eBPF CPU sampling passed. Android raw CPU sampling correctly returned `Unavailable`. The opt-in Android platform UID counter measured exactly 17,280 bytes in each direction on two loopback runs. An independent metadata check verified the attached eBPF programs and backing map on that image. This is network accounting, not CPU sampling. Native Windows ETW readback is still unverified.
+  - **Platform evidence**: Stock API 35 process time and self-only Linux eBPF CPU sampling passed. Android raw CPU sampling correctly returned `Unavailable`. The opt-in Android platform UID counter measured exactly 17,280 bytes in each direction on two loopback runs. An independent metadata check verified the attached eBPF programs and backing map on that image. This is network accounting, not CPU sampling. On [native Windows](https://github.com/Imperialorg/Eonba/actions/runs/44989065768/job/137110093511), the closed trace contained the expected opted-in marker, but the XML decoder could not establish payload absence. The ETW gate failed.
 
 - [x] **Task 7.3: Offline dependency and advisory assessment**
   - **Crate**: `eon-cyber`
@@ -257,12 +257,13 @@ The security work in this roadmap is defensive: inspect authorized code, depende
 
 ## Phase 8: Distributed Networking Mesh (Engine Optimized for Networking)
 
-- [x] **Task 8.1: Multiplexed P2P QUIC Transport & 15ms Spatial Election Protocol**
+- [ ] **Task 8.1: Multiplexed P2P QUIC Transport & 15ms Spatial Election Protocol**
   - **Crate**: `eon-mesh`
   - **Files**: `src/transport/quic.rs`, `src/transport/discovery.rs`, `src/transport/security.rs`, `src/transport/spatial.rs`
   - **Requirements**: Zero-config mDNS peer discovery, mutual TLS 1.3 encryption, sub-10ms RPC latency across local LAN. 15ms Spatial Arbitration Protocol ("Single Mind, Multiple Bodies") broadcasting `SensoryClaim` over Class 0 QUIC datagrams, calculating deterministic multi-factor arbitration scores (SNR, screen unlock, HID recency, speaker ID confidence), and electing a single I/O leader while enforcing follower speaker suppression.
   - **Unit Tests**: `cargo test -p eon-mesh quic_tests`, `spatial_election_tests`.
   - **Verified on a two-node Linux virtual LAN**: Independently pinned peers discovered one another over mDNS, agreed on the leader and suppressed follower playback. Three consecutive runs passed the strict 100-RPC gate; maxima were 8.502, 0.566 and 0.363 ms. One earlier run missed at 10.062 ms. This measures an established connection on isolated veth interfaces, not connection setup, a physical Wi-Fi link or a hard real-time guarantee.
+  - **Reopened on CI** (`2d093bc`): The [paired LAN gate](https://github.com/Imperialorg/Eonba/actions/runs/44989065768/job/137110093438) measured p50 0.467 ms, p95 0.545 ms and maximum 11.642 ms. All 100 must finish in less than 10 ms. The passing component tests do not override that miss.
 
 - [x] **Task 8.2: Split-Inference Coordinator**
   - **Crate**: `eon-mesh`
