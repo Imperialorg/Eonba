@@ -44,6 +44,10 @@ jobs:
         with:
           persist-credentials: false
       - run: cargo test --locked -p eon-cyber --no-default-features
+      - name: Test consent and project scoping for paused debugger commands
+        run: |
+          umask 077
+          node --test "$GITHUB_WORKSPACE"/scripts/eval/paused_locations/*.test.js
       - run: |
           umask 077
           TMPDIR=/tmp cargo test --locked -p eon-kernel

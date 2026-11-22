@@ -76,9 +76,11 @@ To prevent EON from barging in on her own voice when speaking through open speak
 
 ### 2.3 Enrolled speaker verification
 
-The native duplex path requires 17 consecutive 32 ms voiced frames with an active playback reference. It compares that window with a local enrollment from the same encoder; VAD alone cannot mute playback. The recorded acceptance gate uses a cosine threshold of 0.35. Its 544 ms decision window is not a time-to-first-audio measurement.
+The native duplex path first compares 17 consecutive 32 ms voiced frames with a local enrollment from the same encoder. VAD alone cannot mute playback. With shipping WeSpeaker, two probe schedules start eight frames apart, so verification does not depend on a single segmentation of continuous speech. If the 544 ms candidate misses, a 1,088 ms candidate is eligible only if its trailing half scores at least as well against the owner as its leading half. A 2,176 ms candidate must also meet that condition on its two 1,088 ms halves. The **selected window itself** must meet the original cosine threshold (0.35 in the recorded acceptance test); a rising score is never sufficient. An unvoiced frame, a stopped or missing playback reference, or an inference error discards accumulated evidence. CAM++ retains its original single-window schedule.
 
 `SpeakerEmbedder::load` uses the pinned WeSpeaker ResNet34-LM encoder (256 dimensions). For a new enrollment, `SpeakerEmbedder::load_for` can explicitly select `SpeakerEncoder::CamPlusPlusZhEnAdvancedV1` (192 dimensions). The loader checks the weights before opening the ONNX session. A voiceprint from a different encoder or feature pipeline needs fresh enrollment, not padding or truncation. See [the recorded comparisons](implementation/06_VERIFICATION_BENCHMARKS_AND_PHASED_PLAYBOOK.md#37-recorded-speaker-decisions-in-synthetic-noise-task-106) for results on competing speech and speaker changes.
+
+The tradeoff is additional capture-worker inference: up to three embeddings at a probe, with probes 256 or 288 ms apart during sustained voiced playback, and a bounded 38,912-sample PCM buffer. A longer window can include more than one voice; checking its trailing half is a safeguard, not a proof of identity.
 
 ### 2.4 Streaming ASR Engine
 - **Engine**: `sherpa-onnx` runtime with pre-packaged **int8 Streaming Zipformer**.

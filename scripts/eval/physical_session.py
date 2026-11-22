@@ -48,7 +48,11 @@ def route_bound(info):
             raise ValueError(f"route calibration differs from acquisition {key}")
     if type(cal.get("sample_rate_hz")) is not int or cal["sample_rate_hz"] != info["sample_rate_hz"]:
         raise ValueError("route calibration differs from acquisition sample_rate_hz")
-    if "capture_period_frames" in cal or "capture_buffer_frames" in cal:
+    # Older recorders copied operator-supplied calibration keys verbatim. A
+    # size in those notes does not mean ALSA was configured or read back.
+    if "capture_geometry_verified" in info:
+        if info["capture_geometry_verified"] is not True:
+            raise ValueError("invalid capture_geometry_verified marker")
         capture_geometry(cal, info["sample_rate_hz"])
     bound = cal.get("upper_bound_frames")
     if type(bound) is not int or not 0 < bound < 30 * info["sample_rate_hz"]:
@@ -77,6 +81,8 @@ def check_control(control, info):
         raise ValueError("passive recording cannot declare route_calibration")
     elif "verified_capture_controller" in info:
         raise ValueError("passive recording cannot declare verified_capture_controller")
+    elif "capture_geometry_verified" in info:
+        raise ValueError("passive recording cannot declare capture_geometry_verified")
 
 
 def bridge_started(label, key, mode):

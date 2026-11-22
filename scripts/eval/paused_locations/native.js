@@ -33,8 +33,12 @@ async function* messages(stdout) {
   }
 }
 
-async function verify(work) {
-  const { env, files, lines } = prepare(work);
+async function verify(work, allocations) {
+  const counts = require('./allocation_project');
+  const subject = allocations ? counts.build(work) : prepare(work);
+  const { env } = subject;
+  const { files, lines } = allocations ? { files: [[subject.file, subject.source]], lines: [subject.line] } : subject;
+  const hCounts = allocations ? counts.host(work, subject.program) : undefined;
   const guard = path.join(repo, 'engine/core-rs/crates/eon-cyber/fixtures/owned_dap/launch.c');
   fs.writeFileSync(path.join(work, 'guard.c'), checked(guard, '5381158e94b80aa431059c32dd963432c0f545c36b0519cc06e825fcd6ad2128'));
   assert.equal(spawnSync(`${llvm}/clang`, ['--no-default-config', '--ld-path=/usr/bin/ld', '-O2', 'guard.c', '-o', 'guard'],
@@ -70,17 +74,45 @@ async function verify(work) {
   try {
     await call('initialize', { adapterID: 'lldb', pathFormat: 'path', linesStartAt1: true, columnsStartAt1: true,
       supportsRunInTerminalRequest: false, supportsStartDebuggingRequest: false });
-    const launch = send('launch', { program: path.join(work, 'preview'), cwd: work, disableASLR: false });
+    const launchConfig = allocations ? await hCounts.resolve(hCounts.config) :
+      { program: path.join(work, 'preview'), cwd: work, disableASLR: false };
+    if (allocations) {
+      assert.equal(launchConfig.env.length, 1);
+      hCounts.session.configuration = launchConfig;
+      hCounts.start(hCounts.session);
+    }
+    const launch = send('launch', launchConfig);
     await event('initialized');
     const bp = (await call('setBreakpoints', { source: { path: files[0][0] }, breakpoints: [{ line: lines[0] }] })).breakpoints[0];
     assert.ok(bp.verified && bp.line === lines[0]);
     await call('configurationDone', {});
     await reply(launch);
-    const { reason, threadId, hitBreakpointIds } = (await event('stopped')).body;
-    assert.ok(reason === 'breakpoint' && hitBreakpointIds.includes(bp.id));
-    // The editor normally fetches this frame to populate its Call Stack view.
-    const top = (await call('stackTrace', { threadId, startFrame: 0, levels: 1 })).stackFrames[0];
-    assert.ok(Number.isSafeInteger(top.id) && top.source.path === files[0][0] && top.line === lines[0]);
+    async function stop() {
+      const { reason, threadId, hitBreakpointIds } = (await event('stopped')).body;
+      assert.ok(reason === 'breakpoint' && hitBreakpointIds.includes(bp.id));
+      // The editor normally fetches this frame to populate its Call Stack view.
+      const top = (await call('stackTrace', { threadId, startFrame: 0, levels: 1 })).stackFrames[0];
+      assert.ok(Number.isSafeInteger(top.id) && top.source.path === files[0][0] && top.line === lines[0]);
+      return { threadId, top };
+    }
+    let { threadId, top } = await stop();
+
+    if (allocations) {
+      for (const [i, oracle] of [counts.expected(1, 1, 0, 0), counts.expected(1, 1, 1, 2)].entries()) {
+        if (i) ({ threadId, top } = await stop());
+        hCounts.v.debug.activeStackItem = Object.assign(new hCounts.v.DebugStackFrame(),
+          { session: hCounts.session, threadId, frameId: top.id });
+        await hCounts.command();
+        assert.equal(hCounts.messages[i], oracle);
+        await call('continue', { threadId });
+      }
+      assert.deepEqual(hCounts.prompts, ['Enable once', 'Show counts', 'Show counts']);
+      assert.equal((await event('exited')).body.exitCode, 0);
+      await event('terminated');
+      await call('disconnect', { terminateDebuggee: false });
+      await hCounts.end(hCounts.session);
+      return hCounts.messages;
+    }
 
     // The product command receives only the already-paused editor API, not the setup/control peer.
     let requests = 0;
@@ -106,17 +138,20 @@ async function verify(work) {
     return expected;
   } finally {
     guardProcess.kill('SIGTERM'); // Existing subreaper also cleans up a still-paused test on failure.
+    await hCounts?.close();
     assert.deepEqual(await closed, [0, null]);
   }
 }
 
 async function main() {
   assert.ok(process.platform === 'linux' && process.arch === 'x64');
-  assert.deepEqual(process.argv.slice(2), ['--verify-owned-sources']);
+  const allocations = process.argv[2] === '--verify-project-allocations';
+  assert.deepEqual(process.argv.slice(2), [allocations ? '--verify-project-allocations' : '--verify-owned-sources']);
   const work = workDirectory();
   try {
-    const expected = await verify(work);
-    console.log(`LLVM 18 stdio; both: ${expected.join(', ')}; caller only: ${expected[1]}; exit 0.`);
+    const expected = await verify(work, allocations);
+    if (allocations) console.log(`LLVM 18 stdio; two verified project stops:\n${expected.join('\n---\n')}\nexit 0.`);
+    else console.log(`LLVM 18 stdio; both: ${expected.join(', ')}; caller only: ${expected[1]}; exit 0.`);
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
   }

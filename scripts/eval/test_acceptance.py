@@ -111,6 +111,10 @@ class PhysicalInventoryTests(unittest.TestCase):
             self.measure()
         del self.info["route_calibration"]
         del self.info["verified_capture_controller"]
+        self.info["capture_geometry_verified"] = True
+        with self.assertRaisesRegex(ValueError, "passive recording cannot declare capture_geometry_verified"):
+            self.measure()
+        del self.info["capture_geometry_verified"]
         with self.assertRaisesRegex(ValueError, "passive recording cannot declare"):
             self.measure()
 
@@ -133,15 +137,22 @@ class PhysicalInventoryTests(unittest.TestCase):
     def test_incomplete_or_invalid_declared_capture_geometry_does_not_verify(self):
         self.driven_control()
         cal = self.info["route_calibration"]
+        for label in self.info["trials"].values():
+            label["bridge_started"] = True
         cal["capture_period_frames"] = 80
+        # A legacy recorder preserved arbitrary supplemental calibration notes.
+        self.assertTrue(self.measure()["task_10_2"]["passed"])
+        for invalid in (None, False, 1, "true"):
+            self.info["capture_geometry_verified"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "invalid capture_geometry_verified"):
+                self.measure()
+        self.info["capture_geometry_verified"] = True
         with self.assertRaisesRegex(ValueError, "capture_buffer_frames"):
             self.measure()
         cal["capture_buffer_frames"] = 80
         with self.assertRaisesRegex(ValueError, "capture_buffer_frames"):
             self.measure()
         cal["capture_buffer_frames"] = 320
-        for label in self.info["trials"].values():
-            label["bridge_started"] = True
         self.assertTrue(self.measure()["task_10_2"]["passed"])
 
     def test_driven_control_requires_same_route_positive_calibrated_bound(self):

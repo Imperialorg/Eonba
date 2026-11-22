@@ -24,11 +24,11 @@ function setup(t) {
   return Object.assign(h, { work, root, file, text });
 }
 
-test('activation registers only the declared, argument-free command; consent is per invocation', async t => {
+test('only the declared location/count commands and narrow launch provider activate; location consent is per invocation', async t => {
   const h = setup(t);
   const m = require('../../../integrations/vscode-paused-locations/package.json');
-  assert.deepEqual(m.activationEvents, [`onCommand:${h.name}`]);
-  assert.deepEqual(m.contributes.commands.map(c => c.command), [h.name]);
+  assert.deepEqual(m.activationEvents, [`onCommand:${h.name}`, 'onCommand:eon.showProjectAllocationCounts', 'onDebugResolve:lldb-dap']);
+  assert.deepEqual(m.contributes.commands.map(c => c.command), [h.name, 'eon.showProjectAllocationCounts']);
   assert.deepEqual(h.calls, []);
   await h.command({ threadId: 10, files: [h.file] });
   assert.deepEqual(h.offered, []);

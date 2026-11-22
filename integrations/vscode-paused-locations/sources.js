@@ -52,8 +52,8 @@ function candidates(v, root) {
   return options;
 }
 
-async function fileStamp(root, file) {
-  // Called only on selected editor paths, never on paths supplied by the adapter.
+// Walk only editor-selected paths, never paths supplied by the adapter.
+async function checkedPath(root, file, kind) {
   const uid = BigInt(process.geteuid());
   const components = file.slice(1).split('/');
   if (components.length > 64) throw Error();
@@ -62,13 +62,27 @@ async function fileStamp(root, file) {
     const s = await lstat(prefix, { bigint: true });
     if ((s.mode & 0o022n) !== 0n || (s.uid !== uid && s.uid !== 0n)) throw Error();
     if (i === components.length) {
-      if (!s.isFile() || s.uid !== uid || s.nlink !== 1n || s.size > BigInt(maxBytes)) throw Error();
+      if (kind === 'directory') {
+        if (!s.isDirectory() || s.uid !== uid) throw Error();
+        return `${s.dev}:${s.ino}`;
+      }
+      if (!s.isFile() || s.uid !== uid || s.nlink !== 1n) throw Error();
+      if (kind === 'executable') {
+        if (!(s.mode & 0o100n) || (s.mode & 0o6000n)) throw Error();
+        return s;
+      }
+      if (s.size > BigInt(maxBytes)) throw Error();
       return stamp(s);
     }
+
     if (!s.isDirectory() || (prefix === root && s.uid !== uid)) throw Error();
     prefix = path.join(prefix, components[i]);
   }
 }
+
+const fileStamp = (root, file) => checkedPath(root, file, 'source');
+const directoryId = root => checkedPath(root, root, 'directory');
+const executableStat = (root, file) => checkedPath(root, file, 'executable');
 
 function stamp(s) {
   return [s.dev, s.ino, s.size, s.mtimeNs, s.ctimeNs].join(':');
@@ -101,4 +115,4 @@ async function savedStamp(v, root, { doc, version, file }) {
   }
 }
 
-module.exports = { candidates, fileStamp, savedStamp, localPath };
+module.exports = { candidates, fileStamp, savedStamp, localPath, directoryId, executableStat };

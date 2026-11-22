@@ -264,6 +264,7 @@ def acquire(args):
             with endpoint(args.device, args.rate, calibration) as take:
                 if args.responder:
                     info["verified_capture_controller"] = calibration["capture_controller"]
+                    info["capture_geometry_verified"] = True
                 collect(args, Path(f"/proc/self/fd/{fd}"), turns, take, info)
         finally:
             os.close(fd)

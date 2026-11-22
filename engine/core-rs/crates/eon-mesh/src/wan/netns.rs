@@ -1,5 +1,5 @@
-//! Linux-only roles for scripts/test_wan_nat.sh. No target arguments. Only the
-//! QAD uses test-only native IP; STUN exercises the production custom transport.
+//! Linux-only roles for scripts/test_wan_nat.sh. No target arguments.
+//! Bare QAD uses test-only native IP; the STUN and N0 profiles use shipping APIs.
 use super::*;
 use crate::sync::Replica;
 use iroh::TransportAddr;
@@ -94,10 +94,14 @@ async fn start_relay(port: u16, qad: bool) -> Server {
 
 fn private_stun() -> bool {
     match std::env::var("EON_WAN_DISCOVERY").as_deref() {
-        Ok("qad") => false,
+        Ok("qad" | "n0") => false,
         Ok("stun") => true,
         _ => panic!("missing fixture discovery policy"),
     }
+}
+
+fn isolated_n0() -> bool {
+    std::env::var("EON_WAN_DISCOVERY").as_deref() == Ok("n0")
 }
 
 async fn relay() {
@@ -405,6 +409,25 @@ async fn peer(side: &str) -> EonResult<()> {
             ep,
             TransportAddr::Custom(super::scoped::udp::address(expected(remote))),
         )
+    } else if isolated_n0() {
+        // Even the authorized mirror namespace cannot opt this pair into public publication.
+        assert!(matches!(
+            WanEndpoint::open_managed_n0(me.clone(), peer, N0Provider::Public, rate, WAIT).await,
+            Err(EonError::SecurityViolation(_))
+        ));
+        let ep = WanEndpoint::open_managed_n0(
+            me.clone(),
+            peer,
+            N0Provider::PrivateMirror {
+                relay: IP,
+                pkarr: Ipv4Addr::new(10, 77, 0, 4),
+                root_der: ca.clone(),
+            },
+            rate,
+            WAIT,
+        )
+        .await?;
+        (ep, TransportAddr::Ip(expected(remote).into()))
     } else {
         let builder = relay_builder(transport)
             .bind_addr(bind)
@@ -441,7 +464,7 @@ async fn peer(side: &str) -> EonResult<()> {
             .await?;
     }
     let app = async {
-        let relay = TransportAddr::Relay(relay.clone());
+        let relay = TransportAddr::Relay(ep.relay.clone());
         let relay_path = || {
             ep.paths()
                 .iter()
@@ -555,7 +578,11 @@ async fn peer(side: &str) -> EonResult<()> {
         fallback.close().await;
         return Ok(());
     }
-    ep.close().await;
+    if isolated_n0() {
+        assert!(ep.reconnect(WAIT).await.is_err());
+    } else {
+        ep.close().await;
+    }
     Ok(())
 }
 

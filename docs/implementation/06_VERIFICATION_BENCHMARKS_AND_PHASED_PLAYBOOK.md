@@ -196,7 +196,7 @@ For a driven run, supply an operator calibration record for this exact route. Th
 
 ALSA card numbers are not persistent device identities. Before confirming `RECORD`, check the physical capture and playback interfaces against the equipment identified in the calibration evidence. Recalibrate after a reboot, reconnect or route change. Matching `hw:N,D` and gain labels is not proof that the same equipment is attached.
 
-For a new driven run, include `capture_period_frames` and `capture_buffer_frames` from the calibration in that record. These are positive counts of stereo frames at the capture rate, with period smaller than buffer. The recorder requests both sizes exactly, then reads the installed sizes from ALSA before any take. It refuses an unsupported setting or a mismatch instead of relying on driver defaults that could change when left-channel samples reach the responder. The sizes describe buffering, not elapsed acoustic time. Passive acquisition is unchanged. Older manifests without either field can still be analyzed, but do not demonstrate this geometry check.
+For a new driven run, include `capture_period_frames` and `capture_buffer_frames` from the calibration in that record. These are positive counts of stereo frames at the capture rate, with period smaller than buffer. The recorder requests both sizes exactly, then reads the installed sizes from ALSA before any take. It refuses an unsupported setting or a mismatch instead of relying on driver defaults that could change when left-channel samples reach the responder. The sizes describe buffering, not elapsed acoustic time. Passive acquisition is unchanged. The recorder sets `capture_geometry_verified: true` after a successful readback. Older manifests without the marker can still be analyzed, but do not demonstrate this check even if the calibration notes mention buffer sizes.
 
 Driven calibration also requires `capture_controller`: the full, direct `/dev/snd/by-id/usb-…` link for a USB capture interface with a **unique hardware serial**. Immediately after opening `hw:N,D`, before configuring or preparing it, the recorder checks the open PCM's card and device numbers. The link must point directly to `../controlCN` and resolve to the same character-device number as `/dev/snd/controlCN`. The matching Linux udev record must identify a USB serial and canonical by-id name. Missing evidence, by-path aliases, link chains, serial-less interfaces and non-USB controllers are unsupported. Do not use devices with copied or shared serials. This binds the capture controller, not the physical cabling or playback unit; the manual preflight above still applies. Passive recording is unchanged.
 
@@ -282,23 +282,25 @@ Run `python3 scripts/eval/noisy_duplex.py`. Each JSON line records one condition
 
 By default, enrollment and query use the [upstream WeSpeaker ResNet34 front end](https://github.com/wenet-e2e/wespeaker/tree/master/runtime/core/frontend): PCM16 units, complete 25 ms Hamming windows every 10 ms and per-utterance mean normalization. Do not reuse enrollment vectors computed with the old ASR features. Seventeen consecutive 32 ms Silero frames supply ≥50 complete fbank frames. The original VAD and cosine thresholds and both echo-cancellation paths apply to every condition.
 
-| Condition | Non-owner embeddings rejected | Non-owner interruptions | Held-out owner interrupted |
-|---|---:|---:|---|
-| Clean control | 10 | 0 | At 830 ms |
-| Rumble control (0 dB) | 10 | 0 | At 1,380 ms |
-| Competing babble (0 dB) | 12 | 0 | No (6 embeddings rejected during owner interval) |
-| Street traffic (0 dB) | 10 | 0 | No (5 rejected) |
-| TV dialogue (0 dB) | 11 | 0 | No (5 rejected) |
+**Current shipping WeSpeaker: 5/5; former disjoint-window baseline: 2/5.** Each cell gives rejected non-owner embeddings / held-out owner decision time. More rejections reflect more candidate probes, not more distinct negative trials. Neither build interrupted during the negative or stale-capture intervals.
 
-These are five runs, one per condition, not five population samples. Acceptance requires a real negative embedding decision and verified owner interruption at the original 0.35 cosine threshold in **each** condition, including post-decision mute and audit. A fresh Linux native build reproduced all five results: two controls passed, all three scene mixtures missed the owner, and the suite exited 1. The separate speaker-switch control rejected six non-owner candidates before accepting the returning owner at 860 ms. Times count fixture samples up to the speaker decision, not physical speaker latency.
+| Condition | Former 544 ms baseline | Shipping multiscale WeSpeaker |
+|---|---|---|
+| Clean control | 10 / 830 ms | 34 / 830 ms |
+| Rumble control (0 dB) | 10 / 1,380 ms | 28 / 1,380 ms |
+| Competing babble (0 dB) | 12 / missed | 39 / 2,370 ms |
+| Street traffic (0 dB) | 10 / missed | 38 / 800 ms |
+| TV dialogue (0 dB) | 11 / missed | 38 / 1,310 ms |
 
-Silero admitted candidates in all three missed scenes. The best owner scores were 0.262 (babble), 0.307 (traffic) and 0.208 (TV). A two-second rolling-context experiment passed these scenes but failed a speaker-switch control: 210 ms after a non-owner took over, retained context scored 0.414 and muted playback; the current window scored 0.048. The longer window was not adopted. Recheck a speaker switch as well as the five fixed conditions when changing the decision window.
+Acceptance still requires a real negative embedding decision and verified owner interruption at the original 0.35 cosine threshold in **each** condition, including post-decision mute and audit. The shipping build uses [staggered, trailing-half-checked windows](../VOICE_PIPELINE_SPECIFICATION.md#23-enrolled-speaker-verification); it does not change the model, enrollment, VAD, cutoff or fixture. The suite exited 0. One frozen native executable repeated all five decisions on the same WAV digests, passed `switch::active_speaker_switches_do_not_credit_a_departed_owner` (returning owner at 540–570 ms of fixture audio), and ran the independent reader trials below. These are decisions on recorded inputs, **not** acoustic latency measurements.
+
+**Former baseline and rejected experiments.** Silero admitted candidates in all three formerly missed scenes. The best baseline owner scores were 0.262 (babble), 0.307 (traffic) and 0.208 (TV). An unguarded two-second rolling-context experiment passed these scenes but failed a speaker-switch control: 210 ms after a non-owner took over, retained context scored 0.414 and muted playback; the current window scored 0.048. That approach was not adopted. Requiring adjacent segments to match each other at the owner threshold did not improve either corpus. The trailing-half checks with a single probe schedule reached 4/5 (traffic missed) and 7/12 competing readers.
 
 **Fixed-window comparisons (none adopted).** Each run used the same `noisy_duplex.py`, WAV hashes, native test, VAD and 0.35 cosine threshold. No method retained a previous candidate. The negative interval in each of the five conditions reached the gate without interrupting, even for the method that failed on other readers.
 
 | Method | Fixed conditions passed | Separate clean / competing trials passed (of 12 each) | Active speaker switch |
 |---|---:|---:|---|
-| Shipping WeSpeaker | 2/5 | 12 / 3 | Passed |
+| Former WeSpeaker baseline (disjoint 544 ms windows) | 2/5 | 12 / 3 | Passed |
 | WebRTC default moderate noise suppression on the linear echo residual for verification only | 2/5 | 12 / 3 | Returning clean owner missed after a noisy handoff |
 | One enrollment vector: average of the unit full-utterance vector and the unit centroid of up to eight evenly spaced, candidate-length crop embeddings, then renormalize | 4/5 | 10 / 3 | No trial reached a switch after a rejected owner candidate; gate not verified |
 | Circular padding of the current log-mel frames to at least 200 frames before inference, without waiting for more audio | 2/5 | 12 / 3 | Passed |
@@ -309,11 +311,13 @@ The enrollment centroid recovered babble at 2,660 ms and traffic at 1,090 ms but
 
 For the independent controls, the unchanged recorded native test used [LibriSpeech dev-clean](https://www.openslr.org/12) (Panayotov et al., CC BY 4.0; archive SHA-256 `76f87d090650617fca0cac8f88b9416e0ebf80350acb97b343a85fa903728ab3`). Take the six lowest numeric reader IDs of each sex. Use the first 4 s of each of their first two distinct, lexically ordered utterances lasting at least 4 s, one for enrollment and one for query; use the next reader's query as the negative, cycling within each group. Repeat with a 0 dB two-reader speech bed on the query and negative only: use the seventh reader from each group, equally RMS-weighted, first utterances for query and second for negative. These 24 trials check additional identities and distinct utterances, not a population error rate.
 
+Shipping WeSpeaker preserved **12/12 clean** and improved from **3/12 to 7/12 competing**, recovering four readers and losing none. Every negative interval reached the speaker gate; no wrong or stale interruptions were observed. Five competing owners were still missed.
+
 **Opt-in CAM++ for a new enrollment.** Provision `camplusplus-zh-en-advanced` with `python3 scripts/download_models.py --ids camplusplus-zh-en-advanced`. This is the sherpa-onnx conversion of the bilingual [3D-Speaker model](https://modelscope.cn/models/iic/speech_campplus_sv_zh_en_16k-common_advanced). The runtime checks the graph digest and uses normalized PCM, Povey windows, utterance mean normalization and a 192-dimensional vector. An existing WeSpeaker enrollment cannot authorize CAM++.
 
 Run `python3 scripts/eval/noisy_duplex.py --speaker-model camplusplus-zh-en-advanced`. The runner verifies the native target loaded the requested encoder. With the same WAVs, 544 ms window, 0.35 cutoff and mute/audit checks, CAM++ passed all five conditions. Fixture decision times in table order were 1,380, 830, 1,570, 540 and 1,310 ms; 10, 10, 12, 10 and 11 negative embeddings were rejected. No stale capture muted playback. Run `EON_SPEAKER_MODEL=camplusplus-zh-en-advanced cargo test --locked -p eon-voice --test speaker_e2e active_speaker_switches` separately for mid-speech handoffs.
 
-On the independent fixtures, both encoders passed 12/12 clean. CAM++ passed 7/12 with competing speech versus 3/12 for WeSpeaker: five readers recovered and one previously detected reader was missed. Neither encoder produced a wrong-speaker or stale interruption in these trials. These results do not establish physical latency or a population false-acceptance rate. The combined runner still measures the explicitly specified WeSpeaker path, not whichever encoder has the better score.
+In the historical independent comparison, both encoders passed 12/12 clean. CAM++ passed 7/12 with competing speech versus 3/12 for the former disjoint-window WeSpeaker baseline: five readers recovered and one previously detected reader was missed. Neither encoder produced a wrong-speaker or stale interruption in these trials. The combined runner still measures the explicitly specified WeSpeaker path, not whichever encoder has the better score.
 
 An unshipped two-encoder experiment retained the ordinary short WeSpeaker pass. On rejection it required both a CAM++ match on the current window and a WeSpeaker match over contiguous voiced audio ending at the same sample (up to 2 s). Handoffs passed, and it recovered babble and TV, but traffic still missed. The extra model and history did not meet the five-scene requirement.
 

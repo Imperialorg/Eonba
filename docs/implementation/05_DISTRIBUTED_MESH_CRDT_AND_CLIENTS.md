@@ -88,7 +88,7 @@ Eon/
 
 #### Private WAN path-change test (Linux)
 
-`WanEndpoint::open` and `open_with_relay_root` remain **relay-only** and check reciprocal Ed25519 pins. The latter trusts only the supplied DER CA for the HTTPS relay. `paths()` reads counters without sending traffic. The native iroh IP transport used for the QAD test is **test-only**: a peer pin and iroh's publication filter do not constrain peer-advertised IP candidates. The scoped constructor described below uses a different transport.
+`WanEndpoint::open` and `open_with_relay_root` remain **relay-only** and check reciprocal Ed25519 pins. The latter trusts only the supplied DER CA for the HTTPS relay. `paths()` reads counters without sending traffic. The original bare-QAD test uses a test-only builder. The scoped constructor uses a restricted custom transport; the managed N0 constructor below requires an independently confined network.
 
 Run `scripts/test_wan_nat.sh` as the build user on a machine that permits `sudo ip netns`, veth, bridge, conntrack/SNAT and private UDP/TCP. The script creates five namespaces with no uplink or default route. Two peers bootstrap through one privately certified relay behind independent stateful NATs without port forwarding. The relay also provides iroh 1.4's QUIC address discovery (QAD, **not** RFC STUN). After verifying relay transit the fixture opens the private peer route, notifies iroh of the network change, and verifies a 64 KiB transfer on the translated peer sockets. It then drops only the direct routes. It requires the same connection to carry the four typed classes after returning to the relay, with peer path byte deltas and independent forwarding counters. This is not a physical 5G/Wi-Fi handoff.
 
@@ -161,6 +161,25 @@ With the operator publisher on five private Linux namespaces and two SNATs, **ea
 | Direct interface removed, final verification | 293 | 293 | 0 | 0 | 0 | 2.531 ms | 5.782 s |
 
 All four runs migrated on the original connection. **Both final runs passed the original strict gate; the earlier misses show it is not a repeatable latency guarantee.** None of the four lost a cut frame or skipped a send slot. In the final runs the separate media relay delivered 750 and 288 first decodes, respectively, after impairment installation and before primary recovery. The original QAD relay-first regression also migrated in both modes but missed the deadline on 12/755 and 99/1,271 frames, respectively. These measurements cover an isolated Linux topology, not a carrier roam.
+
+#### ID-only WAN rendezvous on a managed network (Linux)
+
+`WanEndpoint::open_managed_n0(secret, peer_pin, provider, bytes_per_sec, wait)` is a separate, per-session opt-in. Both devices supply reciprocal Ed25519 pins; neither enters a peer ticket, IP, NAT port or home relay. `N0Provider::Public` authorizes publishing **this identity and its home relay** to n0's production pkarr service and looking up the peer's signed record. The service and relays can observe source addresses, presence and timing. Closing ends local activity; it does **not** erase records already published or cached. Reconnect consumes the session and refuses to republish: open again to grant fresh consent.
+
+The implementation uses iroh 1.4.1's production relay map, relay-only pkarr publisher, verifying pkarr resolver and native QUIC address discovery (QAD, not RFC STUN). It dials only built-in relay origins from the pinned record, never a discovery IP or arbitrary URL. It requires the inbound relay pin and checks the QUIC peer and managed ALPN before exposing any application lane. No DNS TXT peer hints, DHT, port mapping, captive-portal check or environment-selected staging. `PrivateMirror { pkarr, relay, root_der }` keeps the same protocol and constructor but resolves only the pkarr and NA-East relay names to two operator-provisioned RFC1918 addresses; it trusts only the supplied DER CA.
+
+**Required egress boundary.** A peer signature does not prove that a nominated direct address belongs to the peer. An administrator must confine the unprivileged process in a dedicated Linux network namespace **before launch**, with default-deny IPv4/IPv6 egress for its entire lifetime. Allow only the authorized provider, approved DNS if needed, and direct UDP destinations independently known to belong to this pair. Never name the host namespace, authorize an arbitrary advertised candidate, or grant network administration/namespace switching to the process. If the operator cannot enforce this policy, use the existing relay-only API. Identity-only rendezvous is automatic; safely provisioning this boundary on an arbitrary network is **not**.
+
+The grant is the root-owned nsfs mount `/run/netns/eon-n0-<public|mirror>-<pair>`, where `<pair>` is the lowercase SHA-256 hex digest of the ASCII string `<local-public-key>:<peer-public-key>` (full lowercase hex, no newline). The constructor checks directory, mount and all process threads before binding. The mount identifies the administrator's grant; it does not inspect or install firewall rules. An ordinary file, different pair or mirror grant cannot enable public mode. To revoke a live grant, stop the process or deny its egress; removing the name denies **future** opens only.
+
+**Reproduce without WAN contact:** run `scripts/test_wan_nat.sh --isolated-n0 --redundant-media --require-voice-deadline`, then repeat with `--lose-direct-interface`. The five-namespace fixture invokes the shipping constructor, including rejection of the public provider in a mirror-only namespace. A local HTTPS store first returns a record signed by the wrong device, then the pinned record. Per-peer egress logs, translated UDP path byte deltas, relay forwarding counters, class receipts and the shared-clock cut score are retained in the printed directory. This emulates one reachable provider relay; it does not test n0's public servers, carrier NAT behavior or a physical radio handoff.
+
+| Managed mirror, default timers, redundant media | Cut decodes <5 ms / attempts | Max one-way | Missing / skipped | Longest in-cut Class 1–3 receipt |
+|---|---:|---:|---:|---:|
+| Silent blackhole | 755/755 | 0.930 ms | 0 / 0 | 15.062 s |
+| Direct interface removed | 1,232/1,268 | 13.842 ms | 0 / 0 | 25.330 s |
+
+Both runs migrated relay → direct → relay on the original pinned QUIC connection. The primary relay forwarded 109,625 and 110,814 bytes respectively during the measured fallback interval. The interface-loss run retained the established primary and media relay sockets, but **failed** the strict voice deadline on 36 frames.
 
 ### 2.3 Schema Reconciliation and Clock-Skew-Immune 15ms Spatial Election (`src/spatial.rs`)
 

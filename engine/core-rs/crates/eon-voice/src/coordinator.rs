@@ -16,10 +16,10 @@ use crate::linear_echo::NlmsCanceller;
 use crate::resample::CaptureFrames;
 use crate::ring::{PcmConsumer, PcmProducer, pcm_ring};
 use crate::speaker::{SpeakerEmbedder, SpeakerEmbedding, SpeakerGate};
+use crate::speaker::windows::SpeakerWindows;
 use crate::vad::SileroVad;
 
-/// Shortest whole number of Silero frames giving WeSpeaker 50 complete analysis windows.
-pub const CANDIDATE_SAMPLES: usize = crate::speaker::MIN_SAMPLES.div_ceil(VAD_FRAME_SAMPLES) * VAD_FRAME_SAMPLES;
+pub use crate::speaker::windows::CANDIDATE_SAMPLES;
 
 /// Capture-side wiring for the two 16 kHz, time-aligned streams. The render input
 /// must be the resampled *played* reference, including silence, not pending TTS.
@@ -265,7 +265,7 @@ pub struct BargeInCoordinator {
     playback: BargeIn,
     task: TaskId,
     owner: SpeakerGate,
-    voiced: Vec<f32>,
+    windows: SpeakerWindows,
     rejected_candidates: u64,
     audit: InterruptionAudit,
 }
@@ -293,8 +293,8 @@ impl BargeInCoordinator {
         Self {
             playback,
             task,
+            windows: SpeakerWindows::new(owner.encoder()),
             owner,
-            voiced: Vec::with_capacity(CANDIDATE_SAMPLES),
             rejected_candidates: 0,
             audit: InterruptionAudit::default(),
         }
@@ -347,22 +347,18 @@ impl BargeInCoordinator {
             return Ok(false);
         }
         match vad.speech_probability(frame) {
-            Ok(p) if (0.5..=1.0).contains(&p) => self.voiced.extend_from_slice(frame),
+            Ok(p) if (0.5..=1.0).contains(&p) => (),
             result => {
-                self.voiced.clear();
+                self.windows.clear();
                 return result.map(|_| false);
             }
         }
-        if self.voiced.len() < CANDIDATE_SAMPLES {
-            return Ok(false);
-        }
-        let candidate = speaker.embed(&self.voiced);
-        self.voiced.clear();
-        Ok(self.on_candidate(&candidate?, token_offset))
+        let selected = self.windows.candidate(frame, &self.owner, |pcm| speaker.embed(pcm), &mut self.rejected_candidates)?;
+        Ok(selected.is_some_and(|candidate| self.on_candidate(&candidate, token_offset)))
     }
 
     fn reset_candidate(&mut self, vad: &mut SileroVad) {
-        self.voiced.clear();
+        self.windows.clear();
         vad.reset();
     }
 

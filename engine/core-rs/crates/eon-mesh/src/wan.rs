@@ -1,8 +1,10 @@
 //! Pinned QUIC for two operator-provisioned identities. Relay-only by default;
-//! scoped UDP requires separate, explicit private-network provisioning.
+//! direct UDP requires separate, explicit private or managed-network provisioning.
 //! While open, iroh maintains its connection to the configured relay. The
 //! relay sees endpoint IDs, sizes and timing, not the end-to-end QUIC payload.
 
+#[cfg(target_os = "linux")]
+mod managed;
 mod media;
 #[cfg(all(test, target_os = "linux"))]
 mod netns;
@@ -27,6 +29,8 @@ use prost::Message;
 use tokio::time::{Instant, sleep_until, timeout};
 
 use crate::qos::{BulkPacer, TrafficClass};
+#[cfg(target_os = "linux")]
+pub use managed::N0Provider;
 pub use media::AudioCopies;
 pub use scoped::{CandidateScope, PrivateWanConfig};
 pub use wire::{AudioPcmChunk, CrdtDeltaSync, EpochInvalidationEvent, ReliableFrame};
@@ -104,16 +108,19 @@ fn relay_builder(transport: QuicTransportConfigBuilder) -> Builder {
 }
 
 fn datagram_builder(transport: QuicTransportConfigBuilder, bidi_streams: u8) -> Builder {
-    let transport = transport
+    Endpoint::builder(Minimal)
+        .clear_ip_transports()
+        .transport_config(qos_transport(transport, bidi_streams))
+}
+
+fn qos_transport(transport: QuicTransportConfigBuilder, bidi_streams: u8) -> QuicTransportConfig {
+    transport
         .max_concurrent_uni_streams(0u8.into())
         .max_concurrent_bidi_streams(bidi_streams.into())
         // Only Class 0 uses DATAGRAM. Prefer new arrivals to stale queued PCM.
         .datagram_send_buffer_size(MAX_AUDIO)
         .datagram_receive_buffer_size(Some(AUDIO_RECV_WINDOW))
-        .build();
-    Endpoint::builder(Minimal)
-        .clear_ip_transports()
-        .transport_config(transport)
+        .build()
 }
 
 impl WanEndpoint {
@@ -214,9 +221,16 @@ impl WanEndpoint {
     /// frames are never replayed, and a missing receipt means delivery is unknown.
     /// The bandwidth budget (including existing bulk reservations) is retained.
     /// After `open_private`, this discards direct consent and returns to relay-only.
+    /// A managed N0 session has no fixed provisioned relay; reconnect closes it
+    /// and requires a fresh explicit open rather than retaining discovery consent.
     ///
     /// Timeout, error or cancellation ends the session; there is no background retry.
     pub async fn reconnect(mut self, wait: Duration) -> EonResult<Self> {
+        #[cfg(target_os = "linux")]
+        if self.conn.alpn() == managed::ALPN {
+            let _ = timeout(wait, self.close()).await;
+            return Err(invalid("managed traversal requires a fresh explicit open"));
+        }
         let pinned = self.peer_id();
         self.conn.close(0u8.into(), b"reconnecting");
         let media = self.media.take();

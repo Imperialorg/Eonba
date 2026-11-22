@@ -13,6 +13,8 @@ use sha2::{Digest, Sha256};
 
 use crate::features::{NUM_MEL_BINS, camplusplus_fbank, wespeaker_fbank};
 
+pub(crate) mod windows;
+
 /// Dimension of the original WeSpeaker ResNet34-LM embedding.
 pub const EMBEDDING_DIM: usize = 256;
 const MIN_FRAMES: usize = 50;

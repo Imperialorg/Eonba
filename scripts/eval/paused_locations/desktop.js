@@ -7,7 +7,8 @@ const assert = require('node:assert/strict');
 const { repo, workDirectory } = require('./host');
 const { prepare } = require('./subject');
 
-assert.deepEqual(process.argv.slice(2), ['--verify-disposable-desktop']);
+const allocations = process.argv[2] === '--verify-allocation-desktop';
+assert.deepEqual(process.argv.slice(2), [allocations ? '--verify-allocation-desktop' : '--verify-disposable-desktop']);
 const tools = path.join(repo, 'target/paused-ui-tools');
 const work = workDirectory();
 const home = path.join(work, 'home');
@@ -18,14 +19,22 @@ function json(file, data) {
 }
 try {
   fs.mkdirSync(project, { recursive: true, mode: 0o700 });
-  assert.deepEqual(prepare(project, true).lines, [28, 22]);
-  // Only the two volunteered tabs and the fixed executable are visible in the test project.
-  fs.unlinkSync(path.join(project, 'main.rs'));
-  json(path.join(project, '.vscode/launch.json'), {
-    version: '0.2.0',
-    configurations: [{ name: 'Fixed voice preview', type: 'lldb-dap', request: 'launch',
-      program: '/home/ui/project/preview', cwd: '/home/ui/project', disableASLR: false }],
-  });
+  if (allocations) {
+    require('./allocation_project').build(project, true);
+    const config = { type: 'lldb-dap', request: 'launch', program: '${workspaceFolder}/allocation-subject',
+      cwd: '${workspaceFolder}', disableASLR: false };
+    json(path.join(project, '.vscode/launch.json'), { version: '0.2.0', configurations: [
+      { ...config, name: 'Count once', eonAllocationCounts: true }, { ...config, name: 'Not opted in' },
+    ] });
+  } else {
+    assert.deepEqual(prepare(project, true).lines, [28, 22]);
+    fs.unlinkSync(path.join(project, 'main.rs'));
+    json(path.join(project, '.vscode/launch.json'), {
+      version: '0.2.0',
+      configurations: [{ name: 'Fixed voice preview', type: 'lldb-dap', request: 'launch',
+        program: '/home/ui/project/preview', cwd: '/home/ui/project', disableASLR: false }],
+    });
+  }
   json(path.join(home, 'profile/User/settings.json'), {
     'workbench.enableExperiments': false, 'workbench.startupEditor': 'none',
     'workbench.editor.enablePreview': false, 'workbench.colorTheme': 'Default Light Modern',
@@ -51,7 +60,7 @@ try {
     name: 'fixed-desktop', publisher: 'eon-test', version: '0.0.1', engines: { vscode: '^1.93.0' },
     activationEvents: ['onStartupFinished'], main: './desktop_test.js',
   });
-  fs.copyFileSync(path.join(__dirname, 'desktop_test.js'), path.join(driver, 'desktop_test.js'));
+  fs.copyFileSync(path.join(__dirname, allocations ? 'allocation_desktop_test.js' : 'desktop_test.js'), path.join(driver, 'desktop_test.js'));
   fs.writeFileSync(path.join(home, 'sway.conf'), 'output * resolution 1440x1000\nxwayland disable\n');
   fs.mkdirSync(path.join(home, 'runtime'), { mode: 0o700 });
   const result = spawnSync('/usr/bin/podman', ['unshare', '/usr/bin/unshare', '--mount', '--pid', '--fork',

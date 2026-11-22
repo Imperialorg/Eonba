@@ -6,7 +6,7 @@ set -euo pipefail
 umask 077
 usage() {
     cat <<'HELP'
-Usage: test_wan_nat.sh [--lose-direct-interface] [--redundant-media] [--private-stun] [--short-path-timeout] [--require-voice-deadline]
+Usage: test_wan_nat.sh [--lose-direct-interface] [--redundant-media] [--private-stun | --isolated-n0] [--short-path-timeout] [--require-voice-deadline]
 
 Test relay → direct UDP across two NATs → relay on the same pinned QUIC connection.
 By default the routers silently blackhole the direct route. Success verifies
@@ -20,6 +20,9 @@ migration and delivery after fallback, not uninterrupted voice during the cut.
                              private HTTPS relay. Reliable traffic stays on the primary.
   --private-stun             Test the production scoped constructor: paired private
                              Binding on the QUIC socket, then direct → relay.
+  --isolated-n0              Test production managed N0 with bare peer IDs, a private TLS
+                             pkarr store and an in-process, non-forwarding resolver.
+                             No public services, peer tickets or host DNS changes.
   --require-voice-deadline   Also require every cut audio attempt to reach peer decode
                              in <5 ms one-way. Missing or late frames fail the run.
   -h, --help                 Print this help without building or creating namespaces.
@@ -39,18 +42,21 @@ for arg in "$@"; do
         --require-voice-deadline) strict=1 ;;
         --short-path-timeout) profile=short ;;
         --redundant-media) media=1 ;;
-        --private-stun) discovery=stun ;;
+        --private-stun|--isolated-n0)
+            [[ $discovery == qad ]] || { echo "choose one discovery profile" >&2; exit 2; }
+            if [[ $arg == --private-stun ]]; then discovery=stun; else discovery=n0; fi ;;
         --lose-direct-interface) cut_mode=interface-loss ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $arg" >&2; usage >&2; exit 2 ;;
     esac
 done
-if [[ $discovery == stun && $profile != default ]]; then
-    echo "the production scoped constructor uses the default path timers" >&2; exit 2
+if [[ $discovery != qad && $profile != default ]]; then
+    echo "production constructors use the default path timers" >&2; exit 2
 fi
 [[ $(id -u) != 0 ]] || { echo "run as the unprivileged build user" >&2; exit 2; }
 cd "$(dirname "$0")/../engine/core-rs"
 stun_helper="$PWD/../../scripts/wan_private_stun.py"
+pkarr_helper="$PWD/../../scripts/test_wan_pkarr_fixture.py"
 report="$PWD/../../scripts/wan_cut_report.py"
 scratch="$PWD/target/wan-nat-$$-$RANDOM"
 mkdir -p target
@@ -94,7 +100,9 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -su
     -keyout keys/ca.key -out keys/ca.pem -addext basicConstraints=critical,CA:TRUE 2>tls.log
 openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=relay \
     -keyout keys/leaf.key -out keys/leaf.csr 2>>tls.log
-printf 'subjectAltName=IP:10.77.0.1\nextendedKeyUsage=serverAuth\nbasicConstraints=CA:FALSE\n' >keys/ext
+san=IP:10.77.0.1
+if [[ $discovery == n0 ]]; then san+=,DNS:use1-1.relay.n0.iroh.link,DNS:dns.iroh.link; fi
+printf 'subjectAltName=%s\nextendedKeyUsage=serverAuth\nbasicConstraints=CA:FALSE\n' "$san" >keys/ext
 openssl x509 -req -in keys/leaf.csr -CA keys/ca.pem -CAkey keys/ca.key -CAcreateserial -days 1 \
     -extfile keys/ext -outform DER -out keys/leaf.der 2>>tls.log
 openssl x509 -in keys/ca.pem -outform DER -out keys/ca.der
@@ -102,6 +110,11 @@ openssl pkcs8 -topk8 -nocrypt -in keys/leaf.key -outform DER -out keys/leaf.pk8
 
 prefix="eon-wan-$$-$RANDOM"
 a="$prefix-a" b="$prefix-b" na="$prefix-na" nb="$prefix-nb" relay="$prefix-relay"
+if [[ $discovery == n0 ]]; then
+    grant_name() { printf 'eon-n0-mirror-%s' "$(printf '%s:%s' "$(<"keys/$1.pub")" "$(<"keys/$2.pub")" | sha256sum | cut -d' ' -f1)"; }
+    a=$(grant_name a b)
+    b=$(grant_name b a)
+fi
 ipn() { sudo -n ip -n "$@"; }
 inside() { sudo -n ip netns exec "$@"; }
 for ns in "$a" "$b" "$na" "$nb" "$relay"; do
@@ -144,18 +157,44 @@ attach() {
             -j SNAT --to-source "10.77.0.$outer:41769"
         inside "$router" iptables -t nat -A POSTROUTING -p udp -o outer -s "192.168.$lan.2" -d 10.77.0.0/29 \
             -j SNAT --to-source "10.77.0.$outer:41770"
+    elif [[ $discovery == n0 ]]; then
+        # Default sockets have ephemeral ports. Only the routers know their
+        # translated ports. No DNAT/port forward exists for either peer.
+        inside "$router" iptables -t nat -A POSTROUTING -p udp -o outer -s "192.168.$lan.2" -d 10.77.0.0/29 \
+            -j SNAT --to-source "10.77.0.$outer:41770"
+        # A pin and a publish filter are not an egress ACL. Enforce it in
+        # the kernel, before *any* role starts, even for on-link addresses.
+        inside "$ep" iptables -P OUTPUT DROP
+        inside "$ep" ip6tables -P OUTPUT DROP
+        for port in 443 8443; do
+            inside "$ep" iptables -A OUTPUT -d 10.77.0.1 -p tcp --dport "$port" -j ACCEPT
+        done
+        if (( media )); then inside "$ep" iptables -A OUTPUT -d 10.77.0.1 -p tcp --dport 8444 -j ACCEPT; fi
+        inside "$ep" iptables -A OUTPUT -d 10.77.0.4 -p tcp --dport 443 -j ACCEPT
+        inside "$ep" iptables -A OUTPUT -d 10.77.0.1 -p udp --dport 7842 -j ACCEPT
+        inside "$ep" iptables -A OUTPUT -d "10.77.0.$other" -p udp --dport 41770 -j ACCEPT
     fi
     inside "$router" iptables -t nat -A POSTROUTING -o outer -s "192.168.$lan.2" -d 10.77.0.0/29 \
         -j SNAT --to-source "10.77.0.$outer"
     ipn "$ep" addr add "192.168.$lan.2/30" dev wan0
     ipn "$ep" link set wan0 up
     for ip in 1 "$other"; do ipn "$ep" route add "10.77.0.$ip/32" via "192.168.$lan.1"; done
+    if [[ $discovery == n0 ]]; then ipn "$ep" route add 10.77.0.4/32 via "192.168.$lan.1"; fi
     # Initially relay-only. Removing this fixture's own impairment below
     # cannot connect to anything outside the disposable backplane.
     ipn "$router" route add blackhole "10.77.0.$other/32"
 }
 attach "$a" "$na" 1 2 3
 attach "$b" "$nb" 2 3 2
+primary_port=8443
+if [[ $discovery == n0 ]]; then
+    primary_port=443
+    ipn "$relay" addr add 10.77.0.4/32 dev backplane
+    # Preserve the preset's origins/ports; local listeners run unprivileged.
+    for dst in 10.77.0.1:8443 10.77.0.4:8445; do
+        inside "$relay" iptables -t nat -A PREROUTING -d "${dst%:*}" -p tcp --dport 443 -j DNAT --to-destination "$dst"
+    done
+fi
 if [[ $cut_mode == interface-loss ]]; then
     # A's approved TLS origin has a separate last mile. UDP (including QAD)
     # still uses wan0 and both NATs; there is no peer route on relay0.
@@ -172,6 +211,9 @@ if [[ $cut_mode == interface-loss ]]; then
     inside "$a" ip6tables -A OUTPUT -o relay0 -j DROP
     ipn "$a" route add table 84 10.77.0.1/32 via 172.30.84.1 dev relay0
     ipn "$a" rule add pref 84 to 10.77.0.1/32 ipproto tcp dport 8443 lookup 84
+    if [[ $discovery == n0 ]]; then
+        ipn "$a" rule add pref 83 to 10.77.0.1/32 ipproto tcp dport 443 lookup 84
+    fi
     if (( media )); then
         ipn "$a" rule add pref 85 to 10.77.0.1/32 ipproto tcp dport 8444 lookup 84
     fi
@@ -207,7 +249,16 @@ await_marker() {
     echo "timed out waiting for $1" >&2
     return 1
 }
-if [[ $discovery == stun ]]; then
+if [[ $discovery == n0 ]]; then
+    openssl x509 -inform DER -in keys/leaf.der -out keys/leaf.pem
+    registering=1
+    inside "$relay" sudo -n -u "$user" timeout --kill-after=2s 80s python3 -I "$pkarr_helper" \
+        "$parent" "$(stat -Lc %i "/run/netns/$relay")" >pkarr.log 2>&1 &
+    jobs+=("$!")
+    registering=0
+    (( !interrupted )) || exit 1
+    await_marker pkarr-ready
+elif [[ $discovery == stun ]]; then
     python3 -I - <<'PY'
 import json
 from pathlib import Path
@@ -336,7 +387,7 @@ standby_cookie() {
         awk '{for (i=1; i<=NF; i++) if ($i ~ /^sk:/) print $i}'
 }
 if [[ $cut_mode == interface-loss ]]; then
-    standby_before=$(standby_cookie 8443)
+    standby_before=$(standby_cookie "$primary_port")
     [[ $standby_before =~ ^sk:[[:xdigit:]]+$ ]] || { echo "expected one independent TLS relay socket" >&2; exit 1; }
     if (( media )); then
         media_before=$(standby_cookie 8444)
@@ -355,7 +406,7 @@ touch cut
 python3 -I -c 'from pathlib import Path; import time; Path("cut-installed").write_text(str(time.monotonic_ns()))'
 if [[ $cut_mode == interface-loss ]]; then
     await_marker counter-ready
-    [[ $(standby_cookie 8443) == "$standby_before" ]] || { echo "original TLS standby did not survive" >&2; exit 1; }
+    [[ $(standby_cookie "$primary_port") == "$standby_before" ]] || { echo "original TLS standby did not survive" >&2; exit 1; }
     echo "relay0 retained established relay socket $standby_before across wan0 removal" >>routes.log
     if (( media )); then
         [[ $(standby_cookie 8444) == "$media_before" ]] || { echo "original media TLS socket lost" >&2; exit 1; }
@@ -364,6 +415,13 @@ if [[ $cut_mode == interface-loss ]]; then
 fi
 for pid in "${jobs[@]}"; do wait "$pid"; done
 jobs=()
+if [[ $discovery == n0 ]]; then
+    for ep in "$a" "$b"; do
+        inside "$ep" iptables -nvxL OUTPUT
+        inside "$ep" ip6tables -nvxL OUTPUT
+    done >egress.log
+    cat pkarr.log
+fi
 if [[ $discovery == stun ]]; then
     inside "$relay" iptables -nvxL INPUT >silent.log
     for outer in 2 3; do

@@ -58,6 +58,7 @@ class RigTests(unittest.TestCase):
         identity = "/dev/snd/by-id/usb-Rig_SN01-00"
         self.device.assert_called_once_with("hw:2,0", 16000, json.loads(self.args.route_calibration.read_text()))
         self.assertEqual(collect.call_args.args[-1]["verified_capture_controller"], identity)
+        self.assertIs(collect.call_args.args[-1]["capture_geometry_verified"], True)
 
     def test_missing_or_different_route_calibration_stops_before_capture(self):
         self.responder("")
@@ -129,6 +130,7 @@ class RigTests(unittest.TestCase):
             self.assertNotIn("control_bridge_started", manifest)
             self.assertNotIn("control_playback_frame", manifest)
             self.assertNotIn("route_calibration", manifest)
+            self.assertNotIn("capture_geometry_verified", manifest)
             expected = ["control", *rig.session.SCENES]
             self.assertEqual(manifest["trials"], {
                 name: {"pcm_sha256": hashlib.sha256(name.encode()).hexdigest(), "scene": expected[i // 25]}

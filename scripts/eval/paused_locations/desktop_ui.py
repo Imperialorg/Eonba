@@ -101,6 +101,54 @@ def check_dialog(stage, backdrop):
     raise RuntimeError(f"{stage}: dialog did not dismiss")
 
 
+def allocation_dialogs():
+    def confirm(expected):
+        _, rows = find(r"^Project allocation counts$", "missing consent dialog",
+                       region=(510, 430, 505, 140), psm="6", scale=2)
+        text = " ".join(row[0] for row in rows)
+        assert expected in text, text
+        # Rightmost primary button in the fixed Linux workbench. Downstream
+        # assertions require its action; choosing Cancel cannot pass the gate.
+        click(("", 960, rows[-1][2] + 57))
+
+    confirm("Enable four aggregate allocator-call counters for this local launch only?")
+    for stage, values in [("first", [1, 1, 0, 0]), ("second", [1, 1, 1, 2]), ("negative", None)]:
+        find(r"^EON:\s*Show Project Allocation Counts", f"{stage}: no registered palette command")
+        backdrop = title_patch()
+        Path(f"runtime/{stage}.palette").touch()
+        if values:
+            confirm("Show the four aggregate counters for this paused launch?")
+        # Text lives above the action bar. Do not accept occurrences from the editor.
+        _, rows = find(r"^Project allocation counts$", f"{stage}: no result modal",
+                       region=(510, 380, 505, 205), psm="6", scale=2)
+        texts = [text for text, _, _ in rows]
+        first = texts.index("Project allocation counts")
+        if values:
+            expected = [f"{label}: {n}" for label, n in zip(
+                ["Successful malloc calls", "Successful calloc calls",
+                 "Successful positive-size realloc calls", "Non-null free calls"], values)]
+            assert texts[first+1:] == expected, (stage, texts)
+        else:
+            assert " ".join(texts[first+1:]) == "No counts shown. Use an opted-in, linked local launch and select a paused call frame.", texts
+        assert title_patch() != backdrop
+        last = rows[first+4] if values else next(row for row in rows if "paused call frame." in row[0])
+        ok, _ = find(r"^OK$", f"{stage}: no dismissal", region=(956, last[2] + 45, 44, 21), psm="7", scale=2)
+        click(ok)
+        for _ in range(20):
+            if title_patch() == backdrop:
+                break
+            time.sleep(0.1)
+        assert title_patch() == backdrop, f"{stage}: modal still covers editor"
+        Path(f"runtime/{stage}.seen").touch()
+    for _ in range(60):
+        if Path("runtime/done").is_file():
+            print("Stock lldb-dap resolved keys:", Path("runtime/profile").read_text())
+            print("VS Code allocation dialogs: malloc/calloc/realloc/free 1/1/0/0 then 1/1/1/2; opted-out launch: no counts.")
+            return
+        time.sleep(0.2)
+    raise RuntimeError("allocation session did not finish")
+
+
 def verify():
     os.chdir("/home/ui")
     os.umask(0o077)
@@ -128,6 +176,9 @@ def verify():
                 "/home/ui/project",
             ], stdout=sp.DEVNULL, stderr=sp.DEVNULL) as code:
                 try:
+                    if Path("project/allocation_subject.c").is_file():
+                        allocation_dialogs()
+                        return
                     for stage in ["both", "caller"]:
                         find(r"^EON:\s*Show Paused Project Locations", "no palette on real pause")
                         Path(f"runtime/{stage}.palette").touch()
@@ -146,7 +197,7 @@ def verify():
                     print("VS Code: real DebugStackFrame; both: src/endpoint.rs:28 [conditional breakpoint configured], src/pre_cognition.rs:22;"
                           " caller only: src/pre_cognition.rs:22.")
                 finally:
-                    if not Path("runtime/caller.seen").exists():
+                    if not Path("runtime/done").exists():
                         phase = Path("runtime/phase")
                         print("Test phase:", phase.read_text() if phase.exists() else "before extension host")
                     if code.poll() is None:

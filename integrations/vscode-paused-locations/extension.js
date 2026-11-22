@@ -2,5 +2,11 @@
 
 const vscode = require('vscode');
 const { register } = require('./command');
+const allocations = require('./allocations');
 
-exports.activate = context => { context.subscriptions.push(register(vscode)); };
+let counts;
+exports.activate = context => {
+  counts = allocations.register(vscode);
+  context.subscriptions.push(register(vscode), ...counts.subscriptions);
+};
+exports.deactivate = () => counts?.close();

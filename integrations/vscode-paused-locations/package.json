@@ -1,7 +1,7 @@
 {
   "name": "eon-paused-locations",
   "displayName": "EON Paused Project Locations",
-  "description": "Show locations in selected open project files for one already-paused call stack.",
+  "description": "Show selected project locations or explicitly enabled native allocation counts at a local pause.",
   "publisher": "eon",
   "version": "0.1.0",
   "private": true,
@@ -15,7 +15,7 @@
     "virtualWorkspaces": { "supported": false }
   },
   "main": "./extension.js",
-  "activationEvents": ["onCommand:eon.showPausedProjectLocations"],
+  "activationEvents": ["onCommand:eon.showPausedProjectLocations", "onCommand:eon.showProjectAllocationCounts", "onDebugResolve:lldb-dap"],
   "contributes": {
     "commands": [
       {
@@ -23,6 +23,12 @@
         "title": "Show Paused Project Locations",
         "category": "EON",
         "enablement": "isLinux && isWorkspaceTrusted && !remoteName && debugState == stopped"
+      },
+      {
+        "command": "eon.showProjectAllocationCounts",
+        "title": "Show Project Allocation Counts",
+        "category": "EON",
+        "enablement": "isLinux && isWorkspaceTrusted && !remoteName && debugType == lldb-dap && debugState == stopped"
       }
     ]
   }

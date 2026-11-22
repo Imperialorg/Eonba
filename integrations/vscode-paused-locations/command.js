@@ -124,4 +124,4 @@ function register(v) {
   });
 }
 
-module.exports = { register };
+module.exports = { register, focus };
