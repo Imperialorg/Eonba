@@ -106,7 +106,7 @@ class RigTests(unittest.TestCase):
 
     def test_responder_startup_failure_never_starts_capture(self):
         take = MagicMock()
-        for ready in (b"!", b"R"):  # including the previous, marker-less protocol
+        for ready in (b"!", b"R", b"2"):  # older workers lack the pre-enqueue count
             self.responder(f"header()\nos.write(1, {ready!r})\n")
             with (self.subTest(ready=ready), self.assertRaisesRegex(ValueError, "responder status"),
                   rig.responding_take(self.args, take) as capture):
@@ -224,8 +224,10 @@ class RigTests(unittest.TestCase):
     def test_one_worker_exact_reference_after_short_writes_and_eagain_on_successive_takes(self):
         self.args.rate = 16000
         self.responder("for left, result in [(1,b'PB'), (2,b'N')]:\n"
-                       "    n = header()\n    os.write(1,b'2')\n"
+                       "    n = header()\n    os.write(1,b'3')\n"
                        "    assert reader.read(n*2) == bytes([left,0])*n\n    os.write(1,result)\n"
+                       "    if result == b'PB':\n"
+                       "        for byte in struct.pack('<I', n): os.write(1,bytes([byte]))\n"
                        "assert header() == 0\nos.write(1,b'D')\n")
         real_write = os.write
         attempts = 0
@@ -247,7 +249,7 @@ class RigTests(unittest.TestCase):
         with patch.object(rig.os, "write", side_effect=fragment), rig.responding_take(self.args, take) as capture:
             for i, expected in ((1, True), (2, False)):
                 saved = bytearray()
-                self.assertEqual(capture(1, saved.extend), rig.BridgeOutcome(expected, None))
+                self.assertEqual(capture(1, saved.extend), rig.BridgeOutcome(expected, None, 16000 if expected else None))
                 self.assertEqual(saved, bytes([i, 0, 0xab, 0xcd]) * 16000)
         self.assertGreater(attempts, 100)
         self.args.speaker = "default"
@@ -262,7 +264,7 @@ class RigTests(unittest.TestCase):
                 save(pcm[i:i + 4096])
 
         for failure in ("overflow", "death"):
-            self.responder("header()\nos.write(1, b'2')\n" +
+            self.responder("header()\nos.write(1, b'3')\n" +
                            ("reader.read()\n" if failure == "overflow" else "os._exit(1)\n"))
             path = self.root / f"{failure}.wav"
             real_write = os.write
@@ -281,12 +283,13 @@ class RigTests(unittest.TestCase):
 
     def test_driven_inventory_uses_control_and_each_exact_take_even_for_misses(self):
         self.responder("for result in (b'B', b'PB', b'N'):\n"
-                       "    n = header()\n    os.write(1, b'2')\n"
+                       "    n = header()\n    os.write(1, b'3')\n"
                        "    if result == b'B':\n"
                        "        assert len(reader.read(2400)) == 2400\n        n -= 1200\n"
                        "        os.write(1, b'P')\n"
                        "    assert len(reader.read(2*n)) == 2*n\n"
-                       "    os.write(1, result)\nassert header() == 0\nos.write(1,b'D')\n")
+                       "    os.write(1, result + (struct.pack('<I',1200) if result.endswith(b'B') else b''))\n"
+                       "assert header() == 0\nos.write(1,b'D')\n")
         # Slow the fixture producer only outside capture callbacks, like the hardware sample clock.
         index = 0
         def take(seconds, write):
@@ -312,10 +315,13 @@ class RigTests(unittest.TestCase):
         info = json.loads((self.root / "session.json").read_text())
         self.assertEqual(info["mode"], "driven")
         self.assertIs(info["control_bridge_started"], True)
+        self.assertEqual((info["responder_protocol"], info["control_reference_frames"]), (3, 1200))
         frame = info["control_playback_frame"]
         self.assertGreater(frame, 1200)  # includes the entire callback that observed playback
         self.assertGreaterEqual(30 * self.args.rate - frame - info["route_calibration"]["upper_bound_frames"], 4480)
         self.assertEqual([x["bridge_started"] for x in info["trials"].values()], [True, False])
+        self.assertEqual(info["trials"]["turn-001.wav"]["reference_frames"], 1200)
+        self.assertNotIn("reference_frames", info["trials"]["turn-002.wav"])
         self.assertEqual(info["trials"].keys(), {p.name for p in (self.root / "trials").iterdir()})
 
     def test_control_tail_starts_beyond_the_adc_backlog_at_live_marker(self):
@@ -323,10 +329,10 @@ class RigTests(unittest.TestCase):
         marker_after = (frames // 1024 - 7) * 1024
         pcm = bytes(4 * 800) + struct.pack("<hh", 1000, 0) * 400 + bytes(4 * (frames - 1200))
         flag = self.root / "marked"
-        self.responder(f"n = header()\nos.write(1,b'2')\nk = {marker_after}\n"
+        self.responder(f"n = header()\nos.write(1,b'3')\nk = {marker_after}\n"
                        "assert len(reader.read(2*k)) == 2*k\nos.write(1,b'P')\n"
                        "open(sys.argv[-1] + '/marked', 'x').close()\n"
-                       "assert len(reader.read(2*(n-k))) == 2*(n-k)\nos.write(1,b'B')\n"
+                       "assert len(reader.read(2*(n-k))) == 2*(n-k)\nos.write(1,b'B'+struct.pack('<I',k))\n"
                        "assert header() == 0\nos.write(1,b'D')\n")
         for future_frames in (0, 4639, 4640):  # bound of 160 plus exactly 4480 frames still needed
             directory = self.root / str(future_frames)
@@ -397,8 +403,8 @@ class RigTests(unittest.TestCase):
         for outcome, reason in ((b"N", "control did not start a bridge"), (b"PB", "live control_playback_frame")):
             directory = self.root / outcome.decode()
             directory.mkdir()
-            self.responder("n = header()\nos.write(1,b'2')\nassert len(reader.read(2*n)) == 2*n\n"
-                           f"os.write(1,{outcome!r})\nreader.read()\n")
+            self.responder("n = header()\nos.write(1,b'3')\nassert len(reader.read(2*n)) == 2*n\n"
+                           f"os.write(1,{outcome!r} + (struct.pack('<I',n) if {outcome!r} == b'PB' else b''))\nreader.read()\n")
             with (self.subTest(outcome=outcome), patch("builtins.input", side_effect=["MUTED"]) as prompt,
                   patch.object(rig.os, "write", side_effect=fragment), self.assertRaisesRegex(ValueError, reason)):
                 self.collect(directory, rig.session.SCENES, take)
@@ -412,7 +418,7 @@ class RigTests(unittest.TestCase):
     def test_malformed_markers_or_terminal_outcomes_fail_closed(self):
         pcm = bytes(4 * self.args.rate)
         for outcome in (b"B", b"PPB", b"PN", b"P", b"D", b"NB", b"PBP"):
-            self.responder("n = header()\nos.write(1,b'2')\nassert len(reader.read(2*n)) == 2*n\n"
+            self.responder("n = header()\nos.write(1,b'3')\nassert len(reader.read(2*n)) == 2*n\n"
                            f"os.write(1,{outcome!r})\n")
             def take(seconds, save):
                 for i in range(0, len(pcm), 4096):
@@ -428,11 +434,27 @@ class RigTests(unittest.TestCase):
     def test_loss_before_final_stream_check_cannot_publish(self):
         self.responder("assert header() == 0\n")  # exits zero without checking the held route
         with (patch("builtins.input", return_value="MUTED"),
-              patch.object(rig, "record", return_value=("control", rig.BridgeOutcome(True, 1200))),
+              patch.object(rig, "record", return_value=("control", rig.BridgeOutcome(True, 1200, 1024))),
               patch.object(rig.session, "checked_capture"), patch.object(rig.session, "check_control"),
               self.assertRaisesRegex(ValueError, "missing responder status")):
             self.collect(self.root, [], MagicMock())
         self.assertFalse((self.root / "session.json").exists())
+
+    def test_bad_pre_enqueue_count_leaves_original_wav(self):
+        for count in (0, self.args.rate + 1):
+            self.responder("n = header()\nos.write(1,b'3')\nreader.read(n*2)\n"
+                           f"os.write(1,b'PB'+struct.pack('<I',{count}))\nreader.read()\n")
+            path = self.root / f"bad-{count}.wav"
+            pcm = bytes(4 * self.args.rate)
+            def take(_, save):
+                for i in range(0, len(pcm), 4096):
+                    save(pcm[i:i + 4096])
+                    rig.time.sleep(0.001)
+            with (self.subTest(count=count), self.assertRaisesRegex(ValueError, "invalid pre-enqueue"),
+                  rig.responding_take(self.args, take) as capture):
+                rig.record(path, capture, self.args.rate, 1, 500)
+            with wave.open(str(path)) as wav:
+                self.assertEqual(wav.readframes(self.args.rate), pcm)
 
     def mock_alsa(self):
         alsa = MagicMock()

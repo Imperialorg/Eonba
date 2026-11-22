@@ -105,6 +105,7 @@ class ReferencePipe:
 class BridgeOutcome(NamedTuple):
     started: bool
     playback_frame: int | None  # high-water mark including frames already queued in ALSA
+    reference_frames: int | None  # frames read by the responder before enqueue, not an onset
 
 
 @contextmanager
@@ -117,11 +118,22 @@ def responding_take(args, take):
         out = worker.stdout.fileno()
         os.set_blocking(out, False)
 
+        def read_status(size, timeout):
+            data = bytearray()
+            deadline = time.monotonic() + timeout
+            while len(data) < size:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not select.select([out], [], [], remaining)[0]:
+                    raise TimeoutError("responder did not acknowledge take")
+                chunk = os.read(out, size - len(data))
+                if not chunk:
+                    raise ValueError("invalid or missing responder status")
+                data.extend(chunk)
+            return bytes(data)
+
         def status(timeout, allowed):
-            if not select.select([worker.stdout], [], [], timeout)[0]:
-                raise TimeoutError("responder did not acknowledge take")
-            value = os.read(out, 1)
-            if not value or value not in allowed:
+            value = read_status(1, timeout)
+            if value not in allowed:
                 raise ValueError("invalid or missing responder status")
             return value
 
@@ -137,7 +149,7 @@ def responding_take(args, take):
                 pipe = ReferencePipe(fd, args.rate)  # 500 ms of mono i16 at the selected rate
                 pipe.offer(struct.pack("<I", frames))
                 pipe.finish()
-                status(90, b"2")  # old R/B/N workers cannot attest to live playback
+                status(90, b"3")  # older workers cannot bind the response to a reference prefix
                 received = 0
                 playback_frame = None
                 fault = None
@@ -177,11 +189,16 @@ def responding_take(args, take):
                 pipe.finish()
                 # A P first received during drain still needs B, but is not a live observation.
                 played = playback_frame is not None or status(10, b"PN") == b"P"
+                reference_frames = None
                 if played:
                     status(10, b"B")
+                    reference_frames, = struct.unpack("<I", read_status(4, 10))
+                    if not 0 < reference_frames <= frames or (
+                            playback_frame is not None and reference_frames > playback_frame):
+                        raise ValueError("invalid pre-enqueue reference count")
                 if poll_status() is not None:
                     raise ValueError("unexpected responder status after take")
-                return BridgeOutcome(played, playback_frame)
+                return BridgeOutcome(played, playback_frame, reference_frames)
 
             yield run
             # The worker checks the held stream one last time before a manifest is published.
@@ -283,8 +300,11 @@ def collect(args, directory, turns, take, info):
         control_hash, outcome = record(control, capture, args.rate, 30, args.threshold)
         info["control_pcm_sha256"] = control_hash
         if args.responder:
+            info["responder_protocol"] = 3
             info["control_bridge_started"] = outcome.started
             info["control_playback_frame"] = outcome.playback_frame
+            if outcome.started:
+                info["control_reference_frames"] = outcome.reference_frames
         session.check_control(session.checked_capture(control, args.threshold, control_hash), info)
         print("Unmute the speaker. Keep the same clock, channel routing, gains and threshold.")
         seen = {control_hash}
@@ -302,6 +322,8 @@ def collect(args, directory, turns, take, info):
             label = {"scene": scene, "pcm_sha256": digest}
             if args.responder:
                 label["bridge_started"] = outcome.started
+                if outcome.started:
+                    label["reference_frames"] = outcome.reference_frames
             info["trials"][name] = label
     # Do not select trials by outcome. Even a turn with no speaker response is in the inventory.
     pending = directory / "session.json.partial"

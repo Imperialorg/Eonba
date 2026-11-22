@@ -64,12 +64,15 @@ def check_control(control, info):
     if control.any_output or (control.frames - control.last_input_end) * 1000 < acoustic.P99_LIMIT_MS * control.rate:
         raise ValueError("muted control exceeds threshold or lacks post-stimulus tail")
     started = bridge_started(info, "control_bridge_started", info["mode"])
+    reference = reference_count(info, info, "control_reference_frames", started, control.frames)
     if started is False:
         raise ValueError("driven muted control did not start a bridge")
     if started is True:
         frame = info.get("control_playback_frame")
         if type(frame) is not int or not 0 < frame <= control.frames:
             raise ValueError("driven muted control requires a live control_playback_frame")
+        if reference is not None and reference > frame:
+            raise ValueError("pre-enqueue reference count exceeds the control playback observation")
         cutoff = frame + route_bound(info)
         if info.get("verified_capture_controller") != info["route_calibration"]["capture_controller"]:
             raise ValueError("verified capture controller differs from route calibration")
@@ -92,6 +95,21 @@ def bridge_started(label, key, mode):
         return label[key]
     if key in label:
         raise ValueError(f"passive recording cannot declare {key}")
+    return None
+
+
+def reference_count(info, label, key, started, frames):
+    if "responder_protocol" in info:
+        version = info["responder_protocol"]
+        if info["mode"] != "driven" or type(version) is not int or version != 3:
+            raise ValueError("invalid responder_protocol")
+        if started:
+            value = label.get(key)
+            if type(value) is not int or not 0 < value <= frames:
+                raise ValueError(f"missing or invalid {key}")
+            return value
+    if key in label:
+        raise ValueError(f"{key} requires a started version 3 response")
     return None
 
 
@@ -148,6 +166,11 @@ def measure(directory):
                 raise ValueError("duplicate PCM recording")
             seen.add(sample.fingerprint)
             started = bridge_started(label, "bridge_started", mode)
+            reference = reference_count(info, label, "reference_frames", started, sample.frames)
+            if reference is not None and sample.first_output_end is not None and sample.first_output_end <= reference:
+                # The entire first active speaker bin was captured before the
+                # responder could have queued audio. Do not hunt for a later onset.
+                raise ValueError("apparent speaker onset precedes bridge enqueue")
             latency = None
             if started is False or sample.first_output_end is None:
                 # The last input window must leave time for even a near-deadline onset

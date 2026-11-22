@@ -78,6 +78,52 @@ class PhysicalInventoryTests(unittest.TestCase):
         self.assertEqual(measured["noisy_scenes"][physical.SCENES[0]],
                          {"trials": 34, "misses": 1, "max_ttfa_ms": None})
 
+    def test_enqueued_bridge_cannot_explain_an_earlier_acoustic_onset(self):
+        self.driven_control()
+        self.info.update(responder_protocol=3, control_reference_frames=2500)
+        for trial in self.info["trials"].values():
+            trial.update(bridge_started=True, reference_frames=2100)
+        self.assertTrue(self.measure()["task_10_2"]["passed"])
+        # Last input at 1016, first sustained speaker bin ends at 2600. Its
+        # apparent 100 ms latency cannot come from a bridge enqueued any later.
+        trial = self.info["trials"]["0.wav"]
+        for already_acquired in (2600, 2601, 8000):
+            trial["reference_frames"] = already_acquired
+            with self.subTest(count=already_acquired), self.assertRaisesRegex(ValueError, "precedes bridge enqueue"):
+                self.measure()
+        trial["reference_frames"] = 2599
+        self.assertTrue(self.measure()["task_10_2"]["passed"])  # a straddling bin is not provably premature
+        self.info["control_reference_frames"] = self.info["control_playback_frame"] + 1
+        with self.assertRaisesRegex(ValueError, "control playback observation"):
+            self.measure()
+
+    def test_reference_prefix_is_scoped_to_one_versioned_positive_outcome(self):
+        self.driven_control()
+        for trial in self.info["trials"].values():
+            trial["bridge_started"] = True
+        self.assertTrue(self.measure()["task_10_2"]["passed"])  # legacy archive
+        trial = self.info["trials"]["0.wav"]
+        trial["reference_frames"] = 2100
+        with self.assertRaisesRegex(ValueError, "version 3"):
+            self.measure()
+        self.info.update(responder_protocol=3, control_reference_frames=1200)
+        for entry in self.info["trials"].values():
+            entry["reference_frames"] = 2100
+        for invalid in (None, False, 0, -1, 1.2, "2100", 8001):
+            trial["reference_frames"] = invalid
+            with self.subTest(count=invalid), self.assertRaisesRegex(ValueError, "invalid reference_frames"):
+                self.measure()
+        del trial["reference_frames"]
+        with self.assertRaisesRegex(ValueError, "invalid reference_frames"):
+            self.measure()
+        trial.update(bridge_started=False, reference_frames=1999)
+        with self.assertRaisesRegex(ValueError, "requires a started"):
+            self.measure()
+        for version in (True, 3.0, 4):
+            self.info["responder_protocol"] = version
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, "invalid responder_protocol"):
+                self.measure()
+
     def test_no_implicit_mode_unknown_outcome_or_unexercised_driven_control(self):
         del self.info["mode"]
         with self.assertRaisesRegex(ValueError, "recording mode"):

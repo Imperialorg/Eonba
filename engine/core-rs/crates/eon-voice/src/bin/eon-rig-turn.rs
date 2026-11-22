@@ -26,7 +26,7 @@ fn reply(
     vad: SileroVad,
     asr: &mut ZipformerAsr,
     ready: impl FnOnce() -> Result<()>,
-) -> Result<Option<Bridge>> {
+) -> Result<Option<(Bridge, u32)>> {
     let mut endpoint = VadEndpoint::new(vad);
     let mut stream = asr.start_utterance()?;
     let mut partial = String::new();
@@ -34,6 +34,7 @@ fn reply(
     let mut frames = CaptureFrames::<VAD_FRAME_SAMPLES>::new(rx, rate)?;
     let mut input = io::BufReader::new(input);
     let mut bytes = [0; 512];
+    let mut reference_frames = 0;
     ready()?;
     loop {
         // Arbitrarily fragmented pipe reads may split an i16.
@@ -46,6 +47,9 @@ fn reply(
             n += 1;
         }
         let samples = bytes[..n].as_chunks::<2>().0;
+        // These capture-clock frames were already recorded before enqueue. Do
+        // not count EOF padding, buffered lookahead, or the post-reply drain.
+        reference_frames += samples.len() as u32;
         let mut pcm = [0.; 256];
         for (dst, pair) in pcm.iter_mut().zip(samples) {
             *dst = f32::from(i16::from_le_bytes(*pair)) / 32768.;
@@ -62,25 +66,26 @@ fn reply(
                 if text.trim().is_empty() {
                     return Ok(None);
                 }
-                return Ok(Some(match IntentPreview::from_partial(&text) {
+                let bridge = match IntentPreview::from_partial(&text) {
                     Some(IntentPreview::Question) => Bridge::Report,
                     Some(IntentPreview::Request) => Bridge::Proposal,
                     _ => Bridge::Notice,
-                }));
+                };
+                return Ok(Some((bridge, reference_frames)));
             }
         }
     }
 }
 
-// Protocol v2: ready '2', then either 'P' (whole prefix consumed by the selected
-// output callback) and terminal 'B', or just terminal 'N'. Keep reading the
+// Protocol v3: ready '3', then either 'P' (whole prefix consumed by the selected
+// output callback) and terminal 'B' + u32 LE reference frames, or just 'N'. Keep reading the
 // bounded take during playback; never wait for the renderer in the audio callback.
 fn finish_take(
     pcm: &mut dyn Read,
     output: &mut dyn Write,
     prefix_end: Option<u64>,
     mut rendered: impl FnMut() -> Result<u64>,
-) -> Result<bool> {
+) -> Result<()> {
     let mut pending = prefix_end;
     let mut observe = || -> Result<bool> {
         let count = rendered()?;
@@ -101,7 +106,7 @@ fn finish_take(
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    Ok(prefix_end.is_some())
+    Ok(())
 }
 
 // u32 little-endian frame count, exactly that many mono i16 samples. Zero ends the
@@ -110,7 +115,7 @@ fn serve(
     input: &mut impl Read,
     output: &mut impl Write,
     rate: u32,
-    mut run: impl FnMut(&mut dyn Read, &mut dyn Write) -> Result<bool>,
+    mut run: impl FnMut(&mut dyn Read, &mut dyn Write) -> Result<Option<u32>>,
 ) -> Result<()> {
     loop {
         let mut header = [0; 4];
@@ -123,11 +128,20 @@ fn serve(
             return Err("take exceeds 30 seconds".into());
         }
         let mut pcm = input.take(u64::from(frames) * 2);
-        let started = run(&mut pcm, output)?;
+        let reference_frames = run(&mut pcm, output)?;
         if pcm.limit() != 0 {
             return Err("truncated reference take".into());
         }
-        status(output, if started { b'B' } else { b'N' })?;
+        if let Some(n) = reference_frames {
+            if !(1..=frames).contains(&n) {
+                return Err("invalid pre-enqueue reference count".into());
+            }
+            output.write_all(b"B")?;
+            output.write_all(&n.to_le_bytes())?;
+            output.flush()?;
+        } else {
+            status(output, b'N')?;
+        }
     }
 }
 
@@ -201,11 +215,11 @@ fn main() -> Result<()> {
         &mut io::stdout().lock(),
         rate,
         |pcm, output| {
-            let bridge = reply(&mut *pcm, rate, SileroVad::load(&vad)?, &mut asr, || {
+            let decision = reply(&mut *pcm, rate, SileroVad::load(&vad)?, &mut asr, || {
                 healthy()?;
-                status(output, b'2')
+                status(output, b'3')
             })?;
-            let prefix_end = if let Some(bridge) = bridge {
+            let prefix_end = if let Some((bridge, _)) = decision {
                 healthy()?;
                 submitted += start_prefix(&mut tx, &gate, &cache, bridge)? as u64;
                 Some(submitted)
@@ -215,7 +229,8 @@ fn main() -> Result<()> {
             finish_take(pcm, output, prefix_end, || {
                 healthy()?;
                 Ok(device.counters.frames.load(Acquire))
-            })
+            })?;
+            Ok(decision.map(|(_, n)| n))
         },
     )?;
     healthy()?;
@@ -231,12 +246,31 @@ mod tests {
         for mut data in [&[2, 0, 0, 0, 1, 0][..], &[0, 1], &u32::MAX.to_le_bytes()] {
             let mut replies = Vec::new();
             let failed = serve(&mut data, &mut replies, 16000, |pcm, output| {
-                status(output, b'2')?;
+                status(output, b'3')?;
                 io::copy(pcm, &mut io::sink())?;
-                Ok(false)
+                Ok(None)
             });
             assert!(failed.is_err());
-            assert!(replies.is_empty() || replies == b"2");
+            assert!(replies.is_empty() || replies == b"3");
+        }
+    }
+
+    #[test]
+    fn each_started_take_needs_a_reference_count_within_that_take() {
+        for (count, expected) in [
+            (None, Some(&b"N"[..])),
+            (Some(2), Some(&b"B\x02\x00\x00\x00"[..])),
+            (Some(0), None),
+            (Some(3), None),
+        ] {
+            let mut input = [2, 0, 0, 0, 9, 8, 7, 6, 0, 0, 0, 0].as_slice();
+            let mut output = Vec::new();
+            let result = serve(&mut input, &mut output, 16000, |pcm, _| {
+                io::copy(pcm, &mut io::sink())?;
+                Ok(count)
+            });
+            assert_eq!(result.is_ok(), expected.is_some());
+            assert_eq!(output, expected.unwrap_or_default());
         }
     }
 
@@ -246,8 +280,7 @@ mod tests {
         let mut replies = Vec::new();
         let mut counts = [17, 18, 19].into_iter();
         let rendered = || Ok(counts.next().unwrap());
-        let started = finish_take(&mut &payload[..], &mut replies, Some(18), rendered)?;
-        assert!(started);
+        finish_take(&mut &payload[..], &mut replies, Some(18), rendered)?;
         assert_eq!(replies, b"P");
         // Lose the driver on the last (EOF) check: only a complete render observed
         // during input drain can already have emitted P, but neither may emit B.
@@ -294,24 +327,30 @@ mod tests {
         let (mut tx, mut rx) = pcm_ring(1 << 19);
         let gate = CommitmentGate::new(1, BargeIn::new());
         serve(&mut &input[..], &mut replies, 16000, |pcm, output| {
-            let bridge = reply(
+            let decision = reply(
                 &mut *pcm,
                 16000,
                 SileroVad::load(models.join("vad/silero_vad.onnx"))?,
                 &mut asr,
-                || status(output, b'2'),
+                || status(output, b'3'),
             )?;
-            let prefix_end = bridge
-                .map(|b| start_prefix(&mut tx, &gate, &cache, b))
+            let prefix_end = decision
+                .map(|(b, _)| start_prefix(&mut tx, &gate, &cache, b))
                 .transpose()?;
             let mut block = vec![0.; rx.available()];
             let rendered = rx.pop_slice(&mut block);
             assert_eq!(block.iter().any(|s| s.abs() > 0.01), prefix_end.is_some());
             finish_take(pcm, output, prefix_end.map(|n| n as u64), || {
                 Ok(rendered as u64)
-            })
+            })?;
+            Ok(decision.map(|(_, n)| n))
         })?;
-        assert_eq!(replies, b"2PB2N2N2PB");
+        assert_eq!(replies.len(), 18);
+        assert_eq!(&replies[..3], b"3PB");
+        assert_eq!(&replies[7..14], b"3N3N3PB");
+        let frames = u32::from_le_bytes(replies[3..7].try_into()?);
+        assert!((1..complete.len() / 2).contains(&(frames as usize)));
+        assert_eq!(replies[3..7], replies[14..18]);
         assert!(
             reply(
                 &[1u8][..],
