@@ -350,7 +350,19 @@ In the historical independent comparison, both encoders passed 12/12 clean. CAM+
 
 An unshipped two-encoder experiment retained the ordinary short WeSpeaker pass. On rejection it required both a CAM++ match on the current window and a WeSpeaker match over contiguous voiced audio ending at the same sample (up to 2 s). Handoffs passed, and it recovered babble and TV, but traffic still missed. The extra model and history did not meet the five-scene requirement.
 
-**Pending comparison, same-window agreement.** With both pinned models provisioned, run `python3 scripts/eval/noisy_duplex.py --speaker-model wespeaker-campp-agreement` and `python3 scripts/eval/speaker_handoffs.py --speaker-model wespeaker-campp-agreement`. This policy uses fresh duration-matched enrollment for each encoder and requires both to clear 0.35 on one current 544 ms window. It cannot use a longer prior owner recording to rescue a rejected candidate. Compare all five fixed scenes and all 13 handoffs, not just the two previously missed scenes. Neither command supplies acoustic timing or changes the shipping verdict.
+**Current comparison, same recordings and 0.35 cutoff.** Run `python3 scripts/eval/noisy_duplex.py --speaker-model MODEL` and `python3 scripts/eval/speaker_handoffs.py --speaker-model MODEL` for each row below. Agreement requires fresh duration-matched enrollment for both encoders and both must accept the same current 544 ms window.
+
+| Model | Fixed scenes (missed owner) | Locked handoff | 12 independent handoffs: pass / fail / unexercised |
+|---|---|---|---|
+| `wespeaker-resnet34` (shipping) | 3/5 (babble, TV) | Clean splice unexercised | 3 / 2 / 7 |
+| `camplusplus-zh-en-advanced` | 5/5 | Passed | 3 / 2 / 7 |
+| `wespeaker-campp-agreement` | 3/5 (traffic, TV) | Noisy splice unexercised | 4 / 3 / 5 |
+
+None muted a stranger or stale capture in the five fixed scenes. During a handoff, WeSpeaker muted 280 ms after reader 174 replaced owner 1272; CAM++ muted 280 ms after reader 652 replaced owner 422. Both also missed one returning owner. Agreement missed three returning owners. No alternative passed both tests.
+
+A CAM++ confirmation trial required a second match after nine new voiced frames (288 ms), without changing enrollment or cutoff. Clean and rumble still passed, but the owner in babble matched the first probe and failed confirmation. The trial stopped at that regression; it did not retest the false interruption and was not adopted.
+
+Earlier handoff results above allowed a rejected owner probe in either condition to cover the pair. The current check requires that history before a splice in **each** of clean and noise. If the genuine owner already interrupted playback, that cut cannot test a later speaker switch. Missing coverage is not a false interruption and cannot mask a measured failure in the other condition.
 
 **Overlapping WeSpeaker windows (not adopted).** On the same five WAV pairs, score the latest 17 consecutive voiced frames after each new 32 ms frame instead of discarding all 17 after a rejection. Enrollment, Silero and the 0.35 cosine cutoff were unchanged. This recovered the owner in traffic at 800 ms of fixture audio, improving the fixed result from 2/5 to 3/5. Babble peaked at 0.337 and TV at 0.344; both missed. No wrong or stale interruption was observed, and the separate speaker-switch test passed. The fixed gate still failed, so the independent reader corpus was not rerun.
 
@@ -380,9 +392,22 @@ TMPDIR=/tmp python3 -B "$R/scripts/eval/acceptance.py" --software-only
 
 For timing alone, run `python3 -B "$R/scripts/eval/software_turns.py"`. Both commands use the same batch: a separate silent negative, then 100 distinct complete LibriSpeech dev-clean utterances between 1 and 12 seconds. Selection takes the lowest SHA-256 ranks of the utterance IDs, before inference. In that order 25 takes each receive clean, babble, traffic or TV conditions. Gain is set and checked at 0 dB over the recorded utterance. The background continues through the 200 ms lead and two-second tail; it does not stop when the speaker does.
 
+For a shorter diagnostic, add `--recorded-pair` to `software_turns.py`. It crosses the two locked WAVs with the same four scenes, plus the silent control. For each rendered reply it splits total time into the dry-to-endpoint sample interval and the remaining wall time, including inference and scheduling. It does not report percentiles and is never substituted for the 100-turn batch.
+
 Only the mixture reaches Silero and Zipformer. A monotonic clock paces input; the dry reference independently marks the last active 1 ms window. The responder must reach its semantic endpoint, produce a nonempty final transcript, and render a warmed Kokoro prefix. The stop time is the observed end of the first of five sustained 1 ms output bins at the software sink (both activity thresholds: 100 RMS in PCM16 units). Results include inference and scheduling time, not microphone, speaker or acoustic delay. A reply before the last foreground, a missing reply, or a silent prefix fails the take. No percentile is calculated from survivors.
 
 The software gate requires nearest-rank P50 < 170,000 µs, P99 < 280,000 µs and every noisy reply < 200,000 µs. It keeps measured failures even if another component is unavailable. The combined command adds replay, source-only defensive regression, repair, fixed speaker scenes and active speaker handoffs. It uses shipping WeSpeaker by default. To compare the two-encoder policy, also provision `camplusplus-zh-en-advanced` and pass `--speaker-policy wespeaker-campp-agreement`. Neither policy can turn software render timing into a physical acceptance result.
+
+**100-turn result: failed.** The release responder (`530c589`, executable SHA-256 `1b2c10e2f46c4036adc5c7ecb65417015fc51ba78b3e89b03ded9d603036da58`) completed every take. The silent control produced neither an endpoint nor a reply.
+
+| Scene (25 utterances each) | Rendered after foreground | Ended early | No endpoint |
+|---|---:|---:|---:|
+| Clean | 24 | 1 | 0 |
+| Babble, 0 dB | 0 | 0 | 25 |
+| Traffic, 0 dB | 24 | 1 | 0 |
+| TV dialogue, 0 dB | 3 | 0 | 22 |
+
+The fastest of the 51 valid replies took 505,675 µs. All 27 valid noisy replies exceeded 200 ms. Even before final decoding and rendering, the shortest sample-clock interval from the last active dry bin to a valid endpoint was 462 ms. A faster renderer alone cannot meet the target on these takes. The 49 early or absent replies leave P50 and P99 undefined. No device was used.
 
 ## 4. Master Phased Execution Playbook (Order of Implementation)
 
