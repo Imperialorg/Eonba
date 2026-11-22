@@ -130,6 +130,20 @@ class PhysicalInventoryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "verified capture controller"):
                 self.measure()
 
+    def test_incomplete_or_invalid_declared_capture_geometry_does_not_verify(self):
+        self.driven_control()
+        cal = self.info["route_calibration"]
+        cal["capture_period_frames"] = 80
+        with self.assertRaisesRegex(ValueError, "capture_buffer_frames"):
+            self.measure()
+        cal["capture_buffer_frames"] = 80
+        with self.assertRaisesRegex(ValueError, "capture_buffer_frames"):
+            self.measure()
+        cal["capture_buffer_frames"] = 320
+        for label in self.info["trials"].values():
+            label["bridge_started"] = True
+        self.assertTrue(self.measure()["task_10_2"]["passed"])
+
     def test_driven_control_requires_same_route_positive_calibrated_bound(self):
         self.driven_control()
         cal = self.info.pop("route_calibration")

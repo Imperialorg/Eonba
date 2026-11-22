@@ -16,7 +16,7 @@ from typing import NamedTuple
 import wave
 
 import physical_session as session
-from stereo_pcm import endpoint
+from stereo_pcm import capture_geometry, endpoint
 
 
 def quiet_prefix(prefix, rate, threshold):
@@ -216,6 +216,7 @@ def configuration(args):
             raise ValueError("route calibration nested too deeply") from error
         info.update(capture_device=args.device, speaker=args.speaker, route_calibration=cal)
         session.route_bound(info)
+        capture_geometry(cal, args.rate)
     elif path is not None:
         raise ValueError("--route-calibration is for driven acquisition only")
     return info
@@ -259,10 +260,10 @@ def acquire(args):
         os.mkdir(args.directory.name, 0o700, dir_fd=parent_fd)
         fd = os.open(args.directory.name, os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
         try:
-            controller = info["route_calibration"]["capture_controller"] if args.responder else None
-            with endpoint(args.device, args.rate, controller) as take:
+            calibration = info.get("route_calibration")
+            with endpoint(args.device, args.rate, calibration) as take:
                 if args.responder:
-                    info["verified_capture_controller"] = controller
+                    info["verified_capture_controller"] = calibration["capture_controller"]
                 collect(args, Path(f"/proc/self/fd/{fd}"), turns, take, info)
         finally:
             os.close(fd)

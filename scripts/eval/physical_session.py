@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import sys
 import wave
-from stereo_pcm import controller_id
+from stereo_pcm import capture_geometry, controller_id
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import measure_ttfa as acoustic
@@ -48,6 +48,8 @@ def route_bound(info):
             raise ValueError(f"route calibration differs from acquisition {key}")
     if type(cal.get("sample_rate_hz")) is not int or cal["sample_rate_hz"] != info["sample_rate_hz"]:
         raise ValueError("route calibration differs from acquisition sample_rate_hz")
+    if "capture_period_frames" in cal or "capture_buffer_frames" in cal:
+        capture_geometry(cal, info["sample_rate_hz"])
     bound = cal.get("upper_bound_frames")
     if type(bound) is not int or not 0 < bound < 30 * info["sample_rate_hz"]:
         raise ValueError("route calibration requires a positive integer upper_bound_frames within the control")

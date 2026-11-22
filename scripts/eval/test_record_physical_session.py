@@ -36,6 +36,7 @@ class RigTests(unittest.TestCase):
         self.args.route_calibration.write_text(json.dumps({
             "reference": "unit-test fixture only", "capture_device": self.args.device, "speaker": self.args.speaker,
             "capture_controller": "/dev/snd/by-id/usb-Rig_SN01-00",
+            "capture_period_frames": 80, "capture_buffer_frames": 320,
             "route": self.args.route, "gains": self.args.gains, "sample_rate_hz": self.args.rate, "upper_bound_frames": 160,
         }))
         self.args.responder = self.root / "test-worker"
@@ -55,7 +56,7 @@ class RigTests(unittest.TestCase):
               patch.object(rig, "collect") as collect):
             rig.acquire(self.args)
         identity = "/dev/snd/by-id/usb-Rig_SN01-00"
-        self.device.assert_called_once_with("hw:2,0", 16000, identity)
+        self.device.assert_called_once_with("hw:2,0", 16000, json.loads(self.args.route_calibration.read_text()))
         self.assertEqual(collect.call_args.args[-1]["verified_capture_controller"], identity)
 
     def test_missing_or_different_route_calibration_stops_before_capture(self):
@@ -67,6 +68,19 @@ class RigTests(unittest.TestCase):
                 self.args.route_calibration = value
                 self.args.speaker = "alsa:hw:CARD=Other,DEV=0"
                 with self.subTest(value=value), self.assertRaisesRegex(ValueError, reason):
+                    rig.acquire(self.args)
+            prompt.assert_not_called()
+            self.device.assert_not_called()
+
+    def test_new_driven_acquisition_requires_both_calibrated_buffer_sizes(self):
+        self.responder("")
+        path = self.args.route_calibration
+        calibration = json.loads(path.read_text())
+        with patch.object(rig.sys.stdin, "isatty", return_value=True), patch("builtins.input") as prompt:
+            for period, buffer in [(None, None), (True, 320), (80, None), (0, 320), (320, 80), (80, 480001)]:
+                path.write_text(json.dumps({k: v for k, v in dict(
+                    calibration, capture_period_frames=period, capture_buffer_frames=buffer).items() if v is not None}))
+                with self.subTest(period=period, buffer=buffer), self.assertRaisesRegex(ValueError, "capture_period"):
                     rig.acquire(self.args)
             prompt.assert_not_called()
             self.device.assert_not_called()
@@ -422,8 +436,12 @@ class RigTests(unittest.TestCase):
         alsa = MagicMock()
         for name in ("open", "close", "hw_params_malloc", "hw_params_any", "hw_params_set_access",
                      "hw_params_set_format", "hw_params_set_channels", "hw_params_set_rate",
-                     "hw_params", "prepare", "drop"):
+                     "hw_params_set_period_size", "hw_params_set_buffer_size", "hw_params", "prepare", "drop"):
             getattr(alsa, "snd_pcm_" + name).return_value = 0
+        def installed(_, buffer, period):
+            buffer._obj.value, period._obj.value = 320, 80
+            return 0
+        alsa.snd_pcm_get_params.side_effect = installed
         return alsa
 
     def test_controller_lookup_checks_open_pcm_direct_link_device_number_and_serial(self):
@@ -465,13 +483,34 @@ class RigTests(unittest.TestCase):
                   patch.object(Path, "lstat", return_value=node), patch.object(Path, "stat", return_value=target),
                   patch.object(Path, "open", autospec=True, side_effect=udev)):
                 expected = self.assertRaisesRegex(ValueError, reason) if reason else contextlib.nullcontext()
-                with expected, stereo_pcm.endpoint("hw:2,0", 16000, edits.get("identity", identity)):
+                calibration = dict(capture_controller=edits.get("identity", identity),
+                                   capture_period_frames=80, capture_buffer_frames=320)
+                with expected, stereo_pcm.endpoint("hw:2,0", 16000, calibration):
                     self.assertIsNone(reason)
+                    self.assertEqual(alsa.snd_pcm_hw_params_set_period_size.call_args.args[2:], (80, 0))
+                    self.assertEqual(alsa.snd_pcm_hw_params_set_buffer_size.call_args.args[2:], (320,))
                 alsa.snd_pcm_close.assert_called_once()
                 alsa.snd_pcm_prepare.assert_not_called()
                 alsa.snd_pcm_readi.assert_not_called()
                 if reason:
                     alsa.snd_pcm_hw_params_malloc.assert_not_called()
+
+    def test_unsupported_or_changed_capture_geometry_never_starts_a_take(self):
+        for period, buffer, fail in [(81, 320, None), (80, 319, None), (80, 320, "hw_params_set_period_size"),
+                                     (80, 320, "hw_params_set_buffer_size")]:
+            alsa = self.mock_alsa()
+            if fail:
+                getattr(alsa, "snd_pcm_" + fail).return_value = -22
+            calibration = dict(capture_controller="/dev/snd/by-id/usb-Rig_SN01-00",
+                               capture_period_frames=period, capture_buffer_frames=buffer)
+            with (self.subTest(period=period, buffer=buffer, fail=fail),
+                  patch.object(stereo_pcm, "library", return_value=alsa), patch.object(stereo_pcm, "verify_controller"),
+                  self.assertRaises(OSError if fail else ValueError),
+                  stereo_pcm.endpoint("hw:2,0", 16000, calibration)):
+                self.fail("configuration mismatch admitted")
+            alsa.snd_pcm_prepare.assert_not_called()
+            alsa.snd_pcm_readi.assert_not_called()
+            alsa.snd_pcm_close.assert_called_once()
 
     def test_incompatible_rate_rejected_before_capture_and_loss_never_reopens(self):
         alsa = self.mock_alsa()

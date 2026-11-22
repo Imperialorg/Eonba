@@ -28,7 +28,10 @@ def library():
         "hw_params_set_format": (c.c_int, ptr, ptr, c.c_int),
         "hw_params_set_channels": (c.c_int, ptr, ptr, c.c_uint),
         "hw_params_set_rate": (c.c_int, ptr, ptr, c.c_uint, c.c_int),
+        "hw_params_set_period_size": (c.c_int, ptr, ptr, c.c_ulong, c.c_int),
+        "hw_params_set_buffer_size": (c.c_int, ptr, ptr, c.c_ulong),
         "hw_params": (c.c_int, ptr, ptr),
+        "get_params": (c.c_int, ptr, c.POINTER(c.c_ulong), c.POINTER(c.c_ulong)),
         "prepare": (c.c_int, ptr),
         "readi": (c.c_long, ptr, ptr, c.c_ulong),
         "avail": (c.c_long, ptr),
@@ -51,6 +54,15 @@ def controller_id(value):
     if not isinstance(value, str) or not re.fullmatch(r"/dev/snd/by-id/usb-[A-Za-z0-9][A-Za-z0-9_.-]{0,250}", value):
         raise ValueError("expected a direct USB capture_controller under /dev/snd/by-id")
     return value
+
+
+def capture_geometry(calibration, rate):
+    period = calibration.get("capture_period_frames")
+    buffer = calibration.get("capture_buffer_frames")
+    if type(period) is not int or type(buffer) is not int or not 0 < period < buffer <= 30 * rate:
+        raise ValueError("route calibration requires capture_period_frames < capture_buffer_frames "
+                         "in positive frames within the 30 s control")
+    return period, buffer
 
 
 def verify_controller(alsa, pcm, device, identity):
@@ -90,13 +102,14 @@ def verify_controller(alsa, pcm, device, identity):
 
 
 @contextmanager
-def endpoint(device, rate, controller=None):
+def endpoint(device, rate, calibration=None):
     alsa = library()
     pcm = c.c_void_p()
     check(alsa.snd_pcm_open(c.byref(pcm), device.encode("ascii"), 1, 1))  # CAPTURE, NONBLOCK
     try:
-        if controller is not None:
-            verify_controller(alsa, pcm, device, controller)
+        if calibration is not None:
+            verify_controller(alsa, pcm, device, calibration["capture_controller"])
+            period, buffer = capture_geometry(calibration, rate)
         params = c.c_void_p()
         check(alsa.snd_pcm_hw_params_malloc(c.byref(params)))
         try:
@@ -106,7 +119,15 @@ def endpoint(device, rate, controller=None):
             check(alsa.snd_pcm_hw_params_set_channels(pcm, params, 2))
             # Exact, not set_rate_near. Reject an incompatible device before recording.
             check(alsa.snd_pcm_hw_params_set_rate(pcm, params, rate, 0))
+            if calibration is not None:
+                check(alsa.snd_pcm_hw_params_set_period_size(pcm, params, period, 0))
+                check(alsa.snd_pcm_hw_params_set_buffer_size(pcm, params, buffer))
             check(alsa.snd_pcm_hw_params(pcm, params))
+            if calibration is not None:
+                actual_buffer, actual_period = c.c_ulong(), c.c_ulong()
+                check(alsa.snd_pcm_get_params(pcm, c.byref(actual_buffer), c.byref(actual_period)))
+                if (actual_period.value, actual_buffer.value) != (period, buffer):
+                    raise ValueError("installed capture period or buffer differs from route calibration")
         finally:
             alsa.snd_pcm_hw_params_free(params)
 
