@@ -1,9 +1,11 @@
+import contextlib
 import hashlib
 import io
 import json
 import struct
 import tarfile
 import unittest
+from unittest.mock import patch
 
 import software_turns as turns
 
@@ -63,10 +65,10 @@ class SoftwareCorpusTests(unittest.TestCase):
 class SoftwareScoreTests(unittest.TestCase):
     def setUp(self):
         self.inventory = [{"id": "silent-control", "scene": "silence", "frames": 16000, "dry_end": None}]
-        self.rows = [dict(status="no_reply", endpoint_sample=None, last_active_end_sample=None, latency_us=None)]
+        self.rows = [dict(take=1, status="no_reply", endpoint_sample=None, last_active_end_sample=None, latency_us=None)]
         for i in range(turns.COUNT):
             self.inventory.append({"id": str(i), "scene": turns.SCENES[i % 4], "frames": 16000, "dry_end": 1040})
-            self.rows.append(dict(status="ok", endpoint_sample=1408, last_active_end_sample=1040, latency_us=80_000))
+            self.rows.append(dict(take=i + 2, status="ok", endpoint_sample=1536, last_active_end_sample=1040, latency_us=80_000))
 
     def score(self, reason=None):
         return turns.evaluate(self.inventory, b"".join(json.dumps(r).encode() + b"\n" for r in self.rows), reason)
@@ -86,8 +88,32 @@ class SoftwareScoreTests(unittest.TestCase):
             row["latency_us"] = 170_000
         self.assertEqual(self.score()["status"], "failed")
 
+    def test_minimum_includes_first_observable_sink_bin(self):
+        self.inventory[2]["dry_end"] = 928
+        self.rows[2].update(last_active_end_sample=928, endpoint_sample=4096, latency_us=199_999)
+        self.assertEqual(self.score()["status"], "unavailable")
+        self.rows[2]["latency_us"] = 200_000
+        self.assertEqual(self.score()["status"], "failed")
+
+    def test_malformed_row_cannot_hide_an_independently_attributed_miss(self):
+        self.rows[1] = {"take": 2, "bogus": True}
+        self.rows[2].update(status="early_endpoint", endpoint_sample=512, latency_us=None)
+        report = self.score()
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["takes"][1]["status"], "unavailable")
+        self.assertEqual(report["takes"][2]["status"], "early_endpoint")
+        self.rows.append(self.rows[2])
+        self.assertEqual(self.score()["status"], "unavailable")  # duplicate ordinal cannot be credited
+
+    def test_only_confirmed_silent_warmup_has_a_measured_startup_failure(self):
+        self.rows = [{"startup_failure": "silent_bridge"}]
+        self.assertEqual(self.score("responder exited 1")["status"], "failed")
+        self.assertEqual(self.score()["status"], "unavailable")
+        self.rows = []
+        self.assertEqual(self.score("responder exited 1")["status"], "unavailable")
+
     def test_early_endpoint_or_missing_sustained_render_is_not_a_fast_reply(self):
-        for status, end in (("early_endpoint", 512), ("no_reply", None), ("no_render_onset", 1408)):
+        for status, end in (("early_endpoint", 512), ("no_reply", None), ("no_render_onset", 1536)):
             self.rows[1].update(status=status, endpoint_sample=end, latency_us=None)
             result = self.score()
             self.assertEqual(result["status"], "failed")
@@ -100,7 +126,8 @@ class SoftwareScoreTests(unittest.TestCase):
         self.assertEqual(self.score("responder exited 1")["status"], "unavailable")
         self.rows.pop()
         self.assertEqual(self.score()["status"], "unavailable")
-        for field, value in (("last_active_end_sample", 900), ("endpoint_sample", False), ("latency_us", 1)):
+        for field, value in (("last_active_end_sample", 900), ("endpoint_sample", False),
+                             ("endpoint_sample", 1408), ("latency_us", 1)):
             original = self.rows[1][field]
             self.rows[1][field] = value
             self.assertIn("take 2:", self.score()["reason"])
@@ -115,3 +142,27 @@ class SoftwareScoreTests(unittest.TestCase):
         self.inventory.pop(0)
         with self.assertRaisesRegex(ValueError, "silent control"):
             self.score()
+
+    def test_help_and_unknown_arguments_never_start_the_runner(self):
+        with (patch.object(turns, "measure", side_effect=AssertionError),
+              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO())):
+            for arg, code in (("--help", 0), ("--invalid-option", 2)):
+                with self.assertRaises(SystemExit) as raised:
+                    turns.main([arg])
+                self.assertEqual(raised.exception.code, code)
+
+    def test_native_executable_is_the_unique_release_artifact_reported_by_cargo(self):
+        artifact = {"reason": "compiler-artifact", "target": {"name": "eon-rig-turn"},
+                    "executable": "/custom/target/release/eon-rig-turn"}
+        with patch.object(turns.subprocess, "run") as build:
+            for count in (0, 1, 2):
+                build.return_value.stdout = ((json.dumps(artifact) + "\n") * count).encode()
+                if count == 1:
+                    self.assertEqual(str(turns.build_responder()), artifact["executable"])
+                else:
+                    with self.assertRaisesRegex(ValueError, "release responder"):
+                        turns.build_responder()
+            command = build.call_args.args[0]
+            self.assertIn("--release", command)
+            self.assertIn("--offline", command)
+            self.assertIn("--locked", command)

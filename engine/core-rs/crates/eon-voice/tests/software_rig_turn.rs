@@ -41,6 +41,9 @@ fn repeated_recording_with_a_late_continuation_is_an_early_reply_not_a_fast_late
         .map(serde_json::from_str)
         .collect::<Result<_, _>>()?;
     assert_eq!(rows.len(), 3);
+    for (index, row) in rows.iter().enumerate() {
+        assert_eq!(row["take"].as_u64(), Some(index as u64 + 1));
+    }
     assert_eq!(rows[0]["status"], "ok");
     let last = rows[0]["last_active_end_sample"].as_u64().unwrap();
     let end = rows[0]["endpoint_sample"].as_u64().unwrap();
@@ -51,7 +54,7 @@ fn repeated_recording_with_a_late_continuation_is_an_early_reply_not_a_fast_late
     assert_eq!(
         rows[1],
         json!({
-            "status":"no_reply", "endpoint_sample":null, "last_active_end_sample":null, "latency_us":null
+            "take":2, "status":"no_reply", "endpoint_sample":null, "last_active_end_sample":null, "latency_us":null
         })
     );
     assert_eq!(rows[2]["status"], "early_endpoint");

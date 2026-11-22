@@ -12,7 +12,7 @@ use std::sync::mpsc::sync_channel;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use eon_voice::EonResult;
+use eon_primitives::EonResult;
 use eon_voice::asr::ZipformerAsr;
 use eon_voice::barge_in::BargeIn;
 use eon_voice::commitment::{Bridge, BridgeCache, CommitmentGate};
@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn independent_calls_can_overlap_and_either_failure_aborts_the_take() {
-        use eon_voice::EonError;
+        use eon_primitives::EonError;
 
         // Two-way handshake, not a benchmark. A serial implementation cannot complete both calls.
         for score_fails in [true, false] {

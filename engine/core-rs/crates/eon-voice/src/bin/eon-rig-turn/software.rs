@@ -3,8 +3,10 @@
 //! Zero count terminates without a row. Only the mix reaches Silero/Zipformer.
 //! Never fabricate a quiet tail: any trailing silence or noise bed is input.
 //!
-//! One flushed JSON line per completed take, no other stdout:
+//! One flushed JSON line per completed take: `take` (1-based ordinal),
 //! `status`, `last_active_end_sample`, `endpoint_sample`, `latency_us`.
+//! A confirmed silent Kokoro bridge during startup instead emits only
+//! `{"startup_failure":"silent_bridge"}` and exits nonzero.
 //! Sample offsets are exclusive, integers or null. Only `ok` has latency;
 //! misses are `no_reply`, `early_endpoint`, `no_input_activity`, `no_render_onset`.
 //! All-zero negative control expects `no_reply` and three nulls. Bad framing
@@ -17,9 +19,10 @@ use std::io::{self, Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use eon_primitives::EonResult;
 use eon_voice::asr::ZipformerAsr;
 use eon_voice::barge_in::BargeIn;
-use eon_voice::commitment::{BridgeCache, CommitmentGate};
+use eon_voice::commitment::{BridgeCache, BridgeWarmup, CommitmentGate};
 use eon_voice::geometry::{SAMPLE_RATE_HZ, VAD_FRAME_SAMPLES};
 use eon_voice::ring::{PcmConsumer, pcm_ring};
 use eon_voice::tts::{self, KokoroTts};
@@ -41,14 +44,17 @@ pub(super) fn session(models: &Path) -> Result<()> {
     }
     let mut vad = SileroVad::load(models.join("vad/silero_vad.onnx"))?;
     let mut asr = ZipformerAsr::load(models.join("asr"))?;
-    let cache = BridgeCache::warm(
-        &mut KokoroTts::load(
-            models.join("tts/release/kokoro-v1.0.int8.onnx"),
-            models.join("tts/voices/af_heart.bin"),
-        )?,
-        1.,
+    let mut tts = KokoroTts::load(
+        models.join("tts/release/kokoro-v1.0.int8.onnx"),
+        models.join("tts/voices/af_heart.bin"),
     )?;
-    serve(&mut io::stdin().lock(), &mut io::stdout().lock(), |bytes| {
+    let mut output = io::stdout().lock();
+    let cache = startup_cache(
+        BridgeCache::measure_warmup(&mut tts, 1., tts::SAMPLE_RATE_HZ),
+        &mut output,
+    )?;
+    drop(tts);
+    serve(&mut io::stdin().lock(), &mut output, |bytes| {
         let (last_active, mix) = split_tracks(bytes);
         // Isolate render state and any unconsumed tail; never open CPAL.
         let (mut tx, mut rx) = pcm_ring(1 << 19);
@@ -77,8 +83,20 @@ pub(super) fn session(models: &Path) -> Result<()> {
     })
 }
 
+fn startup_cache(warmup: EonResult<BridgeWarmup>, output: &mut impl Write) -> Result<BridgeCache> {
+    match warmup? {
+        BridgeWarmup::Ready(cache) => Ok(cache),
+        BridgeWarmup::SilentBridge => {
+            output.write_all(b"{\"startup_failure\":\"silent_bridge\"}\n")?;
+            output.flush()?;
+            Err("silent Kokoro bridge during startup".into())
+        }
+    }
+}
+
 fn serve(input: &mut impl Read, output: &mut impl Write, mut run: impl FnMut(&[u8]) -> Result<Row>) -> Result<()> {
     let mut bytes = Vec::new();
+    let mut take = 0u64;
     loop {
         let mut header = [0; 4];
         input.read_exact(&mut header)?;
@@ -91,11 +109,12 @@ fn serve(input: &mut impl Read, output: &mut impl Write, mut run: impl FnMut(&[u
         }
         bytes.resize(frames as usize * PAIR_BYTES, 0);
         input.read_exact(&mut bytes)?;
+        take = take.checked_add(1).ok_or("too many takes in session")?;
         let row = run(&bytes)?;
         serde_json::to_writer(
             &mut *output,
             &serde_json::json!({
-                "status": row.status, "last_active_end_sample": row.last_active_end_sample,
+                "take": take, "status": row.status, "last_active_end_sample": row.last_active_end_sample,
                 "endpoint_sample": row.endpoint_sample, "latency_us": row.latency_us,
             }),
         )?;
@@ -394,6 +413,17 @@ mod tests {
     }
 
     #[test]
+    fn startup_marker_requires_the_measured_silent_variant_not_error_text() {
+        let mut output = Vec::new();
+        // Even a regular model error with identical wording isn't evidence.
+        let failure = eon_primitives::EonError::ValidationError("Kokoro returned a silent bridge".into());
+        assert!(startup_cache(Err(failure), &mut output).is_err());
+        assert!(output.is_empty());
+        assert!(startup_cache(Ok(BridgeWarmup::SilentBridge), &mut output).is_err());
+        assert_eq!(output, b"{\"startup_failure\":\"silent_bridge\"}\n");
+    }
+
+    #[test]
     fn framing_is_bounded_complete_ordered_and_has_no_startup_or_termination_row() -> Result<()> {
         use serde_json::{Value, json};
         let mut wire = Vec::new();
@@ -423,9 +453,9 @@ mod tests {
         assert_eq!(
             lines,
             [
-                json!({"status":"no_reply","last_active_end_sample":null,"endpoint_sample":null,"latency_us":null}),
-                json!({"status":"no_input_activity","last_active_end_sample":null,"endpoint_sample":1,"latency_us":null}),
-                json!({"status":"no_reply","last_active_end_sample":1,"endpoint_sample":1,"latency_us":null}),
+                json!({"take":1,"status":"no_reply","last_active_end_sample":null,"endpoint_sample":null,"latency_us":null}),
+                json!({"take":2,"status":"no_input_activity","last_active_end_sample":null,"endpoint_sample":1,"latency_us":null}),
+                json!({"take":3,"status":"no_reply","last_active_end_sample":1,"endpoint_sample":1,"latency_us":null}),
             ]
         );
         for mut bad in [&[1, 0][..], &[1, 0, 0, 0, 1, 2, 3], &(MAX_FRAMES + 1).to_le_bytes()] {

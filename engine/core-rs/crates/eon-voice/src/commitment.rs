@@ -37,6 +37,13 @@ pub struct BridgeCache {
     rate: u32,
 }
 
+/// A silent inference has no usable cache. Model, frontend and conversion
+/// failures remain errors and are not evidence of a silent waveform.
+pub enum BridgeWarmup {
+    Ready(BridgeCache),
+    SilentBridge,
+}
+
 impl BridgeCache {
     /// Run once during initialization, not on the turn/latency measurement path.
     pub fn warm(tts: &mut KokoroTts, speed: f32) -> EonResult<Self> {
@@ -45,16 +52,26 @@ impl BridgeCache {
 
     /// Convert bridges at initialization, never on a prefix request or in a device callback.
     pub fn warm_for_output(tts: &mut KokoroTts, speed: f32, rate: u32) -> EonResult<Self> {
+        match Self::measure_warmup(tts, speed, rate)? {
+            BridgeWarmup::Ready(cache) => Ok(cache),
+            BridgeWarmup::SilentBridge => Err(EonError::ValidationError("Kokoro returned a silent bridge".into())),
+        }
+    }
+
+    pub fn measure_warmup(tts: &mut KokoroTts, speed: f32, rate: u32) -> EonResult<BridgeWarmup> {
         check_rate(rate)?;
         let mut pcm = std::array::from_fn(|_| Arc::default());
         for (samples, text) in pcm
             .iter_mut()
             .zip(["Affirmative.", "Report:", "Notice:", "Negative.", "Proposal:"])
         {
-            let wave = prepare_bridge(tts.synthesize(text, speed)?)?;
+            // synthesize validates nonempty, finite model output before this check.
+            let Some(wave) = prepare_bridge(tts.synthesize(text, speed)?) else {
+                return Ok(BridgeWarmup::SilentBridge);
+            };
             *samples = device_pcm(wave, rate)?.into();
         }
-        Ok(Self { pcm, rate })
+        Ok(BridgeWarmup::Ready(Self { pcm, rate }))
     }
 }
 
@@ -71,18 +88,15 @@ fn device_pcm(samples: Vec<f32>, rate: u32) -> EonResult<Vec<f32>> {
 
 // Kokoro can pad a short prefix with hundreds of milliseconds of near-silence. Strip only
 // the leading pad, retaining 20 ms before the first -60 dBFS sample for the initial consonant.
-fn prepare_bridge(mut pcm: Vec<f32>) -> EonResult<Vec<f32>> {
-    let onset = pcm
-        .iter()
-        .position(|s| s.abs() >= 0.001)
-        .ok_or_else(|| EonError::ValidationError("Kokoro returned a silent bridge".into()))?;
+fn prepare_bridge(mut pcm: Vec<f32>) -> Option<Vec<f32>> {
+    let onset = pcm.iter().position(|s| s.abs() >= 0.001)?;
     let keep_from = onset.saturating_sub(SAMPLE_RATE_HZ as usize / 50);
     pcm.drain(..keep_from);
     let fade = (15 * SAMPLE_RATE_HZ as usize / 1000).min(pcm.len());
     for (i, sample) in pcm.iter_mut().rev().take(fade).enumerate() {
         *sample *= 0.5 - 0.5 * (std::f32::consts::PI * i as f32 / fade as f32).cos();
     }
-    Ok(pcm)
+    Some(pcm)
 }
 
 pub struct CommitmentGate {
@@ -342,7 +356,7 @@ mod commitment_gate_tests {
         assert_eq!(prepared.len(), 480 + 1600);
         assert_eq!(&prepared[478..482], &[0.0001, 0.0001, 0.4, 0.4]);
         assert_eq!(*prepared.last().unwrap(), 0.0);
-        assert!(prepare_bridge(vec![0.0; 1024]).is_err());
+        assert!(prepare_bridge(vec![0.0; 1024]).is_none());
     }
 
     #[test]

@@ -362,7 +362,7 @@ Set `EON_PHYSICAL_SESSION` to the absolute path of the authorized session **only
 
 ### 3.8 Run the voice and combined gates without audio hardware
 
-Use a Linux host with the CPU ONNX Runtime and native build prerequisites from §3.3, `espeak-ng`, `flac`, and the repair toolchain from §3.6. From the checkout, provision the locked inputs once and build the two binaries. Keep the SenseVoice release archive in the downloads cache: its Korean, Chinese and Japanese recordings supply the competing speech.
+Use a Linux host with the CPU ONNX Runtime and native build prerequisites from §3.3, `espeak-ng`, `flac`, and the repair toolchain from §3.6. From the checkout, provision the locked inputs once and build the repair tool. The timing runner builds the release responder offline, launches the executable identified by Cargo and records its SHA-256. Keep the SenseVoice release archive in the downloads cache: its Korean, Chinese and Japanese recordings supply the competing speech.
 
 ```bash
 R=$(git rev-parse --show-toplevel)
@@ -373,8 +373,7 @@ python3 "$R/scripts/download_models.py" --ids silero-vad-v5 wespeaker-resnet34 \
   voice-test-librispeech-dev-clean voice-test-sensevoice-en voice-test-zipformer-0
 cd "$R/engine/core-rs"
 cargo fetch --locked
-cargo build --locked --release -p eon-voice --bin eon-rig-turn
-cargo build --locked -p eon-cyber --no-default-features --bin eon-repair-edit
+cargo build --locked --target-dir "$R/engine/core-rs/target" -p eon-cyber --no-default-features --bin eon-repair-edit
 umask 077
 TMPDIR=/tmp python3 -B "$R/scripts/eval/acceptance.py" --software-only
 ```

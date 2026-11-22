@@ -1,9 +1,11 @@
 """Fixed recorded inputs for the software render benchmark. No devices or network."""
 
+import argparse
 from array import array
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import signal
 import struct
@@ -21,7 +23,6 @@ TAIL = RATE * 2
 SCENES = ("clean", "babble-0db", "traffic-0db", "tv-0db")
 CORPUS = "voice-test-librispeech-dev-clean"
 MEMBER = re.compile(r"LibriSpeech/dev-clean/(\d+)/(\d+)/(\1-\2-\d+)\.flac")
-NATIVE = duplex.ROOT / "engine/core-rs/target/release/eon-rig-turn"
 MODELS = {
     "silero-vad-v5": "vad/silero_vad.onnx",
     "zipformer-en-2023-06-26-encoder-int8": "asr/encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx",
@@ -31,7 +32,7 @@ MODELS = {
     "kokoro-v1.0-release-int8": "tts/release/kokoro-v1.0.int8.onnx",
     "kokoro-v1.0-voice-af_heart": "tts/voices/af_heart.bin",
 }
-ROW_KEYS = {"status", "last_active_end_sample", "endpoint_sample", "latency_us"}
+ROW_KEYS = {"take", "status", "last_active_end_sample", "endpoint_sample", "latency_us"}
 INPUT_ERRORS = duplex.INPUT_ERRORS + (KeyError, subprocess.SubprocessError)
 
 
@@ -151,8 +152,7 @@ def write_batch(file, models):
     return inventory
 
 
-def observation(line, take):
-    row = json.loads(line)
+def observation(row, take):
     if not isinstance(row, dict) or row.keys() != ROW_KEYS:
         raise ValueError("unexpected responder schema")
     status, last, end, us = (row[k] for k in ("status", "last_active_end_sample", "endpoint_sample", "latency_us"))
@@ -161,12 +161,15 @@ def observation(line, take):
             raise ValueError("invalid responder sample offset")
     if last != take["dry_end"]:
         raise ValueError("responder reference differs from supplied dry track")
+    if end is not None and end % 512:
+        raise ValueError("endpoint is not on a VAD frame boundary")
     if status == "ok":
         if end is None or last is None or end < last or type(us) is not int or us <= 0:
             raise ValueError("invalid render measurement")
-        # A paced decision cannot precede receipt of the endpoint sample.
-        if us * RATE < (end - last + RATE // 1000) * 1_000_000:
-            raise ValueError("render measurement precedes the endpoint")
+        # Start of the last active input bin to the endpoint, plus the first
+        # 1 ms sink tick. Rendering cannot start before the endpoint.
+        if us * RATE < (end - last + 2 * (RATE // 1000)) * 1_000_000:
+            raise ValueError("render measurement precedes the first possible sink tick")
     elif us is not None or not (
             status == "no_reply"
             or status == "no_input_activity" and last is None and end is not None
@@ -180,29 +183,43 @@ def evaluate(inventory, output, native_error=None):
     if ([t["scene"] for t in inventory] != ["silence", *(SCENES[i % len(SCENES)] for i in range(COUNT))]
             or len({t["id"] for t in inventory}) != COUNT + 1):
         raise ValueError("need one silent control and the complete distinct scene inventory")
-    rows = []
-    failed = False
     lines = output.splitlines()
-    protocol_error = None
-    for i, take in enumerate(inventory):
-        if not protocol_error:
+    indexed, seen, errors = {}, set(), []
+    silent_bridge = False
+    for line in lines:
+        try:
+            obj = json.loads(line)
+            if obj == {"startup_failure": "silent_bridge"} and len(lines) == 1 and native_error:
+                silent_bridge = True
+                break
+            n = obj.get("take") if isinstance(obj, dict) else None
+            if type(n) is not int or not 1 <= n <= len(inventory):
+                raise ValueError("invalid take ordinal")
+            if n in seen:
+                indexed.pop(n, None)
+                raise ValueError(f"duplicate take {n}")
+            seen.add(n)
             try:
-                if i >= len(lines):
-                    raise ValueError("missing responder row")
-                row = observation(lines[i], take)
+                indexed[n] = observation(obj, inventory[n - 1])
             except ValueError as error:
-                protocol_error = f"take {i + 1}: {error}"
-        if protocol_error:
-            rows.append({**take, "status": "unavailable", "latency_us": None})
+                raise ValueError(f"take {n}: {error}") from error
+        except ValueError as error:
+            errors.append(str(error))
+    if len(indexed) != len(inventory):
+        errors.append(f"missing valid observations for {len(inventory) - len(indexed)} takes")
+    rows = []
+    failed = silent_bridge
+    for n, take in enumerate(inventory, 1):
+        if n not in indexed:
+            rows.append({**take, "take": n, "status": "unavailable", "latency_us": None})
             continue
+        row = indexed[n]
         silent = take["scene"] == "silence"
         if silent:
             failed |= not (row["status"] == "no_reply" and row["endpoint_sample"] is None)
         else:
             failed |= row["status"] != "ok"
         rows.append({**take, **row})
-    if len(lines) > len(rows):
-        protocol_error = "unexpected trailing responder rows"
     measurements = [r for r in rows if r["scene"] != "silence"]
     times = sorted(r["latency_us"] for r in measurements if r["status"] == "ok")
     p50 = p99 = None
@@ -221,22 +238,37 @@ def evaluate(inventory, output, native_error=None):
         scenes[name] = {"takes": len(trials), "misses": sum(r["status"] not in ("ok", "unavailable") for r in trials),
                         "unavailable": sum(r["status"] == "unavailable" for r in trials),
                         "max_us": max(ok) if len(ok) == len(trials) and ok else None}
-    reason = "; ".join(filter(None, (native_error, protocol_error)))
+    reason = "; ".join(filter(None, (native_error, *errors[:4])))
     status = "failed" if failed else "unavailable" if reason or p99 is None else "passed"
     return {"status": status, "clock": "paced-input-to-software-render", "p50_us": p50, "p99_us": p99,
-            "scenes": scenes, "takes": rows, **({"reason": reason} if reason else {})}
+            "scenes": scenes, "takes": rows, **({"reason": reason} if reason else {}),
+            **({"startup_failure": "silent_bridge"} if silent_bridge else {})}
+
+
+def build_responder():
+    # Use Cargo's artifact for this source and configuration, not a possibly
+    # stale binary left in target/release by another build or target directory.
+    build = subprocess.run(["cargo", "build", "--offline", "--locked", "--release", "-p", "eon-voice",
+                            "--bin", "eon-rig-turn", "--message-format=json-render-diagnostics"],
+                           cwd=duplex.ROOT / "engine/core-rs", stdout=subprocess.PIPE, check=True, timeout=45 * 60)
+    artifacts = [r["executable"] for r in map(json.loads, build.stdout.splitlines())
+                 if r.get("reason") == "compiler-artifact" and r["target"]["name"] == "eon-rig-turn" and r.get("executable")]
+    if len(artifacts) != 1 or not Path(artifacts[0]).is_absolute():
+        raise ValueError("Cargo did not identify the release responder executable")
+    return Path(artifacts[0])
 
 
 def measure():
     try:
-        if not os.access(NATIVE, os.X_OK):
-            raise ValueError(f"build the release responder: {NATIVE}")
         models = duplex.locked_models()
         if duplex.verified_paths(models, MODELS) != {k: duplex.MODELS / v for k, v in MODELS.items()}:
             raise ValueError("verified model paths differ from responder paths")
+        native = build_responder()
+        with native.open("rb") as binary:
+            digest = hashlib.file_digest(binary, "sha256").hexdigest()
         with tempfile.TemporaryFile() as batch, tempfile.TemporaryFile() as output:
             inventory = write_batch(batch, models)
-            with subprocess.Popen([NATIVE, "--software-timing-session", duplex.MODELS],
+            with subprocess.Popen([native, "--software-timing-session", duplex.MODELS],
                                   stdin=batch, stdout=output, start_new_session=True) as proc:
                 try:
                     code = proc.wait(timeout=45 * 60)
@@ -254,13 +286,18 @@ def measure():
             data = output.read(128 * 1024 + 1)
             if len(data) > 128 * 1024:
                 reason = "responder output exceeded limit"
-            return evaluate(inventory, data, reason)
+            return {**evaluate(inventory, data, reason), "responder": str(native), "responder_sha256": digest}
     except INPUT_ERRORS as error:
         return {"status": "unavailable", "clock": "paced-input-to-software-render", "p50_us": None,
                 "p99_us": None, "reason": str(error)}
 
 
-if __name__ == "__main__":
+def main(argv=None):
+    argparse.ArgumentParser(description=__doc__, allow_abbrev=False).parse_args(argv)
     result = measure()
     print(json.dumps(result, indent=2))
-    raise SystemExit({"passed": 0, "failed": 1, "unavailable": 2}[result["status"]])
+    return {"passed": 0, "failed": 1, "unavailable": 2}[result["status"]]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
