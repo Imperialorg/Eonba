@@ -11,6 +11,7 @@ import sys
 import noisy_duplex
 import physical_session
 import polyglot_repair
+import software_turns
 import speaker_handoffs
 from repair.processes import BenchError, private_workspace
 
@@ -58,11 +59,11 @@ def kernel_checks():
     return group(REPLAY), group(DEFENSE)
 
 
-def speaker_checks():
+def speaker_checks(policy=noisy_duplex.BASELINE_MODEL):
     rows = []
     reason = None
     try:
-        rows.extend(noisy_duplex.run_conditions())
+        rows.extend(noisy_duplex.run_conditions(policy))
     except noisy_duplex.INPUT_ERRORS as error:
         reason = str(error)
     states = [noisy_duplex.condition_status(row) for row in rows]
@@ -70,7 +71,7 @@ def speaker_checks():
         states.append("unavailable")
     handoffs = []
     try:
-        handoffs.extend(speaker_handoffs.run_pairs())
+        handoffs.extend(speaker_handoffs.run_pairs(policy))
     except speaker_handoffs.INPUT_ERRORS as error:
         handoff_error = str(error)
     else:
@@ -78,7 +79,7 @@ def speaker_checks():
     states.extend(pair["status"] for pair in handoffs)
     if handoff_error is not None or [p["pair"] for p in handoffs] != speaker_handoffs.EXPECTED:
         states.append("unavailable")
-    report = {"status": verdict(states), "conditions": rows, "active_handoffs": handoffs}
+    report = {"status": verdict(states), "speaker_policy": policy, "conditions": rows, "active_handoffs": handoffs}
     if handoff_error is not None:
         report["handoff_input_error"] = handoff_error
     if reason is not None:
@@ -86,7 +87,7 @@ def speaker_checks():
     return report
 
 
-def run(directory):
+def common_gates(policy=noisy_duplex.BASELINE_MODEL):
     gates = {}
     try:
         gates["replay"], gates["defensive"] = kernel_checks()
@@ -97,7 +98,12 @@ def run(directory):
         gates["repair"] = {**repair, "status": measured(repair["cases"] == 50 and repair["passed"])}
     except (BenchError, OSError, ValueError, subprocess.SubprocessError) as error:
         gates["repair"] = {"status": "unavailable", "reason": str(error)}
-    gates["speaker_decisions"] = speaker_checks()
+    gates["speaker_decisions"] = speaker_checks(policy)
+    return gates
+
+
+def run(directory):
+    gates = common_gates()
     try:
         evidence = physical_session.measure(directory)
         device = evidence["task_10_2"]
@@ -116,12 +122,28 @@ def run(directory):
     return {"physical_manifest_sha256": session, "task_10_2": device, "task_10_6": {"status": suite, "gates": gates}}
 
 
+def software_run(policy):
+    gates = common_gates(policy)
+    gates["software_render"] = software_turns.measure()
+    return {"scope": "software-only", "status": verdict(g["status"] for g in gates.values()), "gates": gates}
+
+
 def main(argv=None):
     cli = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    cli.add_argument("--physical-session", type=Path, help="directory of authorized original captures; no devices")
-    result = run(cli.parse_args(argv).physical_session)
+    scope = cli.add_mutually_exclusive_group()
+    scope.add_argument("--physical-session", type=Path, help="directory of authorized original captures; no devices")
+    scope.add_argument("--software-only", action="store_true", help="measure recorded input to software render, not acoustics")
+    cli.add_argument("--speaker-policy", choices=noisy_duplex.POLICIES, help="explicit software-only speaker comparison")
+    args = cli.parse_args(argv)
+    if args.speaker_policy and not args.software_only:
+        cli.error("--speaker-policy requires --software-only")
+    if args.software_only:
+        result = software_run(args.speaker_policy or noisy_duplex.BASELINE_MODEL)
+        status = result["status"]
+    else:
+        result = run(args.physical_session)
+        status = verdict(result[t]["status"] for t in ("task_10_2", "task_10_6"))
     print(json.dumps(result, indent=2))
-    status = verdict(result[t]["status"] for t in ("task_10_2", "task_10_6"))
     return {"passed": 0, "failed": 1, "unavailable": 2}[status]
 
 

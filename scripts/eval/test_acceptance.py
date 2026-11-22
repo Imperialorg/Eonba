@@ -373,6 +373,20 @@ class AcceptanceTests(unittest.TestCase):
         self.assertEqual(suite["gates"]["repair"]["status"], "unavailable")
         self.assertIsNone(suite["gates"]["noisy_physical_ttfa"]["scenes"])
 
+    def test_software_verdict_never_calls_acoustic_analyzer_or_returns_physical_task_claims(self):
+        with (patch.object(bench, "common_gates", side_effect=lambda p: {"speaker_decisions": {"status": "passed"}}) as common,
+              patch.object(physical, "measure", side_effect=AssertionError),
+              patch.object(bench.software_turns, "measure", return_value={"status": "failed"})):
+            result = bench.software_run(bench.noisy_duplex.AGREEMENT)
+            common.assert_called_once_with(bench.noisy_duplex.AGREEMENT)
+        self.assertEqual(set(result), {"scope", "status", "gates"})
+        self.assertEqual((result["scope"], result["status"]), ("software-only", "failed"))
+
+    def test_never_combine_physical_sessions_with_software_render_or_experimental_policy(self):
+        for argv in (["--software-only", "--physical-session", "/unused"], ["--speaker-policy", bench.noisy_duplex.AGREEMENT]):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                bench.main(argv)
+
     def test_every_gate_must_pass_and_200_ms_is_not_below_200(self):
         checked = {"status": "passed"}
         physical_result = {"task_10_2": {"passed": True}, "manifest_sha256": "test", "noisy_scenes": {

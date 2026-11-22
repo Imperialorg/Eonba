@@ -360,6 +360,31 @@ An unshipped two-encoder experiment retained the ordinary short WeSpeaker pass. 
 
 Set `EON_PHYSICAL_SESSION` to the absolute path of the authorized session **only** when the independent evidence in §3.3 exists. When invoking the Python runner directly, use `--physical-session /path/to/authorized-session` instead. Without it, acoustic percentiles and noisy TTFA remain unavailable; the runner never opens devices or substitutes decision time. JSON goes to stdout and tool diagnostics to stderr. Python exit 0 means both tasks passed, 1 means a measured check failed, and 2 means evidence is unavailable with no measured failure. Both nonzero results fail the Cargo target. Missing evidence is reported even alongside a failure.
 
+### 3.8 Run the voice and combined gates without audio hardware
+
+Use a Linux host with the CPU ONNX Runtime and native build prerequisites from §3.3, `espeak-ng`, `flac`, and the repair toolchain from §3.6. From the checkout, provision the locked inputs once and build the two binaries. Keep the SenseVoice release archive in the downloads cache: its Korean, Chinese and Japanese recordings supply the competing speech.
+
+```bash
+R=$(git rev-parse --show-toplevel)
+python3 "$R/scripts/download_models.py" --ids silero-vad-v5 wespeaker-resnet34 \
+  zipformer-en-2023-06-26-encoder-int8 zipformer-en-2023-06-26-decoder \
+  zipformer-en-2023-06-26-joiner-int8 zipformer-en-2023-06-26-tokens \
+  kokoro-v1.0-release-int8 kokoro-v1.0-voice-af_heart \
+  voice-test-librispeech-dev-clean voice-test-sensevoice-en voice-test-zipformer-0
+cd "$R/engine/core-rs"
+cargo fetch --locked
+cargo build --locked --release -p eon-voice --bin eon-rig-turn
+cargo build --locked -p eon-cyber --no-default-features --bin eon-repair-edit
+umask 077
+TMPDIR=/tmp python3 -B "$R/scripts/eval/acceptance.py" --software-only
+```
+
+For timing alone, run `python3 -B "$R/scripts/eval/software_turns.py"`. Both commands use the same batch: a separate silent negative, then 100 distinct complete LibriSpeech dev-clean utterances between 1 and 12 seconds. Selection takes the lowest SHA-256 ranks of the utterance IDs, before inference. In that order 25 takes each receive clean, babble, traffic or TV conditions. Gain is set and checked at 0 dB over the recorded utterance. The background continues through the 200 ms lead and two-second tail; it does not stop when the speaker does.
+
+Only the mixture reaches Silero and Zipformer. A monotonic clock paces input; the dry reference independently marks the last active 1 ms window. The responder must reach its semantic endpoint, produce a nonempty final transcript, and render a warmed Kokoro prefix. The stop time is the observed end of the first of five sustained 1 ms output bins at the software sink (both activity thresholds: 100 RMS in PCM16 units). Results include inference and scheduling time, not microphone, speaker or acoustic delay. A reply before the last foreground, a missing reply, or a silent prefix fails the take. No percentile is calculated from survivors.
+
+The software gate requires nearest-rank P50 < 170,000 µs, P99 < 280,000 µs and every noisy reply < 200,000 µs. It keeps measured failures even if another component is unavailable. The combined command adds replay, source-only defensive regression, repair, fixed speaker scenes and active speaker handoffs. It uses shipping WeSpeaker by default. To compare the two-encoder policy, also provision `camplusplus-zh-en-advanced` and pass `--speaker-policy wespeaker-campp-agreement`. Neither policy can turn software render timing into a physical acceptance result.
+
 ## 4. Master Phased Execution Playbook (Order of Implementation)
 
 Follow this dependency-ordered sequence. Do **not** skip ahead to higher-level crates until the lower-level crate compiles cleanly (`cargo clippy -- -D warnings`) and passes its gate tests:

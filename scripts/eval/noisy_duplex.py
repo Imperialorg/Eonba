@@ -179,20 +179,23 @@ def tv_dialogue(length, tracks):
     return bed
 
 
-def mix_at_zero_db(samples, noise):
-    # Whole-clip energy, silences included. Measure from the final PCM16
-    # residual relative to the headroom-scaled clean signal, before render echo.
+def mix_at_zero_db(samples, noise, *, interval=None):
+    # Whole-clip energy by default, silences included. Measure from the final
+    # PCM16 residual over the same interval used to set background gain.
     if len(samples) != len(noise):
         raise ValueError("foreground and background lengths differ")
-    signal_power = sum(x * x for x in samples)
-    noise_power = sum(x * x for x in noise)
+    start, end = (0, len(samples)) if interval is None else interval
+    if not 0 <= start < end <= len(samples):
+        raise ValueError("invalid SNR measurement interval")
+    signal_power = sum(x * x for x in samples[start:end])
+    noise_power = sum(x * x for x in noise[start:end])
     if not signal_power or not noise_power:
         raise ValueError("0 dB SNR needs non-silent foreground and background")
     noise_gain = math.sqrt(signal_power / noise_power)
     mixed = [x + n * noise_gain for x, n in zip(samples, noise)]
     gain = min(1.0, 32_767 / max(1.0, max(map(abs, mixed))))
     output = tuple(round(gain * x) for x in mixed)
-    residual_power = sum((y - gain * x) ** 2 for x, y in zip(samples, output))
+    residual_power = sum((y - gain * x) ** 2 for x, y in zip(samples[start:end], output[start:end]))
     snr_db = 10 * math.log10(gain * gain * signal_power / residual_power)
     if abs(snr_db) > 0.01:
         raise ValueError(f"quantized mixture misses 0 dB target: {snr_db:g}")
