@@ -103,6 +103,25 @@ async fn control_rtt_uses_an_existing_paired_link_and_does_not_elect_a_speaker()
 }
 
 #[tokio::test]
+async fn control_reply_does_not_wait_for_the_local_election_to_finish() {
+    let (_left, _right, a, mut b) = pair().await;
+    let responder = b.control_responder();
+    {
+        let mut election = std::pin::pin!(b.arbitrate(1, BASE));
+        // Send the local claim, but don't supply a peer claim or drive this
+        // election to completion until the independent stream reply arrives.
+        assert!(
+            futures_lite::future::poll_once(election.as_mut())
+                .await
+                .is_none()
+        );
+        tokio::try_join!(a.measure_control_rtt(), responder.answer_control_probe()).unwrap();
+        assert!(election.await.unwrap().is_none());
+    }
+    assert!(!b.play_if_leader(1, || panic!("a probe is not a claim")));
+}
+
+#[tokio::test]
 async fn spatial_election_tests_simultaneous_claims_tie_stick_then_handoff_with_one_playback_sink()
 {
     let (left, right, mut a, mut b) = pair().await;

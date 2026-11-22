@@ -257,13 +257,13 @@ The security work in this roadmap is defensive: inspect authorized code, depende
 
 ## Phase 8: Distributed Networking Mesh (Engine Optimized for Networking)
 
-- [ ] **Task 8.1: Multiplexed P2P QUIC Transport & 15ms Spatial Election Protocol**
+- [x] **Task 8.1: Multiplexed P2P QUIC Transport & 15ms Spatial Election Protocol**
   - **Crate**: `eon-mesh`
   - **Files**: `src/transport/quic.rs`, `src/transport/discovery.rs`, `src/transport/security.rs`, `src/transport/spatial.rs`
   - **Requirements**: Zero-config mDNS peer discovery, mutual TLS 1.3 encryption, sub-10ms RPC latency across local LAN. 15ms Spatial Arbitration Protocol ("Single Mind, Multiple Bodies") broadcasting `SensoryClaim` over Class 0 QUIC datagrams, calculating deterministic multi-factor arbitration scores (SNR, screen unlock, HID recency, speaker ID confidence), and electing a single I/O leader while enforcing follower speaker suppression.
   - **Unit Tests**: `cargo test -p eon-mesh quic_tests`, `spatial_election_tests`.
-  - **Verified on a two-node Linux virtual LAN**: Independently pinned peers discovered one another over mDNS, agreed on the leader and suppressed follower playback. Three consecutive runs passed the strict 100-RPC gate; maxima were 8.502, 0.566 and 0.363 ms. One earlier run missed at 10.062 ms. This measures an established connection on isolated veth interfaces, not connection setup, a physical Wi-Fi link or a hard real-time guarantee.
-  - **Reopened on CI** (`2d093bc`): The [paired LAN gate](https://github.com/Imperialorg/Eonba/actions/runs/44989065768/job/137110093438) measured p50 0.467 ms, p95 0.545 ms and maximum 11.642 ms. All 100 must finish in less than 10 ms. The passing component tests do not override that miss.
+  - **Deadline regression**: The [paired LAN run on `2d093bc`](https://github.com/Imperialorg/Eonba/actions/runs/44989065768/job/137110093438) failed: p50 0.467 ms, p95 0.545 ms, maximum 11.642 ms. Local tracing showed that the first RPC could queue behind the responder's remaining election window. The CI log did not identify which RPC missed.
+  - **Verified after the fix**: On an established, mutually pinned link, the peer can now answer control streams while its datagram election is running. Twelve consecutive `bash scripts/test_paired_lan.sh` runs passed discovery, election, follower suppression and all 1,200 RPCs, including the first on every link. Maximum 0.387 ms; the limit remains strictly below 10 ms for every RPC. This is a two-node Linux virtual LAN, not physical Wi-Fi.
 
 - [x] **Task 8.2: Split-Inference Coordinator**
   - **Crate**: `eon-mesh`

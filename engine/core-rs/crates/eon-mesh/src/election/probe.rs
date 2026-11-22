@@ -4,7 +4,7 @@
 use super::PairedElection;
 use crate::qos::TrafficClass;
 use eon_primitives::{EonError, EonResult};
-use iroh::endpoint::ConnectionError;
+use iroh::endpoint::{Connection, ConnectionError};
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
 
@@ -23,7 +23,16 @@ fn unavailable(_: impl std::fmt::Display) -> EonError {
     probe_error("control stream unavailable")
 }
 
+/// Explicit fixed-probe service for an already authenticated pair. No task is
+/// started; the caller can poll it alongside the independent datagram election.
+pub struct ControlResponder(Connection);
+
 impl PairedElection {
+    /// Service control streams without borrowing the mutable election state.
+    pub fn control_responder(&self) -> ControlResponder {
+        ControlResponder(self.link.connection.clone())
+    }
+
     /// Local time from opening a fresh bidirectional stream to receiving the full
     /// fixed reply and its FIN. Excludes mDNS, pairing and QUIC connection setup.
     pub async fn measure_control_rtt(&self) -> EonResult<Duration> {
@@ -54,13 +63,27 @@ impl PairedElection {
     /// Queue the fixed reply and FIN to one exact request. Keep the link open for
     /// the next request or the peer's close; FIN alone is not proof of delivery.
     pub async fn answer_control_probe(&self) -> EonResult<()> {
+        self.control_responder().answer_control_probe().await
+    }
+
+    /// At the end of a probe session, the reader of the last reply closes first.
+    /// Wait once here, not for a (potentially delayed) QUIC ACK after each response.
+    pub async fn wait_for_control_peer_close(&self) -> EonResult<()> {
+        match timeout(BUDGET, self.link.connection.closed()).await {
+            Ok(ConnectionError::ApplicationClosed(close)) if close.error_code == 0u32.into() => {
+                Ok(())
+            }
+            Ok(_) => Err(probe_error("unexpected control peer closure")),
+            Err(_) => Err(probe_error("control peer close timed out")),
+        }
+    }
+}
+
+impl ControlResponder {
+    /// Answer one exact request, without waiting on or changing a local election.
+    pub async fn answer_control_probe(&self) -> EonResult<()> {
         timeout(BUDGET, async {
-            let (mut send, mut receive) = self
-                .link
-                .connection
-                .accept_bi()
-                .await
-                .map_err(unavailable)?;
+            let (mut send, mut receive) = self.0.accept_bi().await.map_err(unavailable)?;
             if receive
                 .read_to_end(REQUEST.len())
                 .await
@@ -79,17 +102,5 @@ impl PairedElection {
         })
         .await
         .map_err(|_| probe_error("control probe responder timed out"))?
-    }
-
-    /// At the end of a probe session, the reader of the last reply closes first.
-    /// Wait once here, not for a (potentially delayed) QUIC ACK after each response.
-    pub async fn wait_for_control_peer_close(&self) -> EonResult<()> {
-        match timeout(BUDGET, self.link.connection.closed()).await {
-            Ok(ConnectionError::ApplicationClosed(close)) if close.error_code == 0u32.into() => {
-                Ok(())
-            }
-            Ok(_) => Err(probe_error("unexpected control peer closure")),
-            Err(_) => Err(probe_error("control peer close timed out")),
-        }
     }
 }

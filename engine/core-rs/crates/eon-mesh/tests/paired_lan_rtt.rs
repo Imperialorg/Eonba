@@ -78,37 +78,50 @@ async fn established_trial(
         last_hid_activity_ms: u32::MAX,
         speaker_confidence_permille: 0,
     };
-    let (turn, result) = tokio::time::timeout(ELECTION_DEADLINE, async {
-        if initiator {
-            (1, link.arbitrate(1, claim).await.unwrap())
-        } else {
-            link.respond(|| claim).await.unwrap()
-        }
-    })
-    .await
-    .expect("paired election deadline");
-    assert_eq!(turn, 1);
-    let expected = if initiator { node.addr().id } else { peer };
-    assert_eq!(result.unwrap().node_id, expected.to_string());
-    assert_eq!(link.play_if_leader(turn, || {}), initiator);
-
-    let slowest = if initiator {
+    let responder = (!initiator).then(|| link.control_responder());
+    let elect = async {
+        let (turn, result) = tokio::time::timeout(ELECTION_DEADLINE, async {
+            if initiator {
+                (1, link.arbitrate(1, claim).await.unwrap())
+            } else {
+                link.respond(|| claim).await.unwrap()
+            }
+        })
+        .await
+        .expect("paired election deadline");
+        assert_eq!(turn, 1);
+        let expected = if initiator { node.addr().id } else { peer };
+        assert_eq!(result.unwrap().node_id, expected.to_string());
+        assert_eq!(link.play_if_leader(turn, || {}), initiator);
+    };
+    let slowest = if let Some(responder) = responder {
+        // Our claim can arrive later than the initiator's. Its first real RPC
+        // mustn't queue behind the remainder of our local election window.
+        tokio::join!(elect, async {
+            for _ in 0..TRIALS {
+                responder.answer_control_probe().await.unwrap();
+            }
+        });
+        link.wait_for_control_peer_close().await.unwrap();
+        None
+    } else {
+        elect.await;
         let mut rtts = Vec::with_capacity(TRIALS);
         for _ in 0..TRIALS {
             rtts.push(link.measure_control_rtt().await.unwrap());
         }
+        let first = rtts[0];
+        let (worst, _) = rtts.iter().enumerate().max_by_key(|(_, rtt)| *rtt).unwrap();
+        let late = rtts.iter().filter(|&&rtt| rtt >= MAX_RTT).count();
         rtts.sort_unstable();
         eprintln!(
-            "paired control RPC (n={TRIALS}): p50={:?} p95={:?} max={:?}",
-            rtts[49], rtts[94], rtts[99]
+            "paired control RPC (n={TRIALS}): p50={:?} p95={:?} max={:?} (RPC #{}) first={first:?} missed={late}",
+            rtts[49],
+            rtts[94],
+            rtts[99],
+            worst + 1
         );
         Some(rtts[TRIALS - 1])
-    } else {
-        for _ in 0..TRIALS {
-            link.answer_control_probe().await.unwrap();
-        }
-        link.wait_for_control_peer_close().await.unwrap();
-        None
     };
     // Close even if a measurement missed its target. Otherwise the responder
     // can report a peer timeout that obscures a completed but slow exchange.
