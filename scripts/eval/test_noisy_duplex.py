@@ -83,6 +83,13 @@ class ReportingTests(unittest.TestCase):
     verified = "recorded owner: verified after 500 ms of fixture audio\n"
     ok = "test result: ok. 1 passed; 0 failed; 0 ignored;"
 
+    def test_failed_owner_postcheck_requires_the_exact_native_failure(self):
+        marker = "recorded owner: checking decision, mute and audit\n"
+        failed = f"test {bench.TEST} ... FAILED\n"
+        for output, status in [(marker, "unavailable"), (failed, "unavailable"), (failed + marker, "failed")]:
+            row = bench.observations(self.rejected + output, 101)
+            self.assertEqual(bench.condition_status(row), status)
+
     def test_agreement_requires_both_pins_and_cannot_inherit_a_single_model_pass(self):
         with patch.object(bench, "verified_paths", return_value={
                 "silero-vad-v5": bench.MODELS / "vad/silero_vad.onnx",

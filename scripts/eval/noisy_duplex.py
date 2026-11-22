@@ -4,7 +4,8 @@ Requires the prepared speaker_e2e target, locked recordings, Silero and the
 selected speaker model. The two speech beds also need the cached, locked SenseVoice release
 archive. No downloads, devices, TTFA measurement or population error rates.
 JSONL on stdout; native failure details on stderr. Exit 0 only if every
-recorded speaker check passed; 1 for an unverified check, 2 for missing inputs.
+recorded speaker check passed; 1 for any measured failure, 2 for incomplete
+evidence when no failure was measured.
 """
 
 import argparse
@@ -232,6 +233,8 @@ def observations(output, returncode):
     missed = re.search(r"recorded owner: missed; (\d+) candidate embeddings rejected", output)
     false_interrupt = "recorded non-owner: interrupted playback" in output
     stale_interrupt = "recorded stale capture: interrupted playback" in output
+    postcheck_failed = (returncode not in (None, 0) and "recorded owner: checking decision, mute and audit" in output
+                        and f"test {TEST} ... FAILED" in output.splitlines())
     return {
         "native_exit_code": returncode,
         "duplex_check_passed": (returncode == 0 and rejected is not None and int(rejected[1]) > 0
@@ -242,6 +245,7 @@ def observations(output, returncode):
         "non_owner_interruptions": 1 if false_interrupt else (0 if rejected else None),
         "stale_capture_interrupted": True if stale_interrupt else (False if rejected else None),
         "owner_missed": True if missed else (False if decision else None),
+        "owner_postcheck_failed": True if postcheck_failed else (False if decision and returncode == 0 else None),
         "missed_owner_embeddings_rejected": int(missed[1]) if missed else None,
         "owner_decision_audio_ms": int(decision[1]) if decision and not missed else None,
         "ttfa_ms": None,
@@ -320,8 +324,8 @@ def run_conditions(speaker_model=BASELINE_MODEL):
 def condition_status(row):
     if row["duplex_check_passed"]:
         return "passed"
-    if (row["owner_missed"] or row["non_owner_interruptions"] or row["stale_capture_interrupted"]
-            or row["non_owner_embeddings_rejected"] == 0):
+    if (row["owner_missed"] or row["owner_postcheck_failed"] or row["non_owner_interruptions"]
+            or row["stale_capture_interrupted"] or row["non_owner_embeddings_rejected"] == 0):
         return "failed"
     return "unavailable"
 

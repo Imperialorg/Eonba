@@ -194,6 +194,8 @@ fn recorded_capture_and_render_rings_make_one_auditable_owner_decision() {
     }
     if verified_at.is_none() {
         eprintln!("recorded owner: missed; {} candidate embeddings rejected", reflex.rejected_candidates() - before_owner);
+    } else {
+        eprintln!("recorded owner: checking decision, mute and audit");
     }
     assert_eq!(decisions, 1);
     assert!(signal.is_muted());
