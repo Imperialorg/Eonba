@@ -19,10 +19,10 @@ internal class ControlsConsent(private val clock: () -> Long) {
     fun issue(source: Any, token: Any, timing: Boolean) =
         Ticket(source, token, timing, clock() + 5_000).also { current = it }
     fun pending() = current?.takeIf { clock() < it.until }
-    fun take(token: Any?, value: Int): Ticket? {
+    fun take(token: Any?): Ticket? {
         val ticket = pending()
         current = null
-        return ticket?.takeIf { it.token === token && value == (if (it.timing) 1 else 0) }
+        return ticket?.takeIf { it.token === token }
     }
     fun cancel(ticket: Ticket?) { if (current === ticket) current = null }
     fun reset() { current = null }
@@ -42,7 +42,6 @@ internal fun selectedAndUnlocked(context: Context): Boolean = try {
  * disabled for the lifetime of the binding, including during simultaneous foreign invocations. */
 internal object ControlsAssist {
     private const val KEY = "com.eon.assistant.REVIEW_CAPABILITY"
-    private const val VALUE = "com.eon.assistant.REVIEW_TIMING"
     private val consent = ControlsConsent(SystemClock::elapsedRealtime)
     private val main = Handler(Looper.getMainLooper())
     private var service: EonVoiceInteractionService? = null
@@ -69,12 +68,9 @@ internal object ControlsAssist {
         val ticket = consent.issue(source, token, timing)
         return try {
             check(owner.disabledShowContext and NO_ASSIST_CONTEXT == NO_ASSIST_CONTEXT)
-            // Android enforces current voice-service UID before dispatch; unlike Activity.showAssist,
-            // a racing role switch cannot redirect this bundle to another selected assistant.
-            owner.showSession(Bundle().apply {
-                putBinder(KEY, token)
-                putInt(VALUE, if (timing) 1 else 0)
-            }, 0) // Neither structure nor screenshot is requested, even for this one showing.
+            // Pass only a capability. The reviewed bit stays in process; the session checks
+            // the user and admin policy before reading it. Neither context flag is requested.
+            owner.showSession(Bundle().apply { putBinder(KEY, token) }, 0)
             main.postDelayed({ consent.cancel(ticket) }, 5_000)
             true
         } catch (_: RuntimeException) {
@@ -101,7 +97,7 @@ internal object ControlsAssist {
             return null // Never unpack ordinary app, gesture or data-bearing show arguments.
         }
         return try {
-            consent.take(args.getBinder(KEY), args.getInt(VALUE, -1))?.also { displayed = it }
+            consent.take(args.getBinder(KEY))?.also { displayed = it }
         } catch (_: RuntimeException) {
             consent.reset()
             null

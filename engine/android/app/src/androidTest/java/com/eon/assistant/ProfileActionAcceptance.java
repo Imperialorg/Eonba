@@ -4,11 +4,13 @@ import android.accessibilityservice.AccessibilityServiceInfo;
 import android.app.Activity;
 import android.app.Instrumentation;
 import android.app.UiAutomation;
+import android.app.admin.DevicePolicyManager;
 import android.content.ComponentName;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
+import android.os.UserManager;
 import android.service.voice.VoiceInteractionService;
 import android.text.TextUtils;
 import android.view.accessibility.AccessibilityNodeInfo;
@@ -22,11 +24,11 @@ public final class ProfileActionAcceptance extends Instrumentation {
     private UiAutomation ui;
     private volatile AccessibilityNodeInfo root;
     private String step = "preflight";
-    private boolean denied;
+    private String policy;
 
     @Override public void onCreate(Bundle args) {
         super.onCreate(args);
-        denied = args != null && "denied".equals(args.getString("policy"));
+        policy = args == null ? "allowed" : args.getString("policy", "allowed");
         start();
     }
 
@@ -93,7 +95,15 @@ public final class ProfileActionAcceptance extends Instrumentation {
             ui = getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
             bindingClosed();
             step = "system-policy";
-            require(denied == "0".equals(shell("settings get secure assist_structure_enabled")));
+            require("allowed".equals(policy) || "denied".equals(policy) || "restricted".equals(policy)
+                    || "capture-disabled".equals(policy));
+            boolean denied = !"allowed".equals(policy);
+            // Each negative case requires its own real policy to be the only blocker.
+            require("denied".equals(policy) == "0".equals(shell("settings get secure assist_structure_enabled")));
+            require("restricted".equals(policy) == getTargetContext().getSystemService(UserManager.class)
+                    .hasUserRestriction(UserManager.DISALLOW_ASSIST_CONTENT));
+            require("capture-disabled".equals(policy) == getTargetContext().getSystemService(DevicePolicyManager.class)
+                    .getScreenCaptureDisabled(null));
             AccessibilityServiceInfo info = ui.getServiceInfo();
             info.packageNames = new String[]{APP};
             info.flags |= AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS;
@@ -118,8 +128,18 @@ public final class ProfileActionAcceptance extends Instrumentation {
             bindingClosed();
             click("hud_end");
             String source = await("profile_action_status", null).getText().toString();
-            require(denied ? !source.equals("This page ran the approved profile check.")
+            require(denied ? source.startsWith("Allow the selected EON assistant")
                     : source.equals("This page ran the approved profile check."));
+            // The second context route is a user-volunteered setting, not a direct action.
+            shell("am start -f 0x14000000 -n com.eon.assistant/.AssistantActivity");
+            click("assistant_context_review");
+            require(await("assistant_context_review", null).getText().toString().regionMatches(
+                    true, 0, "Share once: CPU timing is OFF.", 0, "Share once: CPU timing is OFF.".length()));
+            click("assistant_context_review");
+            await("hud_context", denied
+                    ? "Shared setting unavailable. Screen layout and screenshot collection are always off."
+                    : "EON controls shared: CPU timing OFF. Check model profile in controls without measuring this process. No screen contents collected.");
+            click("hud_end");
             shell("input keyevent KEYCODE_ASSIST");
             await("hud_status", "Session open");
             require(root.findAccessibilityNodeInfosByViewId(APP + ":id/hud_context").stream()
@@ -127,7 +147,7 @@ public final class ProfileActionAcceptance extends Instrumentation {
             click("hud_end");
             bindingClosed();
             code = Activity.RESULT_OK;
-            result.putString("profileAction", denied ? "PASS-policy-denied" : "PASS-os-action");
+            result.putString("profileAction", denied ? "PASS-policy-" + policy : "PASS-os-action");
         } catch (Exception | AssertionError | LinkageError e) {
             result.putString("profileAction", "FAIL-" + step);
         }

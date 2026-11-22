@@ -1,16 +1,19 @@
 package com.eon.assistant
 
 import android.app.ActivityManager
+import android.app.admin.DevicePolicyManager
 import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Bitmap
+import android.os.Build
 import android.os.Bundle
 import android.os.CancellationSignal
 import android.os.Handler
 import android.os.Looper
+import android.os.UserManager
 import android.service.voice.VoiceInteractionSession
 import android.service.voice.VoiceInteractionSessionService
 import android.view.View
@@ -28,6 +31,14 @@ class EonVoiceSessionService : VoiceInteractionSessionService() {
 internal fun userInvokedVoiceHud(flags: Int): Boolean = when (flags and NO_ASSIST_CONTEXT.inv()) {
     VoiceInteractionSession.SHOW_SOURCE_ASSIST_GESTURE, VoiceInteractionSession.SHOW_SOURCE_PUSH_TO_TALK -> true
     else -> false
+}
+
+internal inline fun ownedContextAllowed(userDisabled: () -> Int, assistRestricted: () -> Boolean?,
+    captureDisabled: () -> Boolean?): Boolean = try {
+    userDisabled() and VoiceInteractionSession.SHOW_WITH_ASSIST == 0 &&
+        assistRestricted() == false && captureDisabled() == false
+} catch (_: RuntimeException) {
+    false
 }
 
 private class EonVoiceSession(context: Context) : VoiceInteractionSession(context) {
@@ -77,11 +88,17 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
         }
     }
 
-    private fun contextSharingEnabled() = try {
-        userDisabledShowContext and SHOW_WITH_ASSIST == 0
-    } catch (_: SecurityException) {
-        false
-    }
+    private fun contextSharingEnabled() = ownedContextAllowed(
+        { userDisabledShowContext }, // The system's user switches do not include admin policy.
+        {
+            if (Build.VERSION.SDK_INT < 35) false else context.getSystemService(UserManager::class.java)?.let {
+                // The SDK has no ordinary isPrivateProfile() query. Refuse unclassified profiles
+                // rather than request hidden-profile access or inspect other users or windows.
+                it.hasUserRestriction(UserManager.DISALLOW_ASSIST_CONTENT) || (it.isProfile && !it.isManagedProfile)
+            }
+        },
+        { context.getSystemService(DevicePolicyManager::class.java)?.getScreenCaptureDisabled(null) }
+    )
 
     override fun onPrepareShow(args: Bundle?, showFlags: Int) {
         clearShowing()
