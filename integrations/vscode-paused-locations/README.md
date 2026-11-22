@@ -51,7 +51,7 @@ Use a local filesystem, a trusted editor/adapter and an operator-controlled proj
 
 **How the reading is bound.** The provider checks the trusted local workspace and operator-owned regular executable (no symlinks, hard-linked executable, set-ID bits or group/other-writable components). It exclusively creates one 0600 `.eon-alloc-<random nonce>` record in the launch working directory. Its 88 bytes are a protocol header, nonce, executable device/inode, and four aligned integers. The provider passes just the nonce in LLVM 18's `KEY=VALUE` launch environment array. The linked hook verifies its own executable identity, claims and unlinks the record, marks it live, and updates only those counters. There are no allocation addresses, sizes, stack traces or object contents in the record. The editor reads only its original file handle, never a path from the debuggee. Two identical bounded reads and a still-focused frame in the exact bound session are required. A missing hook, changing record, bad header or counter overflow yields **No counts shown**.
 
-The handle closes on session end or extension deactivation; an unbound launch reservation expires after 60 seconds. An editor crash before the producer claims the record can leave a private, unclaimed file; later launches use fresh nonces. This is cooperative debugging on a trusted local filesystem, not attestation against project code or other processes running as the same user. Accounting adds overhead to the instrumented build. It does not retrofit an unlinked executable or implement a general Python/JVM heap census.
+The handle closes on session end or extension deactivation; an unbound launch reservation expires after 60 seconds. An editor crash before the producer claims the record can leave a private, unclaimed file; later launches use fresh nonces. This is cooperative debugging on a trusted local filesystem, not attestation against project code or other processes running as the same user. Accounting adds overhead to the instrumented build. Counts belong to the original executable: following a fork or replacing the process image with `exec` is not a supported observation. This does not retrofit an unlinked executable or implement a general Python/JVM heap census.
 
 ## Reproduce the checks
 
@@ -110,3 +110,17 @@ src/pre_cognition.rs:22
 With only the caller selected, the dialog contained just `src/pre_cognition.rs:22`: no endpoint row and no annotation. The annotation reports the configured first-hit breakpoint, not why the thread stopped. The harness reads the dialog text column rather than the surrounding Call Stack, clicks the rendered **OK** button and verifies that the editor pixels reappear after each dismissal.
 
 **Observed allocation desktop gate:** the stock workbench resolved `${workspaceFolder}` and the opted-in session had exactly `__configurationTarget, cwd, disableASLR, env, eonAllocationCounts, name, program, request, type`. `env` was an array with one `EON_PROJECT_ALLOC=<32 lowercase hex>` entry. The real Command Palette command on two paused `DebugStackFrame`s rendered exactly the four counts above. A fresh launch of the **same linked binary without opt-in** had no `env` entry and rendered **No counts shown**, not the previous reading or four zeros. The independent display check reads the modal body, dismisses it and checks the editor pixels return. Neither desktop test adds a product launcher or attach operation.
+
+### Corresponding Rust regression checks
+
+With the locked default features, from `engine/core-rs`, `cargo test --locked --offline -p eon-cyber ast_tests` ran 11 tests. The literal `self_healing_tests` and `dap_tests` filters selected **zero**; those invocations do not verify repair or DAP. The following substantive selections passed instead:
+
+| Arguments after `cargo test --locked --offline -p eon-cyber` | Observed |
+|---|---|
+| `--test benign_repair --test benign_repair_kotlin --test project_graph` | 4 repair + 15 Kotlin repair + 11 graph |
+| `--lib owned_dap`, then `--lib owned_dap -- --ignored` | 9 ordinary + 3 provisioned fixture checks |
+| `--test owned_dap -- --ignored` | 2 native (LLVM and CodeLLDB) |
+| `--test dev_dap -- --ignored --skip python_fixture_reports_retained_markers` | CodeLLDB and OpenJDK both passed |
+| `--test dev_dap -- --ignored --exact python_fixture_reports_retained_markers` with `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='/usr/bin/podman unshare'` | debugpy passed |
+
+The explicit fixture runs require their existing pinned CodeLLDB, debugpy and Temurin profiles; they are separate from the project allocation command. The new and existing Node regressions ran 7 and 9 tests respectively.

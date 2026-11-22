@@ -226,13 +226,14 @@
 
 The security work in this roadmap is defensive: inspect authorized code, dependencies and local audit records, contain failures, and verify remediation. Earlier design sketches about autonomous exploitation, payload generation, or targeting systems are not implementation requirements, even in a lab.
 
-- [ ] **Task 7.1: Polyglot AST Analysis, Extreme Code Synthesizer & DAP Bridge**
+- [x] **Task 7.1: Polyglot AST Analysis, Extreme Code Synthesizer & DAP Bridge**
   - **Crate**: `eon-cyber`
   - **Files**: `src/ast/tree_sitter_engine.rs`, `src/ast/synthesizer.rs`, `src/ast/self_healing_compiler.rs`, `src/ast/repomap.rs`, `src/ast/dap.rs`
   - **Requirements**: Tree-sitter AST parsing across Rust, Kotlin, C/C++, Python, TypeScript. PageRank architectural RepoMap generator. Embedded Debug Adapter Protocol (DAP) client bridge (`dev.dap`) interfacing with `codelldb`, `debugpy`, and `jdwp` to inspect live stack frames, conditional breakpoints, and heap allocations. Automated compiler diagnostic capture and localized syntax tree repair.
   - **Unit Tests**: `cargo test -p eon-cyber ast_tests`, `self_healing_tests`, `dap_tests`.
   - **Verified subset**: Across four languages, 48 of 50 benign repair cases passed independent behavior checks after one edit, 49 within three revisions. All ten Kotlin cases passed; the compact superclass repair needs an unambiguous syntax match at the K2 diagnostic and inserts only `()`. The separate RepoMap parses all six languages and ranks lexical membership and unambiguous syntactic call matches. Its hand-checked fixture covers 19 declarations in eight files. This is not compiler name resolution or live debugger verification.
-  - **Debugger evidence**: CodeLLDB, debugpy and JDI/JDWP returned frames and allocation or instance counts for fixed local programs. On a real paused Linux VS Code session, the two-file dialog showed both source locations and the configured conditional breakpoint. Selecting only the caller removed the other location and annotation. This identifies an editor setting, not the reason for the stop. General project heap inspection is not implemented.
+  - **Debugger evidence**: CodeLLDB, debugpy and JDI/JDWP returned frames and allocation or instance counts for fixed local programs. On a paused Linux VS Code session, the two-file dialog showed both source locations and the configured conditional breakpoint; selecting only the caller removed the other location and annotation. This identifies an editor setting, not the reason for the stop.
+  - **Project allocations**: On an explicitly linked Linux x86-64 project, both native LLDB and the stock VS Code command reported `malloc/calloc/realloc/free` counts of `1/1/0/0` at the first stop and `1/1/1/2` at the second. A fresh launch of the same binary without opt-in showed no counts. These are cumulative calls, not object values, live bytes or leak estimates. Reproduction: [paused-project debugger checks](../integrations/vscode-paused-locations/README.md#reproduce-the-checks).
 
 - [x] **Task 7.2: Defensive source review, repair proposals and platform telemetry**
   - **Crate**: `eon-cyber`

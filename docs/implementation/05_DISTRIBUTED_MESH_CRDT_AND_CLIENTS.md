@@ -178,8 +178,9 @@ The grant is the root-owned nsfs mount `/run/netns/eon-n0-<public|mirror>-<pair>
 |---|---:|---:|---:|---:|
 | Silent blackhole | 755/755 | 0.930 ms | 0 / 0 | 15.062 s |
 | Direct interface removed | 1,232/1,268 | 13.842 ms | 0 / 0 | 25.330 s |
+| Direct interface removed, repeat | 1,266/1,269 | 7.503 ms | 0 / 0 | 25.345 s |
 
-Both runs migrated relay → direct → relay on the original pinned QUIC connection. The primary relay forwarded 109,625 and 110,814 bytes respectively during the measured fallback interval. The interface-loss run retained the established primary and media relay sockets, but **failed** the strict voice deadline on 36 frames.
+All three runs migrated relay → direct → relay on the original pinned QUIC connection. The primary relay forwarded 109,625, 110,814 and 110,937 bytes respectively during the measured fallback interval. Both interface-loss runs retained the established primary and media relay sockets, but **failed** the strict voice deadline (36 and 3 late frames).
 
 ### 2.3 Schema Reconciliation and Clock-Skew-Immune 15ms Spatial Election (`src/spatial.rs`)
 

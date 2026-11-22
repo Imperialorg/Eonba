@@ -1,9 +1,10 @@
 """Ephemeral HTTPS store for --isolated-n0. Not a public pkarr service."""
 
 import base64
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
 import os
 from pathlib import Path
+from socketserver import TCPServer
 import ssl
 import sys
 
@@ -69,7 +70,8 @@ def run(parent, expected):
 
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain("keys/leaf.pem", "keys/leaf.key")
-    with HTTPServer(("10.77.0.4", 8445), Store) as server:
+    # HTTPServer also calls getfqdn() at bind time; no system DNS in this role.
+    with TCPServer(("10.77.0.4", 8445), Store) as server:
         server.socket = context.wrap_socket(server.socket, server_side=True)
         server.timeout = 0.2
         Path("pkarr-ready").touch()
