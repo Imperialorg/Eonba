@@ -3,7 +3,7 @@ use eon_mesh::{
     EonResult,
     wan::{
         AudioPcmChunk, ReliableFrame, WanEndpoint,
-        continuity::{CapturePlan, receive, transmit},
+        continuity::{CapturePlan, receive, transmit, transmit_observed},
     },
 };
 use iroh::SecretKey;
@@ -25,9 +25,17 @@ async fn pair() -> EonResult<(Server, WanEndpoint, WanEndpoint)> {
 // grant or select a different constructor in the executable.
 #[tokio::test]
 async fn iroh_and_qos_tests_continuity_pair() -> EonResult<()> {
+    continuity_pair(false).await?;
+    continuity_pair(true).await
+}
+
+async fn continuity_pair(timing: bool) -> EonResult<()> {
     let (server, tx, rx) = pair().await?;
     let before = server.metrics().server.bytes_sent.get();
-    let plan = CapturePlan::new(2).unwrap();
+    let mut plan = CapturePlan::new(2).unwrap();
+    if timing {
+        plan = plan.with_decode_receipts();
+    }
     let marks = || {
         let (tx, rx) = mpsc::channel();
         tokio::spawn(async move {
@@ -38,12 +46,26 @@ async fn iroh_and_qos_tests_continuity_pair() -> EonResult<()> {
         });
         rx
     };
-    let (sent, captured) = tokio::join!(transmit(tx, plan), receive(rx, plan, marks));
-    let sent = sent.unwrap();
+    let (sender, captured) = tokio::join!(transmit_observed(tx, plan), receive(rx, plan, marks));
+    let sent = sender.result().unwrap();
     assert!((3..=100).contains(&sent));
     let text = captured.to_string();
     assert!(captured.bracketed(), "{text}");
     assert!(text.contains("phase=during") && text.contains(&format!("queued={sent} ")));
+    if timing {
+        let report = sender.to_string();
+        assert!(
+            report.contains("status=complete timing=observed"),
+            "{report}"
+        );
+        assert_eq!(
+            report.lines().filter(|l| l.starts_with("seq=")).count(),
+            sent as usize
+        );
+        assert!(text.contains("timing=see_sender"));
+    } else {
+        assert!(text.contains("timing=unavailable"));
+    }
     assert!(server.metrics().server.bytes_sent.get() - before >= 640 * 3);
     server.shutdown().await.unwrap();
     Ok(())
@@ -55,6 +77,83 @@ fn chunk(seq: i64) -> AudioPcmChunk {
         pcm_data: vec![0; 640],
         ..Default::default()
     }
+}
+
+fn control(tag: &[u8], index: u32) -> ReliableFrame {
+    ReliableFrame::Bulk {
+        index,
+        bytes: tag.to_vec(),
+    }
+}
+
+#[tokio::test]
+async fn iroh_and_qos_tests_continuity_timed_sender_refuses_legacy_ready() -> EonResult<()> {
+    let (server, tx, rx) = pair().await?;
+    let plan = CapturePlan::new(1).unwrap();
+    let (sent, capture) = tokio::join!(
+        transmit_observed(tx, plan.with_decode_receipts()),
+        receive(rx, plan, || panic!("probed a legacy receiver"))
+    );
+    assert_eq!(sent.result(), Err("invalid_ready_or_plan"));
+    assert!(
+        sent.to_string()
+            .contains("timing=unavailable limit=50 queued=0")
+    );
+    assert!(!capture.bracketed());
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test]
+async fn iroh_and_qos_tests_continuity_timed_receiver_requires_matching_start() -> EonResult<()> {
+    let (server, tx, rx) = pair().await?;
+    let plan = CapturePlan::new(1).unwrap().with_decode_receipts();
+    let peer = async {
+        assert_eq!(tx.recv().await?, control(b"eon/continuity/2/ready", 50));
+        tx.send_audio(&chunk(1))?; // a transport ACK for READY is not timing consent
+        let _ = tx
+            .send(&control(b"eon/continuity/2/start-bound-copies", 50))
+            .await;
+        assert!(tx.recv_audio().await.is_err(), "echoed without consent");
+        EonResult::Ok(())
+    };
+    let (res, capture) = tokio::join!(peer, receive(rx, plan, || panic!("armed before START")));
+    res?;
+    let report = capture.to_string();
+    assert!(report.contains("status=invalid_start_or_plan") && report.contains("unique=0"));
+    assert!(report.contains("timing=unavailable"));
+    tx.close().await;
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test]
+async fn iroh_and_qos_tests_continuity_decode_without_echo_has_no_timing_bound() -> EonResult<()> {
+    let (server, tx, rx) = pair().await?;
+    let plan = CapturePlan::new(1).unwrap().with_decode_receipts();
+    let peer = async {
+        rx.send(&control(b"eon/continuity/2/ready", 50)).await?;
+        assert_eq!(rx.recv().await?, control(b"eon/continuity/2/start", 50));
+        rx.recv_audio().await?; // exactly one decode; deliberately no return datagram
+        let ReliableFrame::Bulk { index, bytes } = rx.recv().await? else {
+            panic!("missing finish");
+        };
+        assert_eq!(bytes.as_slice(), b"eon/continuity/2/queued");
+        rx.send(&control(b"eon/continuity/2/unique", 1)).await?;
+        rx.close().await;
+        EonResult::Ok(index)
+    };
+    let (queued, sender) = tokio::join!(peer, transmit_observed(tx, plan));
+    let queued = queued?;
+    assert_eq!(sender.result(), Ok(queued));
+    let report = sender.to_string();
+    assert!(report.contains(&format!(
+        "skipped={} acknowledged=0 unacknowledged={queued} peer_missing={} decoded_without_receipt=1",
+        50 - queued, queued - 1
+    )));
+    assert!(report.contains("max_decode_receipt_rtt_upper_us=unavailable"));
+    server.shutdown().await.unwrap();
+    Ok(())
 }
 
 #[tokio::test]
@@ -101,23 +200,30 @@ async fn iroh_and_qos_tests_continuity_peer_cannot_upgrade_a_primary_only_sender
 #[tokio::test]
 async fn iroh_and_qos_tests_continuity_missing_and_late_tail() -> EonResult<()> {
     let (server, tx, rx) = pair().await?;
-    let plan = CapturePlan::new(1).unwrap();
+    let plan = CapturePlan::new(1).unwrap().with_decode_receipts();
     let (first, started) = oneshot::channel();
     let peer = async {
-        tx.recv().await?;
+        assert_eq!(tx.recv().await?, control(b"eon/continuity/2/ready", 50));
+        tx.send(&control(b"eon/continuity/2/start", 50)).await?;
         tx.send_audio(&chunk(2))?;
         started.await.unwrap();
+        let echo = tx.recv_audio().await?;
+        assert_eq!(
+            (echo.sequence_number, echo.pcm_data.as_slice()),
+            (2, &b"ok"[..])
+        );
         // Inject a duplicate, reordered tail after FINISH, and an absent seq=3.
         tx.send_audio(&chunk(2))?;
         sleep(plan.span()).await;
-        tx.send(&ReliableFrame::Bulk {
-            index: 3,
-            bytes: b"eon/continuity/1/queued".to_vec(),
-        })
-        .await?;
+        tx.send(&control(b"eon/continuity/2/queued", 3)).await?;
         sleep(Duration::from_millis(50)).await;
         tx.send_audio(&chunk(1))?;
-        tx.recv().await?;
+        assert_eq!(
+            tx.recv_audio().await?.sequence_number,
+            1,
+            "duplicate echoed"
+        );
+        assert_eq!(tx.recv().await?, control(b"eon/continuity/2/unique", 2));
         let _ = tx.recv_audio().await; // let the receiver finish the drain receipt
         EonResult::Ok(())
     };

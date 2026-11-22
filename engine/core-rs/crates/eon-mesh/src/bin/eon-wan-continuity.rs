@@ -8,7 +8,7 @@ mod linux {
     use super::profile::Profile;
     use eon_mesh::wan::{
         N0Provider, WanEndpoint,
-        continuity::{CapturePlan, receive, transmit},
+        continuity::{CapturePlan, receive, transmit_observed},
     };
     use std::{
         io::IsTerminal,
@@ -20,7 +20,7 @@ mod linux {
         time::{Duration, Instant},
     };
 
-    const USAGE: &str = "usage: eon-wan-continuity <send|receive> <profile-directory> <seconds:1..120> [--redundant-media]";
+    const USAGE: &str = "usage: eon-wan-continuity <send|receive> <profile-directory> <seconds:1..120> [--redundant-media] [--timing]";
 
     fn fresh_enter(input: &impl AsFd, prompt: &str) -> Option<Instant> {
         eprintln!("{prompt}");
@@ -54,11 +54,17 @@ mod linux {
 
     pub async fn run() -> Result<(), &'static str> {
         let args: Vec<_> = std::env::args_os().skip(1).collect();
-        let (role, dir, seconds, copies) = match args.as_slice() {
-            [role, dir, seconds] => (role, dir, seconds, false),
-            [role, dir, seconds, flag] if flag == "--redundant-media" => (role, dir, seconds, true),
-            _ => return Err(USAGE),
+        let [role, dir, seconds, flags @ ..] = args.as_slice() else {
+            return Err(USAGE);
         };
+        let (mut copies, mut timing) = (false, false);
+        for flag in flags {
+            match flag.to_str() {
+                Some("--redundant-media") if !copies => copies = true,
+                Some("--timing") if !timing => timing = true,
+                _ => return Err(USAGE),
+            }
+        }
         let mut plan = seconds
             .to_str()
             .and_then(|s| s.parse().ok())
@@ -115,6 +121,9 @@ mod linux {
             }
             plan = plan.with_redundant_media();
         }
+        if timing {
+            plan = plan.with_decode_receipts();
+        }
         if receiver {
             let report = receive(endpoint, plan, arm).await;
             print!("{report}");
@@ -122,7 +131,14 @@ mod linux {
                 return Err("transition_not_bracketed");
             }
         } else {
-            println!("queued={}", transmit(endpoint, plan).await?);
+            let report = transmit_observed(endpoint, plan).await;
+            if timing {
+                print!("{report}");
+                report.result()?;
+            } else {
+                eprintln!("timing=unavailable (--timing not selected)");
+                println!("queued={}", report.result()?);
+            }
         }
         Ok(())
     }
