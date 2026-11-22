@@ -7,7 +7,7 @@ umask 077
 usage() {
     cat <<'HELP'
 Usage: test_wan_nat.sh [--lose-direct-interface] [--redundant-media] [--private-stun | --isolated-n0] [--short-path-timeout] [--require-voice-deadline]
-       test_wan_nat.sh --field-continuity [--redundant-media]
+       test_wan_nat.sh --field-continuity [--redundant-media] [--timing [--require-voice-deadline]]
 
 Test relay → direct UDP across two NATs → relay on the same pinned QUIC connection.
 By default the routers silently blackhole the direct route. Success verifies
@@ -26,9 +26,14 @@ migration and delivery after fallback, not uninterrupted voice during the cut.
                              No public services, peer tickets or host DNS changes.
   --require-voice-deadline   Also require every cut audio attempt to reach peer decode
                              in <5 ms one-way. Missing or late frames fail the run.
+                             With --field-continuity --timing, instead require a <5 ms
+                             bound for every nominal slot of the entire capture.
   --field-continuity         Run both shipping field CLI roles against the private N0
                              mirror. Bracket receiver interface removal using a PTY.
                              This measures decode gaps, not one-way delay or a radio roam.
+  --timing                   Field only: request challenge-bound decode receipts on both
+                             peers. Join the reports by sequence. A bound >=5 ms is
+                             inconclusive, not proof of a late decode.
   -h, --help                 Print this help without building or creating namespaces.
 
 Run as an unprivileged Linux build user with passwordless sudo for the namespace
@@ -42,6 +47,7 @@ discovery=qad
 profile=default
 cut_mode=blackhole
 field=0
+timing=0
 role_limit=80s
 for arg in "$@"; do
     case "$arg" in
@@ -53,13 +59,17 @@ for arg in "$@"; do
             if [[ $arg == --private-stun ]]; then discovery=stun; else discovery=n0; fi ;;
         --lose-direct-interface) cut_mode=interface-loss ;;
         --field-continuity) field=1 ;;
+        --timing) timing=1 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $arg" >&2; usage >&2; exit 2 ;;
     esac
 done
 if (( field )); then
-    (( $# == 1 + media )) || { echo "--field-continuity only accepts --redundant-media" >&2; exit 2; }
+    (( !strict || timing )) || { echo "--field-continuity requires --timing for --require-voice-deadline" >&2; exit 2; }
+    (( $# == 1 + media + timing + strict )) || { echo "invalid or duplicate --field-continuity option" >&2; exit 2; }
     discovery=n0; cut_mode=interface-loss; role_limit=115s
+elif (( timing )); then
+    echo "--timing requires --field-continuity" >&2; exit 2
 fi
 if [[ $discovery != qad && $profile != default ]]; then
     echo "production constructors use the default path timers" >&2; exit 2
@@ -69,6 +79,7 @@ cd "$(dirname "$0")/../engine/core-rs"
 stun_helper="$PWD/../../scripts/wan_private_stun.py"
 pkarr_helper="$PWD/../../scripts/test_wan_pkarr_fixture.py"
 report="$PWD/../../scripts/wan_cut_report.py"
+field_report="$PWD/../../scripts/wan_field_timing_report.py"
 scratch="$PWD/target/wan-nat-$$-$RANDOM"
 mkdir -p target
 mkdir "$scratch"
@@ -256,7 +267,7 @@ role() {
     # profiles private inside the role too.
     inside "$1" sudo -n -u "$user" env EON_WAN_ROLE="$2" EON_WAN_PARENT_NS="$parent" EON_WAN_NETNS="$inode" \
         EON_WAN_PATH_PROFILE="$profile" EON_WAN_CUT="$cut_mode" EON_WAN_MEDIA="$media" EON_WAN_DISCOVERY="$discovery" \
-        EON_FIELD_EXE="$field_exe" \
+        EON_FIELD_EXE="$field_exe" EON_FIELD_TIMING="$timing" \
         bash -c 'umask 077; exec "$@"' sh timeout --kill-after=2s "$role_limit" "$exe" \
         --ignored --exact wan::netns::iroh_and_qos_tests_nat_path_change --nocapture \
         >"$2.log" 2>&1 &
@@ -367,18 +378,30 @@ if (( field )); then
     touch finished
     for pid in "${jobs[@]}"; do wait "$pid"; done
     jobs=()
-    grep -Fx 'eon_continuity_v1 clock=receiver_monotonic' field-receipts.log
-    # Reserve at least 20 of the 30 seconds for recovery, on the capture clock.
-    awk -F= '/^mark=end rx_us=/{ok=($3 ~ /^[0-9]+$/ && $3+0 <= 10000000)} END{exit !ok}' field-receipts.log
-    queued=$(<field-sent.log)
-    [[ $queued =~ ^queued=[1-9][0-9]*$ ]]
-    grep -E "^status=complete bracketed=true limit=1500 $queued " field-receipts.log
-    if (( media )); then
-        grep -qE '^seq=[0-9]+ .* phase=after via=standby_copy$' field-receipts.log
-        grep -qE '^status=complete .* missing=0 ' field-receipts.log
+    if (( !timing )); then
+        grep -Fx 'eon_continuity_v1 clock=receiver_monotonic' field-receipts.log
+        # Reserve at least 20 of the 30 seconds for recovery, on the capture clock.
+        awk -F= '/^mark=end rx_us=/{ok=($3 ~ /^[0-9]+$/ && $3+0 <= 10000000)} END{exit !ok}' field-receipts.log
+        queued=$(<field-sent.log)
+        [[ $queued =~ ^queued=[1-9][0-9]*$ ]]
+        grep -E "^status=complete bracketed=true limit=1500 $queued " field-receipts.log
+        if (( media )); then
+            grep -qE '^seq=[0-9]+ .* phase=after via=standby_copy$' field-receipts.log
+            grep -qE '^status=complete .* missing=0 ' field-receipts.log
+        fi
     fi
     grep '^relay after interface removal:' field-relay.log
     cat pkarr.log
+    if (( timing )); then
+        report_args=("$scratch")
+        if (( media )); then report_args+=(--redundant-media); fi
+        if (( strict )); then report_args+=(--require-voice-deadline); fi
+        echo "peer_udp_arrivals_before_cut=$packets"
+        report_status=0
+        python3 -I "$field_report" "${report_args[@]}" >field-timing-report.log || report_status=$?
+        grep -E '^(phase|evidence_verification|deadline_verdict)=' field-timing-report.log
+        exit "$report_status"
+    fi
     echo "private_field_capture=PASS peer_udp_arrivals_before_cut=$packets"
     exit 0
 fi

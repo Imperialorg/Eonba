@@ -241,6 +241,35 @@ Setup, finish and shutdown have separate bounded waits. In v2 the receiver start
 
 **Full CLI comparison:** From a checkout whose path meets the profile ownership rules above, run `bash scripts/test_wan_nat.sh --field-continuity`, then repeat with `--redundant-media`. Both unprivileged CLI processes run under the private mirror grants. The fixture waits for data-sized UDP packets to reach the receiver's direct interface and uses a PTY to mark its removal. The end mark means the kernel removed the interface, not that the primary recovered. Read `field-receipts.log` in the printed evidence directory for loss and gaps. The baseline may pass the capture check despite substantial loss. The redundant regression also requires zero missing probes and a first decode via the standby after removal. Neither run measures one-way latency or physical roaming.
 
+**Software-only timing verification (two NATs, no public WAN):** On Linux, as the unprivileged build user with passwordless `sudo` for the fixture, run one or both comparison commands. Each invocation starts a fresh 30-second capture; `--timing` reaches both shipping CLI processes. Omit it for the unchanged untimed capture.
+
+```sh
+bash /home/runner/work/Eonba/Eonba/scripts/test_wan_nat.sh --field-continuity --timing
+bash /home/runner/work/Eonba/Eonba/scripts/test_wan_nat.sh --field-continuity --timing --redundant-media
+```
+
+**Strict deadline command:** append `--require-voice-deadline` to either timed comparison. In field mode this gates **all 1,500 nominal slots across the capture**, not just decodes between the marks. Unlike the separate shared-clock cut gate, it never assigns a sender phase or measures one-way time.
+
+The fixture requires direct peer UDP arrivals before it marks and deletes the receiver's `wan0`, and relay forwarding after removal. In the printed `WAN evidence:` directory, `field-sent.log` and `field-receipts.log` are the raw sender and receiver stdout from **that run**. `field-timing-report.log` retains the sequence join and verdict even when strict mode exits nonzero for incomplete proof. To regenerate just the report, run `python3 -I /home/runner/work/Eonba/Eonba/scripts/wan_field_timing_report.py "$evidence_dir"` with the same optional `--redundant-media` and `--require-voice-deadline` flags. The joiner's focused regressions run separately with `python3 /home/runner/work/Eonba/Eonba/scripts/test_wan_field_timing_report.py`; they need no namespaces.
+
+The join emits one row per queued `seq` (1 through `queued`), with receiver **decode** `phase` and first-copy `via`, sender `decode_receipt_rtt_upper_us`, and one `deadline` classification:
+
+| `deadline` | Evidence |
+|---|---|
+| `proven_under_5ms` | A challenge-matched round-trip upper bound **< 5000 µs** proves this forward decode met the deadline. |
+| `bound_ge_5ms_inconclusive` | The bound is **≥ 5000 µs**, including equality. The forward decode could still have been on time. |
+| `decoded_without_receipt` | The peer decoded the sequence but the sender observed no matching return; the bound is `unavailable`. |
+| `peer_missing` | No decode by drain and no return: `phase=no_decode via=none`, not an inferred send phase. |
+
+Tallies for `before`, `during`, `after` and `no_decode` partition the queued probes; `all` gives their totals. A zero `during` count does not prove uninterrupted delivery. No calculation subtracts clocks or halves RTT.
+
+Read the two verdicts separately:
+
+* **`evidence_verification=verified`** requires complete negotiated reports, one sender row per queued sequence, matching counts and maxima, zero invalid returns, and a receiver decode for every numeric bound. The ordered marks must end no later than 10 seconds into capture. An acknowledged pre-mark decode and a fresh acknowledged post-mark decode must bracket removal. The redundant run also requires every queued probe decoded and a post-removal standby-first decode. Invalid reports instead yield `evidence_verification=invalid deadline_verdict=not_evaluated` and a nonzero exit in both modes.
+* **`deadline_verdict=proven|not_proven`** quantifies `proven_slots` out of `total_slots=1500`. Only a decoded, acknowledged sequence with a bound **strictly below 5000 µs** counts as proven. `unproven_slots = skipped + unacknowledged + bound_ge_5ms_inconclusive`; `unacknowledged` includes both missing decodes and decodes without a return. `all_queued_under_5ms` is a queued-only diagnostic: it can be `proven` while skipped slots keep the nominal-slot verdict `not_proven`. Neither verdict measures physical roaming.
+
+With verified evidence, the default comparison exits **0 even if the deadline is not proven**. Strict mode preserves the same report but exits **3** for incomplete proof and **0** only for `deadline_verdict=proven`. Exit 3 does not assert a late forward decode.
+
 ### 2.3 Schema Reconciliation and Clock-Skew-Immune 15ms Spatial Election (`src/spatial.rs`)
 
 **Protobuf Reconciliation**: Update `SensoryClaim` in `proto/eon.proto` with two optional fields so it matches `DISTRIBUTED_NETWORKING_MESH.md` §8.1 without breaking existing field numbers `1..8`:

@@ -76,6 +76,13 @@ pub(super) async fn run(receiver: bool) {
     if media_enabled() {
         cmd.arg("--redundant-media");
     }
+    match std::env::var("EON_FIELD_TIMING").as_deref() {
+        Ok("0") => {}
+        Ok("1") => {
+            cmd.arg("--timing");
+        }
+        _ => panic!("missing fixture timing policy"),
+    }
     if !receiver {
         let sender = cmd
             .stdin(Stdio::null())
