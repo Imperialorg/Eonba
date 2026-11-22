@@ -299,6 +299,49 @@ The driver checks setup, target APK identity and the closed collection mask, the
 
 On `AE3A.240806.043/12960925` (enforcing, loopback-only host network, no host audio or cameras), `PASS-os-action` observed the source's completed profile check, `p0_mobile_ultralight`, and a separately confirmed CPU setting. `PASS-policy-denied` observed both refusals and an unexecuted profile check. Both verified a fresh empty assistant card, `mDisabledShowContext=3`, and no microphone use. The observer also accepts `-e policy restricted` or `-e policy capture-disabled` on an already managed test device with just that restriction active. These enterprise denial cases were **not** verified on a managed device: the stock emulator denied the shell permission to impose `no_assist_content`, and the observer refused to count an unrestricted run as a pass. No admin permission was granted. The JVM suite covers denied and unavailable policy inputs.
 
+#### Selected assistant crash, automatic rebind and fresh consent (9.5, software only)
+
+**New acceptance case; not yet device-verified.** This tests whether the approved profile action or its result reappears after process death without another tap. It does not request a tree, replay or extract a Binder token, or start a microphone. The production APK and its collection mask are unchanged.
+
+Use a fresh disposable `pixel_4` AVD named **`eon-profile-death`**, English UI, 3 GiB RAM, `system-images;android-35;google_apis;x86_64` rev 9 (`AE3A.240806.043/12960925`). Use only a local adb server in the same loopback-only host environment as the emulator. No accounts, personal data, host audio input or cameras. Example commands **after approval**, with the documented SDK/image and build toolchain installed:
+
+```sh
+A=/home/runner/work/Eonba/Eonba/engine/android
+"$A/gradlew" -p "$A" :app:assembleDebug
+python3 -m unittest discover -s "$A/app" -p 'test_profile_death_device_test.py'
+export ANDROID_AVD_HOME="$A/build/profile-death-avd"
+mkdir -m 700 "$ANDROID_AVD_HOME" || exit 1   # refuse to reuse an existing AVD directory
+printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n eon-profile-death \
+    -k 'system-images;android-35;google_apis;x86_64' --device pixel_4
+"$ANDROID_HOME/emulator/emulator" -avd eon-profile-death -port 5588 -memory 3072 \
+    -no-snapshot -no-audio -camera-front none -camera-back none
+```
+
+In a second terminal in that environment, finish setup and unlock owner user 0. Install **only** the local debug target on the empty AVD:
+
+```sh
+A=/home/runner/work/Eonba/Eonba/engine/android
+ADB="$ANDROID_HOME/platform-tools/adb"
+SERIAL=emulator-5588
+test "$("$ADB" -H 127.0.0.1 -P 5037 -s "$SERIAL" shell getprop ro.boot.qemu.avd_name)" = eon-profile-death &&
+    "$ADB" -H 127.0.0.1 -P 5037 -s "$SERIAL" install --user 0 "$A/app/build/outputs/apk/debug/app-debug.apk"
+```
+
+Select EON **through Android's picker** and return to EON controls with no assistant card showing. Leave the OS text-sharing switch enabled and device policy unrestricted. Do not configure accessibility, microphone access or other grants. No further input is needed:
+
+```sh
+ANDROID_ADB_SERVER_PORT=5037 python3 "$A/app/profile_death_device_test.py" \
+    --disposable-serial "$SERIAL" --crash-selected-assistant
+```
+
+The driver pins the selected adb transport, checks the console and guest AVD identities, checks enforcing/non-root shell, setup, live role, service and mask, matches the installed APK's SHA-256 to the local build, and verifies `run-as` and an unshared target UID. It installs only the separate observer. The observer checks the actual sharing policy, opens the private EON source, confirms one action and leaves the expected result visible. **Only then**, after rechecking identity, the original service PID, mask `3` and Android's shown-session flag, the host issues **one** `am crash --user 0 com.eon.assistant`. The stock command selects the package's framework process record; it never signals a saved PID, force-stops the app or changes its selection.
+
+Before launching **any** recovery UI, the driver requires a different PID hosting the same bound voice service, the old session no longer shown, and a new matching exit record for the old PID and UID. On [API 35](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/core/java/com/android/server/am/ActivityManagerShellCommand.java), `am crash` schedules `CrashedByAdbException`; the [Java crash path](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/services/core/java/com/android/server/am/AppErrors.java) records [`reason=4 (APP CRASH(EXCEPTION))`](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/core/java/android/app/ApplicationExitInfo.java). A shell return code, a different PID alone, a signal, or a native crash is not sufficient.
+
+In that replacement process the observer invokes a normal card **over an unconfirmed private profile page**. It samples the same live card for longer than the five-second ticket lifetime: no visible authorized result, and on dismissal the source must still show the review, not completion. A new confirmation must then produce both the expected OS-routed result and the source's completion label. Expected final line: `profileDeath=PASS-crash-rebind-fresh-consent`. This is an observable non-replay check, not proof of every intermediate callback, crash cause on arbitrary builds, microphone release, hotword support or owner-only `AssistStructure` delivery.
+
+The armed checkpoint is **not** a pass. A crash dialog, delayed/missing exit record, failed rebind, timeout or interruption is inconclusive; do not dismiss dialogs for the harness, retry the crash, or relaunch to manufacture progress. The driver normally removes only its observer. A host/transport interruption can leave it installed or the crash already delivered; discard the AVD rather than resume a partial run.
+
 ### 6.2 `MediaProjection` Token Lifecycle
 **Implemented on API 35+: grant lifecycle only.** Select EON as the digital assistant in Android Settings, open EON controls, choose **Review a no-output projection grant**, then explicitly open Android's picker. Choose **one app → EON**. The OS owns the scope choice; EON neither queries that scope nor reads anything from it. Assistant selection alone never starts the picker or a grant.
 

@@ -4,6 +4,8 @@
 > When assigned to implement EON, find the first unchecked item `[ ]` in this document. Implement the specified classes, structs, traits, and functions, write and pass the corresponding unit tests, mark the checkbox `[x]`, and proceed to the next item immediately **without asking any questions or waiting for user approval**.  
 > Follow the architecture defined in [docs/TECH_STACK_AND_TOOLCHAINS.md](./TECH_STACK_AND_TOOLCHAINS.md) (Rust Native Core + Kotlin Android Presence).
 
+The four open items have software checks: [two-NAT handoff and decode deadlines (8.4)](implementation/05_DISTRIBUTED_MESH_CRDT_AND_CLIENTS.md#22-exact-wire-framing-and-4-class-quic-qos-srcqosrs), [selected Android emulator crash and rebind (9.5)](ANDROID_INTEGRATION_SPECIFICATION.md#selected-assistant-crash-automatic-rebind-and-fresh-consent-95-software-only), and [recorded speech timing and combined evaluation (10.2, 10.6)](implementation/06_VERIFICATION_BENCHMARKS_AND_PHASED_PLAYBOOK.md#38-run-the-voice-and-combined-gates-without-audio-hardware). These commands are not recorded passes, and software render timing is not acoustic latency.
+
 ---
 
 ## Phase 0: Native Workspace Scaffolding & Kernel Primitives (Level 0)
