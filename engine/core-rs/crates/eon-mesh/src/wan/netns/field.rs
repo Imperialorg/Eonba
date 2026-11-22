@@ -1,5 +1,5 @@
 //! Run the field executable unmodified, with stdin on a real PTY at the receiver.
-use super::{Duration, fs, mark, sleep, timeout, wait, write_stale_record};
+use super::{Duration, fs, mark, media_enabled, sleep, timeout, wait, write_stale_record};
 use rustix::{
     io::ioctl_fionread,
     pty::{OpenptFlags, ioctl_tiocgptpeer, openpt, unlockpt},
@@ -8,23 +8,38 @@ use std::{
     fs::File,
     io::Write,
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
 };
 
-struct Receiver(Child);
+struct Role(Child);
 
-impl Drop for Receiver {
+impl Drop for Role {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
 }
 
-impl Receiver {
+impl Role {
+    fn status(&mut self) -> Option<ExitStatus> {
+        assert!(!Path::new("abort").exists(), "field fixture aborted");
+        self.0.try_wait().unwrap()
+    }
+
+    async fn finish(mut self) {
+        loop {
+            if let Some(status) = self.status() {
+                assert!(status.success(), "field CLI: {status}");
+                return;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     async fn prompt(&mut self, text: &str, tty: &File) {
-        timeout(Duration::from_secs(40), async {
+        timeout(Duration::from_secs(55), async {
             loop {
-                assert!(self.0.try_wait().unwrap().is_none(), "receiver exited");
+                assert!(self.status().is_none(), "receiver exited");
                 if fs::read_to_string("field-prompts.log")
                     .unwrap()
                     .contains(text)
@@ -58,23 +73,26 @@ pub(super) async fn run(receiver: bool) {
 
     let mut cmd = Command::new(std::env::var_os("EON_FIELD_EXE").unwrap());
     cmd.arg(role).arg(profile).arg("30");
+    if media_enabled() {
+        cmd.arg("--redundant-media");
+    }
     if !receiver {
-        let status = cmd
+        let sender = cmd
             .stdin(Stdio::null())
             .stdout(File::create("field-sent.log").unwrap())
-            .status()
+            .spawn()
             .unwrap();
-        assert!(status.success(), "field sender: {status}");
+        Role(sender).finish().await;
         return;
     }
     let flags = OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC;
     let mut terminal = File::from(openpt(flags).unwrap());
     unlockpt(&terminal).unwrap();
     let tty = File::from(ioctl_tiocgptpeer(&terminal, flags).unwrap());
-    // A stale newline at each prompt lets us observe its tcflush before
-    // sending the real mark. No line is accepted as a substitute for the cut.
-    terminal.write_all(b"\n").unwrap();
-    let mut child = Receiver(
+    // A nonempty stale line MUST be flushed. Reading it as an answer would
+    // disarm the shipping CLI, not accidentally mark the cut.
+    terminal.write_all(b"x\n").unwrap();
+    let mut child = Role(
         cmd.stdin(tty.try_clone().unwrap())
             .stdout(File::create("field-receipts.log").unwrap())
             .stderr(File::create("field-prompts.log").unwrap())
@@ -82,12 +100,15 @@ pub(super) async fn run(receiver: bool) {
             .unwrap(),
     );
     child.prompt("BEGINNING", &tty).await;
-    wait("direct-traffic").await;
-    terminal.write_all(b"\n\n").unwrap();
-    child.prompt("ENDS", &tty).await;
-    mark("field-begin");
-    wait("cut").await;
-    terminal.write_all(b"\n").unwrap();
-    let status = child.0.wait().unwrap();
-    assert!(status.success(), "field receiver: {status}");
+    timeout(Duration::from_secs(10), async {
+        wait("direct-traffic").await;
+        terminal.write_all(b"\nx\n").unwrap();
+        child.prompt("ENDS", &tty).await;
+        mark("field-begin");
+        wait("cut").await;
+        terminal.write_all(b"\n").unwrap();
+    })
+    .await
+    .expect("cut not installed within the pre-cut budget");
+    child.finish().await;
 }

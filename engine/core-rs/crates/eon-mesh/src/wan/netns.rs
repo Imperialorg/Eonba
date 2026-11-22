@@ -127,13 +127,16 @@ async fn relay(field: bool) {
     );
     mark("ready");
     if field {
-        wait_for("cut", Duration::from_secs(50)).await;
+        wait_for("cut", Duration::from_secs(60)).await;
         let m = &server.metrics().server;
         let (rx, tx) = (m.bytes_recv.get(), m.bytes_sent.get());
         wait_for("finished", Duration::from_secs(50)).await;
         let (rx, tx) = (m.bytes_recv.get() - rx, m.bytes_sent.get() - tx);
         println!("relay after interface removal: forwarded_rx={rx} forwarded_tx={tx}");
         assert!(rx >= CHUNK as u64 && tx >= CHUNK as u64);
+        if let Some(media) = media {
+            media.shutdown().await.unwrap();
+        }
         server.shutdown().await.unwrap();
         return;
     }

@@ -402,7 +402,14 @@ impl WanEndpoint {
             media.recv(&self.conn).await?
         } else {
             let bytes = self.conn.read_datagram().await.map_err(transport_error)?;
-            (wire::decode_audio(bytes)?, Arrival::Primary)
+            // PCM decoding intentionally ignores the copy ID for compatibility.
+            // Preserve the wire mode for callers that verify a capture plan.
+            let via = if media::tagged(&bytes) {
+                Arrival::PrimaryCopy
+            } else {
+                Arrival::Primary
+            };
+            (wire::decode_audio(bytes)?, via)
         };
         self.budget.observe(TrafficClass::Audio);
         Ok(received)

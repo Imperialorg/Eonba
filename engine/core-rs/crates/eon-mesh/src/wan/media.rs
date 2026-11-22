@@ -11,6 +11,10 @@ const MEDIA_ALPN: &[u8] = b"eon/mesh/wan-media-copy/1";
 const COPY_ID_KEY: u8 = (15 << 3) | 1;
 const PREFIX: usize = 1 + 8;
 
+pub(super) fn tagged(packet: &[u8]) -> bool {
+    packet.first() == Some(&COPY_ID_KEY)
+}
+
 /// Which local DATAGRAM queues accepted an explicitly duplicated frame.
 /// Neither flag is a delivery receipt.
 #[derive(Debug, PartialEq, Eq)]
@@ -240,7 +244,7 @@ impl MediaLane {
                 }
             };
             check_open(primary)?;
-            if packet.first() != Some(&COPY_ID_KEY) {
+            if !tagged(&packet) {
                 if standby {
                     return Err(invalid("untagged standby datagram"));
                 }

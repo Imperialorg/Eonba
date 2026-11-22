@@ -20,8 +20,7 @@ mod linux {
         time::{Duration, Instant},
     };
 
-    const USAGE: &str =
-        "usage: eon-wan-continuity <send|receive> <profile-directory> <seconds:1..120>";
+    const USAGE: &str = "usage: eon-wan-continuity <send|receive> <profile-directory> <seconds:1..120> [--redundant-media]";
 
     fn fresh_enter(input: &impl AsFd, prompt: &str) -> Option<Instant> {
         eprintln!("{prompt}");
@@ -55,10 +54,12 @@ mod linux {
 
     pub async fn run() -> Result<(), &'static str> {
         let args: Vec<_> = std::env::args_os().skip(1).collect();
-        let [role, dir, seconds] = args.as_slice() else {
-            return Err(USAGE);
+        let (role, dir, seconds, copies) = match args.as_slice() {
+            [role, dir, seconds] => (role, dir, seconds, false),
+            [role, dir, seconds, flag] if flag == "--redundant-media" => (role, dir, seconds, true),
+            _ => return Err(USAGE),
         };
-        let plan = seconds
+        let mut plan = seconds
             .to_str()
             .and_then(|s| s.parse().ok())
             .and_then(CapturePlan::new)
@@ -81,13 +82,14 @@ mod linux {
         if !relay.is_private() || !pkarr.is_private() {
             return Err("expected_private_mirror_literals");
         }
-        let endpoint = WanEndpoint::open_managed_n0(
+        let ca = profile.read("ca.der", 64 * 1024)?;
+        let mut endpoint = WanEndpoint::open_managed_n0(
             profile.parse("identity.key")?,
             profile.parse("peer.pin")?,
             N0Provider::PrivateMirror {
                 relay,
                 pkarr,
-                root_der: profile.read("ca.der", 64 * 1024)?,
+                root_der: ca.clone(),
             },
             NonZeroU32::new(64 * 1024).unwrap(),
             Duration::from_secs(30),
@@ -97,6 +99,22 @@ mod linux {
             eon_mesh::EonError::SecurityViolation(_) => "managed_grant_or_peer_denied",
             _ => "managed_open_failed",
         })?;
+        if copies {
+            // Fixed secondary service on the same approved literal and CA.
+            // The operator must also allow this port in the lifetime egress policy.
+            let origin = format!("https://{relay}:8444")
+                .parse()
+                .map_err(|_| "invalid_media_origin")?;
+            if endpoint
+                .enable_media_standby(origin, ca, Duration::from_secs(15))
+                .await
+                .is_err()
+            {
+                let _ = tokio::time::timeout(Duration::from_secs(10), endpoint.close()).await;
+                return Err("bound_media_standby_unavailable");
+            }
+            plan = plan.with_redundant_media();
+        }
         if receiver {
             let report = receive(endpoint, plan, arm).await;
             print!("{report}");

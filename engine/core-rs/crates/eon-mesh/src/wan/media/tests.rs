@@ -33,6 +33,39 @@ async fn attach(ep: &mut WanEndpoint, url: &RelayUrl) -> EonResult<()> {
     .await
 }
 
+#[tokio::test]
+async fn iroh_and_qos_tests_primary_capture_rejects_a_copy_before_arming() {
+    use crate::wan::continuity::{CapturePlan, receive};
+
+    let (server, url) = relay().await;
+    let (tx, rx) = pair(&SecretKey::generate(), &SecretKey::generate(), &url).await;
+    let peer = async {
+        tx.recv().await.unwrap(); // Primary-only READY.
+        let mut packet = vec![COPY_ID_KEY];
+        packet.extend_from_slice(&1u64.to_le_bytes());
+        AudioPcmChunk {
+            sequence_number: 1,
+            pcm_data: vec![0; 640],
+            ..Default::default()
+        }
+        .encode_raw(&mut packet);
+        tx.conn.send_datagram(packet.into()).unwrap();
+    };
+    let ((), report) = tokio::join!(
+        peer,
+        receive(rx, CapturePlan::new(1).unwrap(), || panic!(
+            "armed on a copy"
+        ))
+    );
+    assert!(
+        report
+            .to_string()
+            .contains("status=invalid_probe bracketed=false")
+    );
+    tx.close().await;
+    server.shutdown().await.unwrap();
+}
+
 #[test]
 fn iroh_and_qos_tests_media_window_reorder_replay_floor_and_large_jump() {
     let mut w = Window::default();

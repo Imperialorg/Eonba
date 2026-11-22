@@ -58,6 +58,47 @@ fn chunk(seq: i64) -> AudioPcmChunk {
 }
 
 #[tokio::test]
+async fn iroh_and_qos_tests_continuity_copy_plan_requires_a_bound_lane() -> EonResult<()> {
+    let (server, tx, rx) = pair().await?;
+    let plan = CapturePlan::new(2).unwrap().with_redundant_media();
+    let (sent, captured) = tokio::join!(
+        transmit(tx, plan),
+        receive(rx, plan, || panic!("armed without a standby"))
+    );
+    assert_eq!(sent, Err("missing_bound_standby"));
+    assert!(
+        captured
+            .to_string()
+            .contains("status=missing_bound_standby bracketed=false")
+    );
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test]
+async fn iroh_and_qos_tests_continuity_peer_cannot_upgrade_a_primary_only_sender() -> EonResult<()>
+{
+    let (server, tx, rx) = pair().await?;
+    let plan = CapturePlan::new(2).unwrap();
+    let peer = async {
+        // The sender must decode and reject READY, but its close can
+        // overtake the transport receipt for that rejected frame.
+        let _ = rx
+            .send(&ReliableFrame::Bulk {
+                index: 100,
+                bytes: b"eon/continuity/1/ready-bound-copies".to_vec(),
+            })
+            .await;
+        assert!(rx.recv_audio().await.is_err(), "unexpected probe");
+    };
+    let (sent, ()) = tokio::join!(transmit(tx, plan), peer);
+    assert_eq!(sent, Err("invalid_ready_or_plan"));
+    rx.close().await;
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test]
 async fn iroh_and_qos_tests_continuity_missing_and_late_tail() -> EonResult<()> {
     let (server, tx, rx) = pair().await?;
     let plan = CapturePlan::new(1).unwrap();

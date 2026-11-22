@@ -7,7 +7,7 @@ umask 077
 usage() {
     cat <<'HELP'
 Usage: test_wan_nat.sh [--lose-direct-interface] [--redundant-media] [--private-stun | --isolated-n0] [--short-path-timeout] [--require-voice-deadline]
-       test_wan_nat.sh --field-continuity
+       test_wan_nat.sh --field-continuity [--redundant-media]
 
 Test relay → direct UDP across two NATs → relay on the same pinned QUIC connection.
 By default the routers silently blackhole the direct route. Success verifies
@@ -42,6 +42,7 @@ discovery=qad
 profile=default
 cut_mode=blackhole
 field=0
+role_limit=80s
 for arg in "$@"; do
     case "$arg" in
         --require-voice-deadline) strict=1 ;;
@@ -51,13 +52,15 @@ for arg in "$@"; do
             [[ $discovery == qad ]] || { echo "choose one discovery profile" >&2; exit 2; }
             if [[ $arg == --private-stun ]]; then discovery=stun; else discovery=n0; fi ;;
         --lose-direct-interface) cut_mode=interface-loss ;;
-        --field-continuity)
-            [[ $# == 1 ]] || { echo "--field-continuity runs alone" >&2; exit 2; }
-            field=1; discovery=n0; cut_mode=interface-loss ;;
+        --field-continuity) field=1 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $arg" >&2; usage >&2; exit 2 ;;
     esac
 done
+if (( field )); then
+    (( $# == 1 + media )) || { echo "--field-continuity only accepts --redundant-media" >&2; exit 2; }
+    discovery=n0; cut_mode=interface-loss; role_limit=115s
+fi
 if [[ $discovery != qad && $profile != default ]]; then
     echo "production constructors use the default path timers" >&2; exit 2
 fi
@@ -254,7 +257,7 @@ role() {
     inside "$1" sudo -n -u "$user" env EON_WAN_ROLE="$2" EON_WAN_PARENT_NS="$parent" EON_WAN_NETNS="$inode" \
         EON_WAN_PATH_PROFILE="$profile" EON_WAN_CUT="$cut_mode" EON_WAN_MEDIA="$media" EON_WAN_DISCOVERY="$discovery" \
         EON_FIELD_EXE="$field_exe" \
-        bash -c 'umask 077; exec "$@"' sh timeout --kill-after=2s 80s "$exe" \
+        bash -c 'umask 077; exec "$@"' sh timeout --kill-after=2s "$role_limit" "$exe" \
         --ignored --exact wan::netns::iroh_and_qos_tests_nat_path_change --nocapture \
         >"$2.log" 2>&1 &
     jobs+=("$!")
@@ -274,7 +277,7 @@ await_marker() {
 if [[ $discovery == n0 ]]; then
     openssl x509 -inform DER -in keys/leaf.der -out keys/leaf.pem
     registering=1
-    inside "$relay" sudo -n -u "$user" timeout --kill-after=2s 80s python3 -I "$pkarr_helper" \
+    inside "$relay" sudo -n -u "$user" timeout --kill-after=2s "$role_limit" python3 -I "$pkarr_helper" \
         "$parent" "$(stat -Lc %i "/run/netns/$relay")" >pkarr.log 2>&1 &
     jobs+=("$!")
     registering=0
@@ -335,17 +338,19 @@ PY
     inside "$relay" iptables -A INPUT -s 10.77.0.2 -p udp --sport 41770 --dport 3478
 fi
 if (( field )); then
-    # The field binary gets no fixture hints or additional media transport.
+    # The field binary gets no path hints. A second relay requires explicit opt-in.
     # Count sustained data-sized peer UDP, not the QAD probes to the relay.
-    inside "$nb" iptables -I FORWARD -o outer -d 10.77.0.2 -p udp --dport 41770 -m length --length 640:900
+    inside "$a" iptables -I INPUT -i wan0 -s 10.77.0.3 -p udp --sport 41770 -m length --length 640:900
     ipn "$na" route del blackhole 10.77.0.3/32
     ipn "$nb" route del blackhole 10.77.0.2/32
     role "$relay" field-relay
     await_marker ready
     role "$a" field-a
+    receiver_pid=$!
     role "$b" field-b
-    for ((i=0; i<200; i++)); do
-        packets=$(inside "$nb" iptables -nvxL FORWARD | awk '/length 640:900/{print $1}')
+    sender_pid=$!
+    for ((i=0; i<350; i++)); do
+        packets=$(inside "$a" iptables -nvxL INPUT | awk '/length 640:900/{print $1}')
         [[ $packets =~ ^[0-9]+$ ]] || exit 1
         if (( packets >= 24 )); then break; fi
         for pid in "${jobs[@]}"; do kill -0 "$pid" 2>/dev/null || exit 1; done
@@ -357,18 +362,24 @@ if (( field )); then
     ipn "$a" link del wan0
     touch cut
     # Both CLI processes must finish successfully before shutting down the services.
-    wait "${jobs[2]}"
-    wait "${jobs[3]}"
+    wait "$receiver_pid"
+    wait "$sender_pid"
     touch finished
     for pid in "${jobs[@]}"; do wait "$pid"; done
     jobs=()
     grep -Fx 'eon_continuity_v1 clock=receiver_monotonic' field-receipts.log
+    # Reserve at least 20 of the 30 seconds for recovery, on the capture clock.
+    awk -F= '/^mark=end rx_us=/{ok=($3 ~ /^[0-9]+$/ && $3+0 <= 10000000)} END{exit !ok}' field-receipts.log
     queued=$(<field-sent.log)
     [[ $queued =~ ^queued=[1-9][0-9]*$ ]]
     grep -E "^status=complete bracketed=true limit=1500 $queued " field-receipts.log
+    if (( media )); then
+        grep -qE '^seq=[0-9]+ .* phase=after via=standby_copy$' field-receipts.log
+        grep -qE '^status=complete .* missing=0 ' field-receipts.log
+    fi
     grep '^relay after interface removal:' field-relay.log
     cat pkarr.log
-    echo "private_field_capture=PASS direct_udp_packets_before_cut=$packets"
+    echo "private_field_capture=PASS peer_udp_arrivals_before_cut=$packets"
     exit 0
 fi
 role "$relay" relay

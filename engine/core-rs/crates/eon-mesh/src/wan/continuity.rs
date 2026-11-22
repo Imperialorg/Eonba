@@ -3,32 +3,52 @@
 //! sender timestamps on the wire: receipts and operator marks use the receiver clock.
 use std::{fmt, sync::mpsc, time::Instant};
 
-use super::{AudioPcmChunk, Duration, ReliableFrame, WanEndpoint};
+use super::{Arrival, AudioPcmChunk, Duration, ReliableFrame, WanEndpoint};
 use tokio::time::{sleep_until, timeout};
 
 const PERIOD: Duration = Duration::from_millis(20);
 const CONTROL_WAIT: Duration = Duration::from_secs(10);
 const DRAIN: Duration = Duration::from_millis(500);
 const READY: &[u8] = b"eon/continuity/1/ready";
+const READY_COPIES: &[u8] = b"eon/continuity/1/ready-bound-copies";
 const FINISH: &[u8] = b"eon/continuity/1/queued";
 const DRAINED: &[u8] = b"eon/continuity/1/drained";
 const SILENCE: [u8; 640] = [0; 640];
 
 #[derive(Clone, Copy)]
-pub struct CapturePlan(u16);
+pub struct CapturePlan {
+    seconds: u16,
+    copies: bool,
+}
 
 impl CapturePlan {
     pub fn new(seconds: u16) -> Option<Self> {
-        (1..=120).contains(&seconds).then_some(Self(seconds))
+        (1..=120).contains(&seconds).then_some(Self {
+            seconds,
+            copies: false,
+        })
+    }
+
+    /// Both callers must separately attach a bound standby before this capture.
+    /// This option never opens a transport or authorizes a different peer.
+    pub fn with_redundant_media(self) -> Self {
+        Self {
+            copies: true,
+            ..self
+        }
+    }
+
+    fn ready(self) -> ReliableFrame {
+        control(if self.copies { READY_COPIES } else { READY }, self.limit())
     }
 
     /// Agreed probe interval, excluding rendezvous and the final drain.
     pub fn span(self) -> Duration {
-        Duration::from_secs(self.0.into())
+        Duration::from_secs(self.seconds.into())
     }
 
     fn limit(self) -> u32 {
-        u32::from(self.0) * 50
+        u32::from(self.seconds) * 50
     }
 }
 
@@ -44,11 +64,14 @@ fn control(tag: &[u8], count: u32) -> ReliableFrame {
 /// Consumes the endpoint: another capture requires fresh provisioning/consent.
 pub async fn transmit(ep: WanEndpoint, plan: CapturePlan) -> Result<u32, &'static str> {
     let result = async {
+        if plan.copies && ep.media.is_none() {
+            return Err("missing_bound_standby");
+        }
         let ready = timeout(CONTROL_WAIT, ep.recv())
             .await
             .map_err(|_| "ready_timeout")?
             .map_err(|_| "ready_failed")?;
-        if ready != control(READY, plan.limit()) {
+        if ready != plan.ready() {
             return Err("invalid_ready_or_plan");
         }
         let mut frame = AudioPcmChunk {
@@ -59,7 +82,12 @@ pub async fn transmit(ep: WanEndpoint, plan: CapturePlan) -> Result<u32, &'stati
         let mut queued = 0;
         while queued < plan.limit() && Instant::now() < stop {
             frame.sequence_number = i64::from(queued + 1);
-            ep.send_audio(&frame).map_err(|_| "audio_queue_failed")?;
+            if plan.copies {
+                ep.send_redundant_audio(&frame).map(|_| ())
+            } else {
+                ep.send_audio(&frame)
+            }
+            .map_err(|_| "audio_queue_failed")?;
             queued += 1;
             sleep_until((Instant::now() + PERIOD).min(stop).into()).await;
         }
@@ -89,7 +117,7 @@ pub struct Capture {
     limit: u32,
     queued: Option<u32>,
     // First PCM decode of each unique sequence, in local arrival order.
-    receipts: Vec<(u32, Duration)>,
+    receipts: Vec<(u32, Duration, Arrival)>,
     duplicates: u32,
     marks: Vec<Duration>,
 }
@@ -110,8 +138,8 @@ impl Capture {
         let highest = |phase| {
             self.receipts
                 .iter()
-                .filter(|(_, at)| self.phase(*at) == phase)
-                .map(|(seq, _)| seq)
+                .filter(|(_, at, _)| self.phase(*at) == phase)
+                .map(|(seq, _, _)| seq)
                 .max()
         };
         self.status == "complete"
@@ -131,7 +159,7 @@ impl fmt::Display for Capture {
         let mut last = None;
         let mut max_gap = None;
         let mut marked_gap = None;
-        for &(seq, at) in &self.receipts {
+        for &(seq, at, via) in &self.receipts {
             let gap = last.map(|prev: Duration| (at - prev).as_micros());
             max_gap = max_gap.max(gap);
             if let ([begin, end], Some(prev)) = (self.marks.as_slice(), last)
@@ -142,10 +170,15 @@ impl fmt::Display for Capture {
             }
             writeln!(
                 f,
-                "seq={seq} rx_us={} gap_us={} phase={}",
+                "seq={seq} rx_us={} gap_us={} phase={}{}",
                 at.as_micros(),
                 value(gap),
-                self.phase(at)
+                self.phase(at),
+                match via {
+                    Arrival::Primary => "",
+                    Arrival::PrimaryCopy => " via=primary_copy",
+                    Arrival::StandbyCopy => " via=standby_copy",
+                },
             )?;
             last = Some(at);
         }
@@ -193,7 +226,10 @@ pub async fn receive(
     let mut deadline = origin + plan.span() + CONTROL_WAIT * 2;
     // Keep reading audio while the READY stream waits for its decode receipt.
     let finish = async {
-        timeout(CONTROL_WAIT, ep.send(&control(READY, limit)))
+        if plan.copies && ep.media.is_none() {
+            return Err("missing_bound_standby");
+        }
+        timeout(CONTROL_WAIT, ep.send(&plan.ready()))
             .await
             .map_err(|_| "ready_timeout")?
             .map_err(|_| "ready_failed")?;
@@ -220,12 +256,13 @@ pub async fn receive(
                     }
                     Err(status) => break status,
                 },
-                sample = ep.recv_audio() => {
+                sample = ep.recv_audio_observed() => {
                     let at = origin.elapsed();
-                    let Ok(pcm) = sample else { break "audio_receive_failed" };
+                    let Ok((pcm, via)) = sample else { break "audio_receive_failed" };
                     let Ok(seq) = u32::try_from(pcm.sequence_number) else { break "invalid_probe" };
                     if !(1..=limit).contains(&seq)
                         || pcm.timestamp_ms != 0 || pcm.pcm_data != SILENCE
+                        || plan.copies != (via != Arrival::Primary)
                     {
                         break "invalid_probe";
                     }
@@ -236,7 +273,7 @@ pub async fn receive(
                     if std::mem::replace(&mut seen[seq as usize], true) {
                         out.duplicates = out.duplicates.saturating_add(1);
                     } else {
-                        out.receipts.push((seq, at));
+                        out.receipts.push((seq, at, via));
                         if let Some(arm) = arm.take() { marks = Some(arm()); }
                     }
                 }
