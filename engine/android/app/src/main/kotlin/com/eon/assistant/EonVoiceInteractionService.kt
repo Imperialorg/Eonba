@@ -1,6 +1,7 @@
 package com.eon.assistant
 
 import android.content.Intent
+import android.os.Bundle
 import android.service.voice.VoiceInteractionService
 import android.service.voice.VoiceInteractionSession
 
@@ -23,6 +24,11 @@ class EonVoiceInteractionService : VoiceInteractionService() {
         } catch (_: SecurityException) {
             // The system can switch assistants while the service is starting.
         }
+    }
+
+    // API 34+: Android names the showing before binding the session. The ID is not consent.
+    override fun onPrepareToShowSession(args: Bundle, flags: Int) {
+        owner?.let { ProfileActionReview.prepared(it, flags, args) }
     }
 
     private fun release() {

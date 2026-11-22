@@ -79,17 +79,22 @@ public final class ProfileActionAcceptance extends Instrumentation {
         return null;
     }
 
-    private AccessibilityNodeInfo await(String id, String text) {
-        step = id.replace('_', '-');
+    private AccessibilityNodeInfo await(String id, String text) { return awaitAny(text, id); }
+
+    private AccessibilityNodeInfo awaitAny(String text, String... ids) {
+        step = ids[0].replace('_', '-');
         long until = SystemClock.elapsedRealtime() + 12_000;
         while (SystemClock.elapsedRealtime() < until) {
             ui.clearCache();
             AccessibilityNodeInfo r = root;
             if (r != null && r.refresh() && TextUtils.equals(APP, r.getPackageName())) {
-                for (AccessibilityNodeInfo n : r.findAccessibilityNodeInfosByViewId(APP + ":id/" + id)) {
-                    if (n.getWindowId() == r.getWindowId() && TextUtils.equals(APP, n.getPackageName())
-                            && n.isVisibleToUser() && (text == null || TextUtils.equals(text, n.getText()))) return n;
-                }
+                for (String id : ids)
+                    for (AccessibilityNodeInfo n : r.findAccessibilityNodeInfosByViewId(APP + ":id/" + id)) {
+                        if (n.getWindowId() != r.getWindowId() || !TextUtils.equals(APP, n.getPackageName())) continue;
+                        if (n.isVisibleToUser() && (text == null || TextUtils.equals(text, n.getText()))) return n;
+                        if ("profile_action_open".equals(id) && !n.isVisibleToUser())
+                            n.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.getId());
+                    }
             }
             SystemClock.sleep(80);
         }
@@ -107,29 +112,38 @@ public final class ProfileActionAcceptance extends Instrumentation {
     private AccessibilityNodeInfo unconfirmedPage() {
         AccessibilityNodeInfo n = await("profile_action_status", null);
         require(n.getText().toString().startsWith("Allow the selected EON assistant"));
+        requireAbsentFromWindow(n, "profile_action_confirm", "profile_action_outcome");
         return n;
+    }
+
+    private void requireAbsentFromWindow(AccessibilityNodeInfo anchor, String witness, String id) {
+        ui.clearCache();
+        require(anchor.refresh() && anchor.isVisibleToUser());
+        AccessibilityNodeInfo window = ownedRoot(anchor);
+        require(window != null && window.refresh() && window.getWindowId() == anchor.getWindowId());
+        require(window.findAccessibilityNodeInfosByViewId(APP + ":id/" + witness).stream()
+                .anyMatch(n -> n.isVisibleToUser() && n.getWindowId() == anchor.getWindowId()));
+        require(window.findAccessibilityNodeInfosByViewId(APP + ":id/" + id).stream()
+                .noneMatch(AccessibilityNodeInfo::isVisibleToUser));
     }
 
     // No death command here. Only the separately opted-in host may crash the matched package.
     private void observeDeathPhase() throws Exception {
-        click("profile_action_open");
+        // Do not clear the restored task to manufacture an empty private page on recovery.
+        AccessibilityNodeInfo page = awaitAny(null, "profile_action_status", "profile_action_open");
+        if ((APP + ":id/profile_action_open").equals(page.getViewIdResourceName())) click("profile_action_open");
         int sourceWindow = unconfirmedPage().getWindowId();
         if ("recover".equals(deathPhase)) {
             bindingClosed();
             shell("input keyevent KEYCODE_ASSIST"); // over the private page, WITHOUT confirming
             AccessibilityNodeInfo status = await("hud_status", "Session open");
             require(status.getWindowId() != sourceWindow);
-            AccessibilityNodeInfo card = ownedRoot(status);
             step = "unapproved-card";
             // Observe the live card, not an absent/stale window, for a whole ticket lifetime.
             long until = SystemClock.elapsedRealtime() + 5_500;
             do {
-                ui.clearCache();
-                require(card != null && card.refresh() && TextUtils.equals(APP, card.getPackageName())
-                        && card.getWindowId() == status.getWindowId() && status.refresh()
-                        && status.isVisibleToUser() && TextUtils.equals("Session open", status.getText()));
-                require(card.findAccessibilityNodeInfosByViewId(APP + ":id/hud_context").stream()
-                        .noneMatch(AccessibilityNodeInfo::isVisibleToUser));
+                requireAbsentFromWindow(status, "hud_end", "hud_context");
+                require(TextUtils.equals("Session open", status.getText()));
                 SystemClock.sleep(100);
             } while (SystemClock.elapsedRealtime() < until);
             click("hud_end");
@@ -140,7 +154,7 @@ public final class ProfileActionAcceptance extends Instrumentation {
         bindingClosed();
         if ("recover".equals(deathPhase)) {
             click("hud_end");
-            await("profile_action_status", SOURCE_DONE);
+            require(await("profile_action_outcome", SOURCE_DONE).getWindowId() == sourceWindow);
         } // arm leaves the authorized result visible for the host, without dismissing it
     }
 
@@ -174,25 +188,26 @@ public final class ProfileActionAcceptance extends Instrumentation {
                 AccessibilityNodeInfo r = ownedRoot(event.getSource(0));
                 if (r != null) root = r;
             });
-            shell("am start -f 0x14000000 -n com.eon.assistant/.AssistantActivity");
             if (deathPhase != null) {
+                shell("am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER"
+                        + " -f 0x10000000 -n com.eon.assistant/.AssistantActivity");
                 observeDeathPhase();
                 result.putString("profileDeath", "arm".equals(deathPhase) ? "ARMED-visible-action" : "PASS-fresh-consent");
                 finish(Activity.RESULT_OK, result);
                 return;
             }
+            shell("am start -f 0x14000000 -n com.eon.assistant/.AssistantActivity");
             click("profile_action_open");
-            require(await("profile_action_status", null).getText().toString().startsWith("Allow the selected EON assistant"));
+            unconfirmedPage();
             shell("input keyevent BACK");
             click("profile_action_open");
+            int sourceWindow = unconfirmedPage().getWindowId();
             click("profile_action_confirm");
             await("hud_context", denied ? "No authorized Android direct action result."
                     : COMPLETED);
             bindingClosed();
             click("hud_end");
-            String source = await("profile_action_status", null).getText().toString();
-            require(denied ? source.startsWith("Allow the selected EON assistant")
-                    : source.equals(SOURCE_DONE));
+            require((denied ? unconfirmedPage() : await("profile_action_outcome", SOURCE_DONE)).getWindowId() == sourceWindow);
             // The second context route is a user-volunteered setting, not a direct action.
             shell("am start -f 0x14000000 -n com.eon.assistant/.AssistantActivity");
             click("assistant_context_review");
@@ -204,9 +219,7 @@ public final class ProfileActionAcceptance extends Instrumentation {
                     : "EON controls shared: CPU timing OFF. Check model profile in controls without measuring this process. No screen contents collected.");
             click("hud_end");
             shell("input keyevent KEYCODE_ASSIST");
-            await("hud_status", "Session open");
-            require(root.findAccessibilityNodeInfosByViewId(APP + ":id/hud_context").stream()
-                    .noneMatch(AccessibilityNodeInfo::isVisibleToUser));
+            requireAbsentFromWindow(await("hud_status", "Session open"), "hud_end", "hud_context");
             click("hud_end");
             bindingClosed();
             code = Activity.RESULT_OK;

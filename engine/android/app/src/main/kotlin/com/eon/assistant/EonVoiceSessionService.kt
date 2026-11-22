@@ -107,7 +107,10 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
         firstCandidate = null
         val ticket = if (eligible) ControlsAssist.takeShow(args, showFlags) else null
         val allowed = surface.show(review != null || ticket != null || userInvokedVoiceHud(showFlags), eligible)
-        if (allowed) actionReview = review
+        if (allowed && review != null) {
+            actionReview = review
+            review.endShowing = { if (actionReview === review) closeHud() }
+        }
         if (allowed && ticket != null) {
             contextDisplay = ticket
             if (contextSharingEnabled()) {
@@ -152,7 +155,7 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
 
     override fun onDirectActionsInvalidated(activityId: ActivityId) {
         val r = actionReview ?: return
-        if (!r.notified || !r.valid() || r.presenting || sourceId != null) return
+        if (!r.sameInteractor() || !r.valid() || r.presenting || sourceId != null) return
         // Wait for the owner's local interactor before transferring focus, even for denial.
         if (!contextSharingEnabled()) { presentAction(r, null); return }
         if (!authorized(r)) return
@@ -165,20 +168,20 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
 
     private fun discover(r: ProfileActionReview) {
         val id = assistId ?: return
-        if (id != sourceId || !authorized(r) || r.discovering) return
+        if (id != sourceId || !authorized(r) || !r.sameInteractor() || r.discovering) return
         r.discovering = true
         r.permitted = { authorized(r) }
         val stop = CancellationSignal().also { actionStop = it }
         try {
             requestDirectActions(id, stop, context.mainExecutor) { actions ->
-                if (!authorized(r)) return@requestDirectActions
+                if (!authorized(r) || !r.sameInteractor()) return@requestDirectActions
                 val action = if (r.offered) actions.singleOrNull() else null
                 if (action?.id != ProfileActionReview.ACTION) return@requestDirectActions presentAction(r, null)
-                r.performing = true
+                val permit = r.beginPerform() ?: return@requestDirectActions
                 try {
-                    performDirectAction(action, Bundle().apply { putBinder(ProfileActionReview.KEY, r.token) },
-                        stop, context.mainExecutor) { result ->
-                        if (authorized(r)) presentAction(r, if (r.completed) result?.getString(ProfileActionReview.RESULT) else null)
+                    performDirectAction(action, permit, stop, context.mainExecutor) { result ->
+                        if (authorized(r) && r.sameInteractor())
+                            presentAction(r, if (r.completed) result?.getString(ProfileActionReview.RESULT) else null)
                     }
                 } catch (_: RuntimeException) { presentAction(r, null) }
             }
@@ -202,7 +205,7 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
     private val actionResultGuard = object : Runnable {
         override fun run() {
             val r = actionReview ?: return
-            if (r.source.review !== r || !contextSharingEnabled() || !eligible()) closeHud()
+            if (!r.ownsPage() || !r.sameInteractor() || !contextSharingEnabled() || !eligible()) closeHud()
             else main.postDelayed(this, 300)
         }
     }
@@ -428,7 +431,7 @@ private class EonVoiceSession(context: Context) : VoiceInteractionSession(contex
     }
 
     private fun clearShowing() {
-        actionReview?.permitted = null
+        actionReview?.let { it.source.release(it) }
         actionReview = null
         actionStop?.cancel()
         actionStop = null
